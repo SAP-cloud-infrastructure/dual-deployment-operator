@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: SAP SE or an SAP affiliate company
+# SPDX-License-Identifier: Apache-2.0
+version = 1
+SPDX-PackageName = "go-makefile-maker"
+SPDX-PackageDownloadLocation = "https://github.com/sapcc/go-makefile-maker"
+
+[[annotations]]
+path = [
+  ".github/CODEOWNERS",
+  ".github/renovate.json",
+  ".gitignore",
+  ".hyperspace/pull_request_bot.json",
+  ".license-scan-overrides.jsonl",
+  ".license-scan-rules.json",
+  "build/**/*",
+]
+SPDX-FileCopyrightText = "SAP SE or an SAP affiliate company"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = [
+  "go.mod",
+  "go.sum",
+  "Makefile.maker.yaml",
+  "vendor/modules.txt",
+]
+SPDX-FileCopyrightText = "SAP SE or an SAP affiliate company"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = [
+  "internal/makefile/license-scan-overrides.jsonl.tmpl",
+  "internal/makefile/license-scan-rules.json",
+  "internal/reuse/go-licence-detector.tmpl",
+  "logo*.png",
+]
+SPDX-FileCopyrightText = "SAP SE or an SAP affiliate company"
+SPDX-License-Identifier = "Apache-2.0"
