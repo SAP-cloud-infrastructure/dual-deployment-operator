@@ -87,15 +87,15 @@ var _ = Describe("CRD CEL validation", func() {
 		})
 
 		It("rejects a kustomize source with hostPath truly omitted (unstructured)", func() {
-			cr := &unstructured.Unstructured{Object: map[string]interface{}{
+			cr := &unstructured.Unstructured{Object: map[string]any{
 				"apiVersion": "dual-deployment-operator.cc.sap/v1alpha1",
 				"kind":       "DualDeploymentOperator",
-				"metadata":   map[string]interface{}{"name": "cel-kust-nohost-omitted", "namespace": "default"},
-				"spec": map[string]interface{}{
-					"source": map[string]interface{}{
-						"kustomize": map[string]interface{}{"url": "https://g//p?ref=v1", "remotePath": "remote"},
+				"metadata":   map[string]any{"name": "cel-kust-nohost-omitted", "namespace": "default"},
+				"spec": map[string]any{
+					"source": map[string]any{
+						"kustomize": map[string]any{"url": "https://g//p?ref=v1", "remotePath": "remote"},
 					},
-					"remoteKubeconfig": map[string]interface{}{"secretName": "kc", "key": "kubeconfig"},
+					"remoteKubeconfig": map[string]any{"secretName": "kc", "key": "kubeconfig"},
 				},
 			}}
 			err := k8sClient.Create(ctx, cr)
