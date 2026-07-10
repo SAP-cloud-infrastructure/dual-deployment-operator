@@ -53,7 +53,7 @@ jobs:
         with:
           coverage-artifact-name: code-coverage
           coverage-file-name: cover.out
-          root-package: dual-deployment-operator
+          root-package: github.com/SAP-cloud-infrastructure/dual-deployment-operator
     permissions:
       actions: read
       contents: read
