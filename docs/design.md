@@ -343,7 +343,6 @@ spec:
 
     - filterKinds:
         kinds: [Service]
-        source: upstream
 
     # Cross-stream: packages remote-render WebhookConfigurations into a
     # ConfigMap on the host so the webhook-injector sidecar can consume them.
@@ -394,7 +393,7 @@ spec:
                 volumes:
                   - {name: webhook-certs, emptyDir: {}}
     - rewriteWebhookURL: {urlPrefix: "https://ipam-capi-remote-webhook-service:443"}
-    - filterKinds: {kinds: [Service], source: upstream}
+    - filterKinds: {kinds: [Service]}
     - packageWebhookConfigsForInjector:
         configMapName: ipam-capi-remote-webhook-config
 ```
@@ -416,7 +415,7 @@ spec:
           crd:  {enable: true}
   remoteKubeconfig: {secretName, key}
   transformations:
-    - filterKinds: {kinds: [Service], source: upstream}
+    - filterKinds: {kinds: [Service]}
 ```
 
 The CR is the entire configuration surface. Per-cluster differences live in `spec.source.helm.values` (Helm) or are baked into the pinned kustomize source (kustomize; per-cluster overrides via different pinned refs, or via optional future patches — see §9.4). Mode-specific settings (which upstream subchart parts to enable per mode for Helm; which overlay directory for kustomize) live in mode-specific fields under the source discriminator. Shoot kubeconfig comes from Gardener's token-requestor per standard practice (see §3.6).
@@ -457,7 +456,7 @@ The kustomize source is expected to have `host/` and `remote/` (or the paths con
 
 Kustomize has no Helm-values equivalent; per-cluster overrides are baked into the pinned kustomize source. If a chart needs per-cluster differences (image tags, apiserver URL), it either uses different pinned refs per environment or adopts a future CR-side patch mechanism (§9.4). For today's five candidate charts, ipam-capi's needs can be met with a pinned image tag in its kustomize source per release cycle.
 
-**Origin tagging**. Both source types produce a stream of unstructured Kubernetes manifests per render. The operator tags every manifest with `dual-deployment-operator.cc.sap/origin: upstream` if it originated from the upstream subchart (Helm) or upstream reference (kustomize), and expects the chart's own templates to carry `dual-deployment-operator.cc.sap/origin: additions` via `_helpers.tpl`. This tag is used by selective transformations like `filterKinds: source: upstream` and `patch: target: {origin: upstream}` to distinguish upstream from our additions.
+**Origin tagging**. Both source types produce a stream of unstructured Kubernetes manifests per render. The operator tags every manifest with `dual-deployment-operator.cc.sap/origin: upstream` if it originated from the upstream subchart (Helm) or upstream reference (kustomize), and expects the chart's own templates to carry `dual-deployment-operator.cc.sap/origin: additions` via `_helpers.tpl`. This tag lets selective transformations distinguish upstream from our additions — used by `patch: target: {origin: upstream}` and, optionally, `filterKinds: source: upstream`. Neither candidate operator relies on the origin distinction for `filterKinds` (they filter all Services regardless of origin); the tag's load-bearing consumer is `patch` targeting.
 
 
 ### 3.4 Transformation menu
@@ -560,8 +559,9 @@ Drops resources of listed kinds from the manifest stream (neither host nor remot
 ```yaml
 - filterKinds:
     kinds: [Service, ConfigMap]
-    source: upstream
 ```
+
+`source` (optional) restricts the filter to resources of a given origin (`upstream` or `additions`). Omit it — as every candidate operator does — to drop all resources of the listed kinds regardless of origin. In practice the chart already suppresses unwanted upstream resources at render time via mode values / overlays, so an unqualified `filterKinds` is sufficient. `source` exists as an escape hatch for the rare case where an upstream render hardcodes a resource you cannot disable via values *and* your own additions emit a resource of the same kind in the same render that must survive the filter. It relies on the `origin` annotation (see §3.3).
 
 **Stays typed** because it's a stream filter (removes resources from the manifest list), not a patch on a resource. JSON Patch and strategic-merge operate within a single resource; they can't remove a resource from the stream.
 
@@ -742,7 +742,7 @@ Rendered manifests:
 | `ConfigMap/macdb` | additions | host |
 | `Service/metal-operator-webhook-service` | upstream (if webhook.enable were true — it's false here, so not emitted) | — |
 
-After transformations: `injectInitContainer` patches the Deployment with the sidecar. `filterKinds Service source: upstream` drops any upstream Services (none emitted in host mode since `webhook.enable: false`, but the transformation runs harmlessly).
+After transformations: `patch` injects the sidecar into the Deployment. `filterKinds {kinds: [Service]}` drops any Services (none emitted in host mode since `webhook.enable: false`, but the transformation runs harmlessly).
 
 Result: apply all resources in this render to the seed cluster (host).
 
@@ -769,7 +769,7 @@ Rendered manifests:
 
 After transformations:
 - `rewriteWebhookURL` — WebhookConfigurations get URL-based `clientConfig` (service replaced by url).
-- `filterKinds source: upstream, kinds: [Service]` — drops upstream's webhook Service.
+- `filterKinds {kinds: [Service]}` — drops the webhook Service.
 - `packageWebhookConfigsForInjector` (cross-stream) — removes WebhookConfigurations from remote render and emits them wrapped in a ConfigMap on host render.
 
 Note: upstream's Role (leader-election) stays a Role — no renaming under direct-apply. Our `metal-token-rotate` Role also stays a Role. Both apply cleanly to the shoot with their original namespace scope.
@@ -1293,7 +1293,7 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx, req) (ctrl.Result, err
 **Key differences from a single-render architecture**:
 - Source is rendered twice with mode-specific parameters (Helm: different values maps; kustomize: different overlay paths).
 - No `split` step — each render's output is a coherent bucket for its target cluster.
-- Per-render transformations apply to each render independently. `filterKinds source: upstream` runs on both renders, dropping upstream Services from whichever render emits them.
+- Per-render transformations apply to each render independently. `filterKinds {kinds: [Service]}` runs on both renders, dropping Services from whichever render emits them.
 - Cross-stream transformations run in a separate phase after per-render. Currently one type: `packageWebhookConfigsForInjector` moves WebhookConfigurations from remote render into a ConfigMap in host render.
 - Only `origin` matters for transformation targeting; there is no `target` on manifests (implicit from the render pipeline).
 

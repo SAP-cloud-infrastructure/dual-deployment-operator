@@ -968,7 +968,7 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 **Key differences from a single-render architecture**:
 - Source is rendered twice with mode-specific parameters.
 - No `split` step — each render's output is a coherent set for its target cluster.
-- Transformations apply to each render independently. `filterKinds source: upstream` runs on both, dropping upstream Services from whichever render emits them.
+- Transformations apply to each render independently. `filterKinds {kinds: [Service]}` runs on both, dropping Services from whichever render emits them.
 - Only `origin` matters for transformation targeting; there is no `target` on manifests.
 
 ### Shoot client construction
