@@ -9,15 +9,16 @@
 
 ## TL;DR
 
-A kubebuilder operator (`dual-deployment-operator`) that pulls **one artifact per operator** (Helm chart or kustomize source) from `sapcc/helm-charts`, renders it, applies typed Go transformations, splits the manifest stream by target cluster, and **applies each half directly to its target Kubernetes API** — host resources to the seed via the operator's own service account, remote resources to the shoot via a Gardener-provided kubeconfig.
+A kubebuilder operator (`dual-deployment-operator`) that pulls **one artifact per operator** (Helm chart or kustomize source) from `sapcc/helm-charts`, **renders it twice with mode-specific configuration** (once for host, once for remote), applies typed Go transformations to each render independently, and **applies each render directly to its target Kubernetes API** — host resources to the seed via the operator's own service account, remote resources to the shoot via a Gardener-provided kubeconfig.
 
 Key characteristics:
 
+- **Two-render, no split.** Chart/kustomization determines what belongs to host vs remote via mode-specific configuration (Helm: `hostValues`/`remoteValues`; kustomize: `hostPath`/`remotePath` selecting overlay directories). Each render produces only the resources for its target cluster. Operator does not decide routing; the source decides via what it emits per mode.
 - **One artifact per operator, self-contained.** No wrapper + additions split.
 - **Operator supports both Helm and kustomize** via a CR source discriminator (`spec.source.helm` xor `spec.source.kustomize`).
-- **Bounded transformation menu:** 5 typed Go transforms (`injectInitContainer`, `renameKind`, `rewriteWebhookURL`, `addLabels`, `filterKinds`). No DSL.
+- **Small transformation menu:** 4 types — `patch` (DSL: strategic-merge or JSON Patch), `rewriteWebhookURL`, `filterKinds`, `packageWebhookConfigsForInjector` (cross-stream). No general-purpose DSL, no scripting. `patch` replaces the historical `injectInitContainer` and `addLabels` typed types for patch-shaped operations. `renameKind` is not needed (was an artifact of ManagedResource-based delivery).
 - **Dual-cluster direct apply** — operator holds two Kubernetes clients per CR, applies host + remote uniformly with server-side apply + drift correction + per-resource health tracking. No `ManagedResource` wrapping.
-- **webhook-injector retained** for its unique role (TLS cert generation + rotation + caBundle patching on shoot). Coexists cleanly with operator via SSA field managers.
+- **webhook-injector retained, unchanged.** It keeps its existing contract: read WebhookConfigurations from a source ConfigMap (`--webhook-config-name`), inject the current caBundle, and apply them to the shoot; plus TLS cert generation and rotation. The operator produces the source ConfigMap (via `packageWebhookConfigsForInjector`) but does NOT deliver WebhookConfigurations, does NOT stamp caBundle anywhere, and does NOT co-own any injector-managed field. The operator and injector write disjoint resources on the shoot — no shared-resource field ownership is required.
 - **Zero `make build-` targets remain.** All pre-rendered YAML deleted.
 - **Estimated size:** ~1000-1300 lines of Go, shared across all five current remote operators.
 - **Deployment topology**: per-shoot (one operator instance per shoot-cp namespace), matching the webhook-injector's existing per-shoot footprint.
@@ -53,13 +54,13 @@ For each of the five operators there is a wrapper Helm chart under `system/<oper
    - Filter unwanted kinds (Service, sometimes ConfigMap/Secret)
    - Rename `Role` → `ClusterRole` (upstream emits namespace-scoped Roles; we deploy to a shared namespace and need cluster-wide grants)
    - Rewrite Validating/MutatingWebhookConfiguration `clientConfig.service` → `.url` (virtual cluster can't route to seed Services)
-   - Label CRDs (metal-operator only) with `metal-operator-remote-webhook-injector: "true"` so a companion webhook-injector controller manages their caBundles
+   - Label the CRDs+RBAC `ManagedResource` (metal-operator only) with the webhook-injector's `--managed-resource-label` so the injector's `ManagedResourceReconciler` finds it, walks its embedded CRDs, and stamps caBundle into those with a conversion webhook
    - Inject the webhook-injector sidecar as an `initContainer` into upstream's Deployment (metal + ipam-capi)
 4. Commits the transformed YAML into the chart: `managedresources/*.yaml`, `webhooks.yaml`, `templates/controller-manager.yaml`
 5. Delivers remote content via **three separate paths**:
    - **CRDs, RBAC, ServiceAccount**: `templates/managedresource.yaml` (chart Helm template) wraps each pre-baked YAML doc as a `ManagedResource + Secret` pair. Gardener's `gardener-resource-manager` (GRM) in each shoot's control plane picks up the MR and applies to the shoot.
    - **WebhookConfigurations**: `webhooks.yaml` (pre-rendered with URL rewrite) is packed into a `webhook-config` ConfigMap on the host via `.Files.Get`. The **webhook-injector sidecar** (mounted alongside each operator Pod) reads this ConfigMap and applies the WebhookConfigurations to the shoot cluster via a mounted shoot kubeconfig.
-   - **caBundle rotation**: webhook-injector also generates and rotates TLS certs, storing them in a seed-side Secret and patching `.webhooks[].clientConfig.caBundle` on the shoot's WebhookConfigurations (and on CRDs with conversion webhooks) whenever certs rotate.
+   - **caBundle rotation**: webhook-injector also generates and rotates TLS certs, storing them in a seed-side Secret. On rotation it (a) re-applies the shoot's WebhookConfigurations with a fresh caBundle (via the source-ConfigMap path above), and (b) stamps `.spec.conversion.webhook.clientConfig.caBundle` into CRDs embedded in the labelled seed-side `ManagedResource` (via its `ManagedResourceReconciler`, selected by `--managed-resource-label`). Note: the injector's CRD-stamping path depends on the CRDs being delivered as a Gardener `ManagedResource` on the seed — it does not read any label on the shoot-side CRD objects themselves.
 
 Concretely: `system/metal-operator-remote/managedresources/crds-and-rbac.yaml` is 5542 lines of pre-rendered upstream content, committed to git and regenerated by `make build-metal-operator-remote`.
 
@@ -120,7 +121,7 @@ Independent of the rendering choice, four delivery options were considered for g
 |---|---|---|---|---|
 | **A. Preserve today's mechanisms** (baseline) | Flux HelmRelease + Helm install | ManagedResource + GRM | webhook-injector sidecar reads seed ConfigMap, applies to shoot | webhook-injector generates + rotates certs, patches caBundles in shoot |
 | **B. Option 1** | Operator directly (SSA) | Operator directly (second Kubernetes client) | webhook-injector unchanged | webhook-injector unchanged |
-| **C. Option 2 (chosen)** | Operator directly (SSA) | Operator directly (second Kubernetes client) | **Operator directly** | webhook-injector unchanged (patches caBundle only; no longer delivers WebhookConfigs) |
+| **C. Option 2 (chosen)** | Operator directly (SSA) | Operator directly (second Kubernetes client) | **webhook-injector, from a source ConfigMap the operator produces** (`packageWebhookConfigsForInjector`) | webhook-injector unchanged (certs + caBundle injection into the WebhookConfigs it delivers) |
 | **D. Option 3** | Operator directly (SSA) | Operator directly (second Kubernetes client) | Operator directly | **Operator absorbs cert lifecycle** — webhook-injector deleted |
 
 The GRM-based baseline (A) is the current architecture. Options B/C/D progressively fold delivery mechanisms into the operator.
@@ -155,15 +156,15 @@ The half-measure. Trade-offs:
 
 Trade-offs:
 
-- ✅ **Single remote-delivery path**: operator applies every remote resource (CRD, RBAC, WebhookConfiguration, etc.) directly via one Kubernetes client
-- ✅ Chart emits **no delivery-shaped resources** — no MR wrapper template, no `webhook-config` ConfigMap, no `.Files.Get` indirection. Chart is purely a manifest source; operator does all delivery.
+- ✅ **Operator is the single delivery path for CRDs, RBAC, ServiceAccounts, and the operator's own additions** — applied directly via one Kubernetes client, no `ManagedResource` wrapping
+- ✅ Chart emits **no delivery-shaped resources** — no MR wrapper template, no hand-authored `webhook-config` ConfigMap, no `.Files.Get` indirection. Chart is purely a manifest source.
 - ✅ Drift correction and health tracking apply uniformly to host and remote via the same operator machinery (which we build anyway for host)
 - ✅ Deployment topology becomes crisper: one operator per shoot-cp namespace with two Kubernetes clients (seed + shoot)
-- ✅ webhook-injector's scope shrinks to its actual specialty (cert generation, rotation, caBundle patching) — cleaner separation of concerns
-- ✅ CR status becomes the single source of truth for remote state — no need to inspect MR status or injector ConfigMap contents
-- ⚠️ Departs from Gardener MR/GRM idiom for remote delivery (but the webhook-injector already deviates, so we're not introducing a new deviation, just accepting the direct-apply pattern for CRDs/RBAC too)
+- ✅ webhook-injector keeps its existing, unchanged contract (source-ConfigMap delivery of WebhookConfigs + cert lifecycle) — no injector code change required
+- ✅ CR status is the single source of truth for the resources the operator delivers
+- ⚠️ WebhookConfigurations are still delivered by the injector, not the operator — the operator produces the injector's source ConfigMap via the `packageWebhookConfigsForInjector` cross-stream transformation (§3.4.6). This preserves the injector's contract without a `make build-` step.
 - ⚠️ Requires the operator to hold a shoot kubeconfig — same credential model as the webhook-injector today, via Gardener token-requestor. No new mechanism.
-- ⚠️ Requires SSA field-manager discipline between operator and webhook-injector on WebhookConfigurations (operator owns everything except `.webhooks[].clientConfig.caBundle`; injector owns caBundle). Standard SSA co-ownership pattern.
+- ⚠️ Operator and injector write **disjoint** resources on the shoot (operator: CRDs/RBAC/SA/additions; injector: WebhookConfigurations). No shared-resource field ownership is required, so no SSA co-ownership discipline is needed. The injector uses `Create`/`Update`, not SSA.
 
 **Preferred over Option 1 because**:
 
@@ -172,7 +173,7 @@ Trade-offs:
 | Remote delivery paths | 2 (operator + injector) | 1 (operator only) |
 | Chart complexity | Still has `webhook-config` ConfigMap contract with injector | Chart emits pure manifest resources; no delivery contracts |
 | WebhookConfig update flow | Chart → ConfigMap → injector reads → injector applies | Chart → operator applies directly |
-| Injector's role | Full delivery + certs + caBundle | Certs + caBundle only (delivery removed) |
+| Injector's role | Full delivery + certs + caBundle | Delivery of WebhookConfigs (from operator-produced ConfigMap) + certs + caBundle injection |
 | Operator scope | Applies to host + partial remote | Applies to host + full remote |
 | Debug story when webhook fails to appear in shoot | "Which of the two paths is stuck? Check injector logs and CR status" | "Check CR status" |
 | Adding a new remote resource kind | Depends on kind — CRD/RBAC goes through operator, WebhookConfig-like things go through injector, other kinds need routing decision | Everything goes through operator, kind-agnostic |
@@ -202,29 +203,34 @@ Option 3 remains a valid future consolidation if the injector becomes a maintena
                             │
               ┌─────────────┴─────────────┐
               ▼                           ▼
-        Helm SDK Pull              Krusty (kustomize)
-        (charts, OCI/HTTP)         (kustomize sources)
+   HOST RENDER                      REMOTE RENDER
+   Helm SDK: values +               Helm SDK: values +
+     hostValues                       remoteValues
+        or                              or
+   Krusty: url/hostPath             Krusty: url/remotePath
+              │                           │
+              ▼                           ▼
+    Host manifest stream         Remote manifest stream
+              │                           │
+              ▼                           ▼
+    Per-render transforms        Per-render transforms
+    (5 typed types)              (5 typed types)
               │                           │
               └─────────────┬─────────────┘
                             │
-                    Rendered manifest stream
-                            │
                             ▼
-              Apply transformations in order
-              (typed Go menu, per-CR opt-in)
-                            │
-                            ▼
-              Split by target (host / remote / drop)
-              (kind rules + optional annotation)
+             Cross-stream transforms
+             (packageWebhookConfigsForInjector, ...)
+             (may move resources between renders)
                             │
               ┌─────────────┴─────────────┐
               ▼                           ▼
-      seed Kubernetes client       shoot Kubernetes client
-      (in-cluster SA)              (kubeconfig from Gardener
-              │                     token-requestor Secret)
-              │                           │
-              ▼                           ▼
-   Server-side apply to seed    Server-side apply to shoot
+    seed Kubernetes client       shoot Kubernetes client
+    (in-cluster SA)              (kubeconfig from Gardener
+              │                   token-requestor Secret)
+              ▼                           │
+   Server-side apply to seed              ▼
+              │                Server-side apply to shoot
               │                           │
               └─────────────┬─────────────┘
                             │
@@ -236,23 +242,37 @@ Option 3 remains a valid future consolidation if the injector becomes a maintena
                      CR status update
 ```
 
-**Coexistence with webhook-injector** (unchanged from today's role, but with reduced scope):
+Two independent renders per reconcile. Each render produces only the resources for its target cluster — the chart/kustomization is responsible for emitting the right set per mode via values or overlay path. Operator does not decide routing; the source decides.
+
+**Cross-stream transformations** run after per-render transforms complete. Currently used for one purpose: `packageWebhookConfigsForInjector` moves WebhookConfigurations from the remote render into a ConfigMap in the host render, so the webhook-injector sidecar can consume them via its source-ConfigMap contract (§3.4.6, §3.8).
+
+**Coexistence with webhook-injector**:
 
 ```
 webhook-injector (sidecar of each operator Pod, per shoot)
      │
      ├── Watches cert Secret in seed
      ├── Generates + rotates TLS certs (writes to cert Secret)
-     └── Applies caBundle updates to shoot's WebhookConfigurations
-         and CRDs (via mounted shoot kubeconfig, SSA with its own
-         field manager — coexists with operator writes)
+     ├── Watches source ConfigMap (produced by operator's
+     │   packageWebhookConfigsForInjector transformation)
+     └── Applies WebhookConfigurations from the ConfigMap to the
+         shoot with the current caBundle injected, keeping them
+         current as certs rotate
 ```
 
-The operator and injector write to overlapping resources (WebhookConfigurations) but distinct fields (operator owns everything except caBundle; injector owns caBundle). Server-side apply's field-ownership model handles this cleanly.
+Injector's role is essentially unchanged from today (source ConfigMap → deliver WebhookConfigs with caBundle injected + rotate certs). The only difference: the source ConfigMap is produced by the operator from live-rendered WebhookConfigurations rather than by the chart from pre-baked `webhooks.yaml`.
+
+The operator and injector write **disjoint** resources on the shoot:
+- Operator (field manager `dual-deployment-operator`) applies CRDs, RBAC, ServiceAccounts, and the operator's own additions. It does not touch WebhookConfigurations and does not stamp caBundle anywhere.
+- Injector applies WebhookConfigurations (with caBundle) via `Create`/`Update` — it does not use server-side apply, and it does not co-own any resource with the operator.
+
+Because the two components never write the same resource on the shoot, no SSA field-ownership coordination is required.
+
+**CRD conversion-webhook caBundle (open limitation)**: the injector's only CRD caBundle-stamping path is its `ManagedResourceReconciler`, which selects Gardener `ManagedResource` objects on the seed by `--managed-resource-label` and stamps caBundle into their embedded CRDs. This design deliberately does not produce `ManagedResource` objects, so that path does not fire. For operators whose CRDs carry a conversion webhook (metal-operator today), the caBundle on `.spec.conversion.webhook.clientConfig` is therefore **not** managed by this design as written. See §9.2 for the open question and candidate resolutions. The operator does not take on this responsibility — it is out of scope per the operator/injector separation.
 
 ### 3.2 Custom Resource
 
-Full example (metal-operator):
+Full example (metal-operator, Helm source):
 
 ```yaml
 apiVersion: dual-deployment-operator.cc.sap/v1alpha1
@@ -267,8 +287,11 @@ spec:
       repo: oci://keppel.eu-de-1.cloud.sap/ccloud-helm
       name: metal-operator-remote
       version: "0.7.x"
+
+      # Common values — applied to BOTH host and remote renders.
+      # Per-cluster stuff (image args, mac database, apiserver URL) lives here.
       values:
-        metal-operator-core:            # upstream sub-chart values pass-through
+        metal-operator-core:
           controllerManager:
             manager:
               args: [--mac-prefixes-file=/etc/macdb/macdb.yaml, ...]
@@ -277,48 +300,66 @@ spec:
         apiserverURL: "api.m-eu-de-1.cp..."
         webhookInjector: {image: "keppel.../webhook-injector", tag: "sha-..."}
 
+      # Host-only overrides — applied ONLY to the host render.
+      # Enables the parts of the upstream subchart that belong on host.
+      hostValues:
+        metal-operator-core:
+          controllerManager: {enable: true}
+
+      # Remote-only overrides — applied ONLY to the remote render.
+      # Enables the parts of the upstream subchart that belong on remote.
+      remoteValues:
+        metal-operator-core:
+          rbac:    {enable: true}
+          crd:     {enable: true}
+          webhook: {enable: true}
+
   # Kubeconfig for the shoot cluster.
   # Mounted from a Gardener token-requestor-managed Secret in this namespace.
   remoteKubeconfig:
-    secretName: <operator>-remote-kubeconfig
+    secretName: metal-operator-remote-kubeconfig
     key: kubeconfig
 
   transformations:
-    - injectInitContainer:
-        selector: {kind: Deployment, name: metal-operator-controller-manager}
-        container:
-          name: webhook-injector
-          image: "keppel.global.cloud.sap/.../webhook-injector:sha-fd8a075..."
-          args: [--webhook-config-name=metal-operator-remote-webhook-config]
-          volumeMounts:
-            - {name: webhook-certs, mountPath: /tmp/k8s-webhook-server/serving-certs, readOnly: true}
-        additionalVolumes:
-          - {name: webhook-certs, emptyDir: {}}
-
-    - renameKind:
-        from: Role
-        to: ClusterRole
-        source: upstream
+    # Sidecar injection via strategic-merge patch on the upstream Deployment.
+    - patch:
+        target: {kind: Deployment, name: metal-operator-controller-manager}
+        strategicMerge:
+          spec:
+            template:
+              spec:
+                initContainers:
+                  - name: webhook-injector
+                    image: "keppel.global.cloud.sap/.../webhook-injector:sha-fd8a075..."
+                    args: [--webhook-config-name=metal-operator-remote-webhook-config]
+                    volumeMounts:
+                      - {name: webhook-certs, mountPath: /tmp/k8s-webhook-server/serving-certs, readOnly: true}
+                volumes:
+                  - name: webhook-certs
+                    emptyDir: {}
 
     - rewriteWebhookURL:
         urlPrefix: "https://metal-operator-remote-webhook-service:443"
-
-    - addLabels:
-        selector: {kind: CustomResourceDefinition}
-        labels:
-          metal-operator-remote-webhook-injector: "true"
 
     - filterKinds:
         kinds: [Service]
         source: upstream
 
+    # Cross-stream: packages remote-render WebhookConfigurations into a
+    # ConfigMap on the host so the webhook-injector sidecar can consume them.
+    # Removes WebhookConfigurations from the remote-render (they're delivered
+    # by the injector, not by the operator's direct apply to the shoot).
+    - packageWebhookConfigsForInjector:
+        configMapName: metal-operator-remote-webhook-config
+
+
 status:
   # Populated by the operator on each reconcile.
   hostResources:
-    - {kind: Deployment, name: metal-operator-controller-manager, status: Healthy, lastApplied: ...}
+    - {kind: Deployment, name: metal-operator-controller-manager, health: Healthy, lastApplied: ...}
     - ...
   remoteResources:
-    - {kind: CustomResourceDefinition, name: endpoints.metal.ironcore.dev, status: Healthy, lastApplied: ...}
+    - {kind: CustomResourceDefinition, name: endpoints.metal.ironcore.dev, health: Healthy, lastApplied: ...}
     - ...
   conditions:
     - {type: Ready, status: "True", ...}
@@ -339,94 +380,167 @@ spec:
     secretName: ipam-capi-remote-kubeconfig
     key: kubeconfig
   transformations:
-    - injectInitContainer: {...}
-    - renameKind: {from: Role, to: ClusterRole, source: upstream}
+    - patch:
+        target: {kind: Deployment, name: ipam-capi-controller-manager}
+        strategicMerge:
+          spec:
+            template:
+              spec:
+                initContainers:
+                  - name: webhook-injector
+                    image: "..."
+                    args: [--webhook-config-name=ipam-capi-remote-webhook-config]
+                    volumeMounts: [...]
+                volumes:
+                  - {name: webhook-certs, emptyDir: {}}
     - rewriteWebhookURL: {urlPrefix: "https://ipam-capi-remote-webhook-service:443"}
     - filterKinds: {kinds: [Service], source: upstream}
+    - packageWebhookConfigsForInjector:
+        configMapName: ipam-capi-remote-webhook-config
 ```
 
-For simpler operators (boot / argora / khalkeon):
+For simpler operators (boot / argora / khalkeon), transformations reduce to a single filter:
 
 ```yaml
 spec:
   source:
-    helm: {repo, name, version, values}
+    helm:
+      repo, name, version
+      values: {...}
+      hostValues:
+        boot-operator-core:
+          controllerManager: {enable: true}
+      remoteValues:
+        boot-operator-core:
+          rbac: {enable: true}
+          crd:  {enable: true}
   remoteKubeconfig: {secretName, key}
   transformations:
-    - renameKind: {from: Role, to: ClusterRole, source: upstream}
     - filterKinds: {kinds: [Service], source: upstream}
 ```
 
-The CR is the entire configuration surface. Per-cluster differences (apiserver URL, mac database, image tags) live in `spec.source.*.values`. Per-chart transformation profile lives in `spec.transformations`. Shoot kubeconfig comes from Gardener's token-requestor per standard practice (see §3.6).
+The CR is the entire configuration surface. Per-cluster differences live in `spec.source.helm.values` (Helm) or are baked into the pinned kustomize source (kustomize; per-cluster overrides via different pinned refs, or via optional future patches — see §9.4). Mode-specific settings (which upstream subchart parts to enable per mode for Helm; which overlay directory for kustomize) live in mode-specific fields under the source discriminator. Shoot kubeconfig comes from Gardener's token-requestor per standard practice (see §3.6).
 
 ### 3.3 Source discriminator
 
-The operator supports two source types, exactly one of which must be set:
+The operator supports two source types, exactly one of which must be set. Each source declares its own fields — no shared "values" at `source` level.
 
 **`spec.source.helm`**:
 - `repo` — OCI or HTTP Helm repo URL
 - `name` — chart name
 - `version` — semver constraint (must resolve deterministically)
-- `values` — passed to `helm template` as `-f values.yaml`
+- `values` — common values, applied to both renders (map, passed to `helm template -f`)
+- `hostValues` — host-render-only overrides (map, merged on top of `values` for the host render)
+- `remoteValues` — remote-render-only overrides (map, merged on top of `values` for the remote render)
 
-Implementation: `helm.sh/helm/v3`. Standard `Pull` + `Template` action.
+Implementation: `helm.sh/helm/v3`. For each render:
+```
+renderValues = merge(chart.values.yaml, spec.values, spec.hostValues or spec.remoteValues, {mode: "host" or "remote"})
+manifestStream = helm template chart with renderValues
+```
+
+Chart's own `values.yaml` provides defaults for everything not overridden by the CR (image repos/tags, resource limits, default annotations, etc.). Chart's templates use `{{ if eq .Values.mode "host" }}` / `{{ if eq .Values.mode "remote" }}` guards to include/exclude resources per mode.
 
 **`spec.source.kustomize`**:
 - `url` — kustomize root URL. Format: `https://github.com/{org}/{repo}//{path}?ref={sha|tag}`. `ref` is required — floating references are rejected at CR admission.
 - `hostPath` — subpath under `url` for the host overlay root (required; no default). Must be set explicitly per CR.
 - `remotePath` — subpath under `url` for the remote overlay root (required; no default). Must be set explicitly per CR.
 
-Implementation: `sigs.k8s.io/kustomize/api/krusty`. Battle-tested Go library used by Flux and Argo CD.
+Implementation: `sigs.k8s.io/kustomize/api/krusty`. For each render:
+```
+hostRoot   = url + "/" + hostPath
+remoteRoot = url + "/" + remotePath
+manifestStream = krusty.Build(hostRoot or remoteRoot)
+```
 
-Both produce a stream of unstructured Kubernetes manifests. The operator tags every fetched manifest with `dual-deployment-operator.cc.sap/origin: upstream`. Manifests coming from the wrapper's own templates (our custom stuff) are tagged `dual-deployment-operator.cc.sap/origin: additions` by the chart itself via `_helpers.tpl`.
+The kustomize source is expected to have `host/` and `remote/` (or the paths configured in CR) subdirectories, each with its own `kustomization.yaml` selecting the appropriate resources for that mode. See §4.2 for the ipam-capi layout.
+
+Kustomize has no Helm-values equivalent; per-cluster overrides are baked into the pinned kustomize source. If a chart needs per-cluster differences (image tags, apiserver URL), it either uses different pinned refs per environment or adopts a future CR-side patch mechanism (§9.4). For today's five candidate charts, ipam-capi's needs can be met with a pinned image tag in its kustomize source per release cycle.
+
+**Origin tagging**. Both source types produce a stream of unstructured Kubernetes manifests per render. The operator tags every manifest with `dual-deployment-operator.cc.sap/origin: upstream` if it originated from the upstream subchart (Helm) or upstream reference (kustomize), and expects the chart's own templates to carry `dual-deployment-operator.cc.sap/origin: additions` via `_helpers.tpl`. This tag is used by selective transformations like `filterKinds: source: upstream` and `patch: target: {origin: upstream}` to distinguish upstream from our additions.
+
 
 ### 3.4 Transformation menu
 
-The operator has a bounded set of typed transformation types. Each is a Go struct with strict schema; no DSL, no scripting, no free-form expressions. Adding a new type requires an operator release.
+The operator has a small, bounded set of transformation types. Most are Go structs with strict schemas; one (`patch`) uses Kubernetes-native patch formats (strategic-merge, JSON Patch) as an embedded DSL. Adding a new transformation type requires an operator release.
 
-Ordering matters. Transformations run top-to-bottom as declared. Convention:
+**Two scopes**:
 
-1. Structural patches (`injectInitContainer`, `addLabels`) before renames
-2. Renames (`renameKind`) before other transforms that depend on the renamed kind
-3. Rewrites (`rewriteWebhookURL`) after all structural changes
-4. Filters (`filterKinds`) last
+- **Per-render transformations** (3 in v1): `patch`, `rewriteWebhookURL`, `filterKinds`. Applied independently to the host render and the remote render. Each transformation naturally affects only resources present in the render it's applied to.
+- **Cross-stream transformations** (1 in v1): `packageWebhookConfigsForInjector`. Operates on both renders together, after all per-render transformations have completed.
 
-#### 3.4.1 `injectInitContainer`
+Ordering. The reconciler groups declared transformations by scope: all per-render transformations run first (in declaration order, on both renders independently), then all cross-stream transformations run (in declaration order, on paired renders).
 
-Prepends an init container and optionally adds volumes to matching PodSpec-carrying resources.
+Per-render ordering convention:
 
-```yaml
-- injectInitContainer:
-    selector:
-      kind: Deployment            # required; also StatefulSet, DaemonSet, Job, CronJob
-      name: metal-operator-controller-manager
-    container:                    # standard k8s Container object, validated
-      name: webhook-injector
-      image: "..."
-      args: [...]
-      env: [...]
-      volumeMounts: [...]
-      ports: [...]
-      resources: {...}
-    additionalVolumes: [...]      # standard k8s Volume objects
-```
+1. Structural changes (`patch` for sidecar injection, labels, etc.) first
+2. Complex rewrites (`rewriteWebhookURL`) after structural changes
+3. Filters (`filterKinds`) last
 
-Idempotent. If no matching resource found, error.
+Cross-stream ordering: `packageWebhookConfigsForInjector` runs after per-render (specifically after `rewriteWebhookURL` since WebhookConfigs are URL-rewritten before packaging).
 
-#### 3.4.2 `renameKind`
+#### 3.4.1 `patch`
 
-Rewrites the `kind` field on matching resources. Handles Role→ClusterRole ref updates in binding kinds.
+Applies a Kubernetes-native patch (strategic merge or JSON Patch) to resources matching a target selector. Replaces the historical `injectInitContainer` and `addLabels` typed transformations — for patch-shaped operations, the patch content in the CR is more transparent than a typed wrapper that hides the same content.
+
+Uses **typed variants** rather than a single opaque string. Exactly one of `strategicMerge` (an object) or `jsonPatch` (an array of ops) must be set — this lets CRD schema validate the patch shape at admission time (object vs array; JSON Patch op enum, required fields).
 
 ```yaml
-- renameKind:
-    from: Role
-    to: ClusterRole
-    source: upstream
+- patch:
+    target:
+      kind: Deployment            # required
+      name: metal-operator-controller-manager   # optional
+      namespace: "..."            # optional
+      origin: upstream            # optional; "upstream" | "additions"
+
+    # Exactly one of the two variants:
+
+    # Variant 1 — strategic merge patch (Kubernetes-aware list merging)
+    strategicMerge:
+      spec:
+        template:
+          spec:
+            initContainers:
+              - name: webhook-injector
+                image: "..."
+                args: [...]
+                volumeMounts: [...]
+            volumes:
+              - name: webhook-certs
+                emptyDir: {}
+
+    # Variant 2 — JSON Patch (RFC 6902 ops list)
+    # jsonPatch:
+    #   - op: add
+    #     path: /metadata/labels/some-key
+    #     value: "true"
 ```
 
-For `RoleBinding` → `ClusterRoleBinding` (if requested), the transformation also updates `.roleRef.kind` in matching bindings and strips `.metadata.namespace`.
+Semantics:
+- `strategicMerge` — arbitrary JSON object, applied as a strategic-merge patch (Kubernetes list-key aware). Implemented via `k8s.io/apimachinery/pkg/util/strategicpatch`.
+- `jsonPatch` — list of `{op, path, from?, value?}` operations following RFC 6902. `op` is one of `add`, `remove`, `replace`, `move`, `copy`, `test` (validated by CRD enum). Implemented via `github.com/evanphx/json-patch`.
+- Applied to every resource matching the selector. If zero matches, error (fail-loud: mismatched selector is a misconfiguration).
+- Idempotent: byte-identical inputs produce byte-identical outputs.
 
-#### 3.4.3 `rewriteWebhookURL`
+**Admission-time validation** (via CRD OpenAPI schema + a CEL rule):
+- Exactly one of `strategicMerge` / `jsonPatch` set (CEL: `has(self.strategicMerge) != has(self.jsonPatch)`)
+- `strategicMerge` must be a JSON object (not string, not array)
+- `jsonPatch` must be an array of objects
+- Each `jsonPatch` entry has required `op` (enum) and `path` fields
+
+**Runtime validation** (at reconcile time, when the patch is applied):
+- Well-formed patch content (structural sanity beyond what CRD catches)
+- Whether the patch applies cleanly to matched resources (e.g., path exists for JSON Patch `replace`)
+- Content-level correctness inside `strategicMerge` object (image field format, container name uniqueness, etc.) — CRD marks the object body as `x-kubernetes-preserve-unknown-fields: true`, so its inner contents are not admission-validated
+
+Common use cases:
+- **Sidecar injection**: `strategicMerge` with `spec.template.spec.initContainers` and `.volumes` (replaces the old `injectInitContainer` transformation)
+- **Adding labels**: `strategicMerge` with `metadata.labels` (replaces the old `addLabels` transformation), or `jsonPatch` with `op: add` at `/metadata/labels/<key>`
+- **Field overrides**: any field on any resource that matches the selector
+
+**Planned enhancement**: v2 will add a validating admission webhook that parses `strategicMerge`/`jsonPatch` content against the target kind's OpenAPI schema. This will catch content-level errors (wrong field types, unknown fields) at admission instead of at reconcile. Deferred to v2 to keep v1 scope small; webhook infrastructure adds cert management and deployment complexity. See §9.9.
+
+#### 3.4.2 `rewriteWebhookURL`
 
 Rewrites `.webhooks[].clientConfig.service` → `.webhooks[].clientConfig.url` on `ValidatingWebhookConfiguration` and `MutatingWebhookConfiguration`.
 
@@ -437,19 +551,9 @@ Rewrites `.webhooks[].clientConfig.service` → `.webhooks[].clientConfig.url` o
 
 For each webhook whose `.clientConfig.service` is set: replace with `.clientConfig.url = urlPrefix + service.path`. Existing `.url` is left alone (idempotent). `.caBundle` is preserved.
 
-#### 3.4.4 `addLabels`
+**Stays typed** (not expressed as `patch`) because the operation iterates over an array (`.webhooks[]`) with a conditional (only replace if `.service` is set), constructs the new value from parts (`urlPrefix + service.path`), and preserves other fields. Not naturally expressible as a strategic-merge or JSON patch.
 
-Adds labels to matching resources' `metadata.labels`. Additive.
-
-```yaml
-- addLabels:
-    selector:
-      kind: CustomResourceDefinition
-    labels:
-      metal-operator-remote-webhook-injector: "true"
-```
-
-#### 3.4.5 `filterKinds`
+#### 3.4.3 `filterKinds`
 
 Drops resources of listed kinds from the manifest stream (neither host nor remote — discarded).
 
@@ -459,61 +563,261 @@ Drops resources of listed kinds from the manifest stream (neither host nor remot
     source: upstream
 ```
 
-#### 3.4.6 Menu extensibility
+**Stays typed** because it's a stream filter (removes resources from the manifest list), not a patch on a resource. JSON Patch and strategic-merge operate within a single resource; they can't remove a resource from the stream.
 
-New transformation types are added by operator releases. Not extensible at runtime. Candidate future types (not implemented in v1):
+#### 3.4.4 `packageWebhookConfigsForInjector` (cross-stream)
 
-- `patch` — strategic-merge patch by selector (deferred to avoid DSL creep)
-- `addAnnotations` — mirror of `addLabels`
-- `setImageTag` — override container image tag by selector
+**Scope**: cross-stream. Runs after all per-render transformations complete. Reads from the remote render, emits into the host render.
 
-### 3.5 Split rules
+Packages Validating/MutatingWebhookConfigurations from the remote render into a ConfigMap on the host, so the webhook-injector companion controller can consume them via its source-ConfigMap contract.
 
-After transformations, the manifest stream is split into three buckets: `host`, `remote`, `drop`.
+**Why it exists**: the current webhook-injector reads WebhookConfigurations from a source ConfigMap on the seed and cannot be scoped by label (see §3.8 for injector behavior details). To avoid a `make build-` step producing pre-rendered `webhooks.yaml`, the operator packages live-rendered WebhookConfigurations into the ConfigMap the injector expects.
 
-Precedence (first match wins):
+```yaml
+- packageWebhookConfigsForInjector:
+    configMapName: metal-operator-remote-webhook-config
+    dataKey: webhooks.yaml           # optional, default "webhooks.yaml"
+```
 
-1. **Explicit annotation** `dual-deployment-operator.cc.sap/target: {host|remote|drop}` on the resource → use that
-2. **Kind-based defaults**:
+Semantics:
+1. Removes every `ValidatingWebhookConfiguration` and `MutatingWebhookConfiguration` from the remote-render output (they will be delivered by the injector, not by the operator's direct apply to the shoot)
+2. Serializes the removed resources as a multi-document YAML string
+3. Emits a new `ConfigMap` into the host-render output:
+   ```yaml
+   apiVersion: v1
+   kind: ConfigMap
+   metadata:
+     name: <configMapName>
+     namespace: <CR namespace>
+     annotations:
+       dual-deployment-operator.cc.sap/origin: additions
+   data:
+     <dataKey>: |
+       <serialized WebhookConfigurations>
+   ```
 
-| Kind | Bucket |
-|---|---|
-| `CustomResourceDefinition` | remote |
-| `ValidatingWebhookConfiguration`, `MutatingWebhookConfiguration` | remote |
-| `ClusterRole`, `ClusterRoleBinding` | remote |
-| `Role`, `RoleBinding` | remote (should be rare after `renameKind`) |
-| `ServiceAccount` with `origin: upstream` | remote |
-| `ServiceAccount` with `origin: additions` (webhook-injector SA) | host |
-| `Deployment`, `StatefulSet`, `DaemonSet` | host |
-| `Service`, `ConfigMap`, `Secret`, `Ingress`, `NetworkPolicy` | host |
-| `Namespace` | either — must have annotation |
-| anything else | host (default; log warning to prompt annotation) |
+The injector, running as a sidecar per operator Pod in the seed, watches this ConfigMap, applies the WebhookConfigurations to the shoot cluster, and manages their `caBundle` alongside cert rotation.
 
-Chart authors override with the target annotation per-resource. The annotation is stripped by the operator before applying — it's a routing hint, not persisted state.
+**Ordering**: must run AFTER `rewriteWebhookURL` (URLs should be rewritten before packaging) and any other per-render transformations that touch WebhookConfigurations. The reconciler enforces this by running all per-render transformations first, then cross-stream transformations in declaration order.
+
+**Applicability**: charts that use the webhook-injector (metal-operator, ipam-capi). Charts without webhooks (boot, argora, khalkeon) do not include this transformation.
+
+#### 3.4.5 Menu extensibility and design stance
+
+New transformation types are added by operator releases. Not extensible at runtime.
+
+**Hybrid stance: typed for structurally-complex operations, embedded DSL (`patch`) for patch-shaped operations.**
+
+The four current transformations reflect this:
+- `patch` — DSL. Applies strategic-merge or JSON Patch. Replaces the historical `injectInitContainer` and `addLabels` typed types (both were thin wrappers around patches; the DSL makes the operation visible in the CR).
+- `rewriteWebhookURL` — typed. Iteration + conditional replacement; not naturally expressible as a patch.
+- `filterKinds` — typed. Stream-level filter (removes resources); not a per-resource patch.
+- `packageWebhookConfigsForInjector` — typed cross-stream. Moves resources between renders; not a per-resource patch.
+
+Rationale for the hybrid:
+- Patches make the operation transparent in the CR — reader sees exactly what the transformation does, not a name that hides the same content
+- Complex/stream operations don't map cleanly to patches; forcing them would lose clarity, not gain it
+- Typed transformations get admission-time schema validation (Kubernetes-native Container spec, kind lists, etc.); the `patch` type validates the patch string at runtime (patch application errors surface as reconcile errors, not admission errors)
+
+Design history (r5 → r6):
+- r5 had 5 typed per-render + 1 typed cross-stream. `injectInitContainer`, `addLabels`, `renameKind` were separate typed types.
+- r6 (current): `renameKind` removed (was an artifact of ManagedResource-based delivery; direct-apply doesn't require the Role→ClusterRole conversion). `injectInitContainer` and `addLabels` collapsed into a single `patch` DSL — both were patch-shaped, and the typed wrapper hid the same content that a patch would show explicitly.
+
+Candidate future types (not implemented in v1, listed to document the extension path):
+
+- `setImageTag` — override container image tag by selector; specifically useful for ipam-capi's per-cluster image tag override (see §9.4). Could be added if kustomize's `images:` transformer doesn't cover the use case.
+
+**Not on the roadmap**:
+- Routing/split-related transformations (`setTarget`, kind-based routing, target annotations). Under two-render (§3.5), routing is determined by what each render emits, not by post-render classification.
+- Runtime plugin loading. Extensibility is via operator releases.
+- ConfigMap-loaded named patch templates. Considered as compromise between typed and DSL; rejected because `patch` covers the common case without templating engine complexity, and complex operations stay typed.
+
+### 3.5 Two-render pattern
+
+Instead of rendering the source once and splitting the output by kind or annotation, the operator renders the source **twice per reconcile** — once for host, once for remote — using mode-specific configuration to control what each render emits. Each render's output goes entirely to its target cluster.
+
+#### 3.5.1 Rationale
+
+Two-render is preferred over post-render split because:
+
+1. **No routing decisions in the operator or CR.** The chart/kustomization decides what belongs to each cluster via values or overlay paths. The operator applies what each render produces, unmodified in destination.
+2. **Correctness for symmetric topologies.** If a chart legitimately needs, say, a Deployment on both clusters, two-render produces two independent Deployments in the two renders. Post-render split by kind would collapse them.
+3. **Familiar Helm/kustomize idiom.** Values-based mode switching is how charts routinely support multi-environment deploys. Two overlay directories is how kustomize expresses variant renders. Chart maintainers are on familiar ground.
+4. **No hidden operator rules.** No hardcoded kind → target table; no CR-side routing rules to duplicate across shoots.
+
+The alternative (single render + operator-side split by kind or annotation) was rejected — see §3.5.5.
+
+#### 3.5.2 How chart controls each render (Helm)
+
+Chart's `_helpers.tpl` defines a mode-aware guard:
+
+```yaml
+{{- define "dual.host" -}}{{ eq .Values.mode "host" }}{{- end }}
+{{- define "dual.remote" -}}{{ eq .Values.mode "remote" }}{{- end }}
+```
+
+Chart templates use these guards:
+
+```yaml
+# templates/webhook-service.yaml
+{{- if eq .Values.mode "host" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: metal-operator-remote-webhook-service
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    dual-deployment-operator.cc.sap/origin: additions
+spec:
+  # ...
+{{- end }}
+```
+
+```yaml
+# templates/namespace.yaml
+{{- if eq .Values.mode "remote" }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: metal-servers
+  annotations:
+    dual-deployment-operator.cc.sap/origin: additions
+{{- end }}
+```
+
+The upstream subchart is enabled selectively via `hostValues` / `remoteValues` passing `.enable: true` for the appropriate parts per mode:
+
+```yaml
+# CR's spec.source.helm.hostValues:
+metal-operator-core:
+  controllerManager: {enable: true}   # only host renders the Deployment
+
+# CR's spec.source.helm.remoteValues:
+metal-operator-core:
+  rbac:    {enable: true}             # only remote renders RBAC
+  crd:     {enable: true}             # only remote renders CRDs
+  webhook: {enable: true}             # only remote renders WebhookConfigs
+```
+
+Operator sets `.Values.mode` per render (not user-settable via `values`; CR admission rejects `values.mode`).
+
+#### 3.5.3 How kustomize source controls each render
+
+Two overlay directories under the kustomize source URL, one per mode:
+
+```
+system/kustomize/ipam-capi-remote/
+├── host/
+│   └── kustomization.yaml    # resources: [../manager, ../additions/host]
+├── remote/
+│   └── kustomization.yaml    # resources: [../managedresources, ../webhooks, ../additions/remote]
+├── manager/                   # upstream Deployment kustomize root
+├── managedresources/          # upstream CRDs+RBAC
+├── webhooks/                  # upstream WebhookConfigs
+└── additions/
+    ├── host/                  # our host-side manifests
+    └── remote/                # our remote-side manifests
+```
+
+Operator renders `${url}/${hostPath}` for the host render and `${url}/${remotePath}` for the remote render. Each overlay's `kustomization.yaml` selects which resources to include via `resources:`.
+
+Our custom manifests under `additions/host/` and `additions/remote/` carry `dual-deployment-operator.cc.sap/origin: additions` annotation (added via kustomize `commonAnnotations` in each additions/ subdir's kustomization.yaml).
+
+#### 3.5.4 Concrete walk-through (metal-operator)
+
+Two renders per reconcile:
+
+**Host render** — operator calls `helm template metal-operator-remote` with values `{...common values..., mode: host, metal-operator-core.controllerManager.enable: true}`:
+
+Rendered manifests:
+| Resource | From | Target |
+|---|---|---|
+| `Deployment/metal-operator-controller-manager` | upstream (controllerManager.enable=true) | host |
+| `Service/metal-operator-remote-webhook-service` | additions (mode=host guard) | host |
+| `Service/metal-registry-service` | additions | host |
+| `Ingress/metal-operator-ingress` | additions | host |
+| `NetworkPolicy/...` | additions | host |
+| `ConfigMap/remote-kubeconfig` | additions | host |
+| `ServiceAccount/metal-operator-webhook-injector` | additions | host |
+| `ConfigMap/macdb` | additions | host |
+| `Service/metal-operator-webhook-service` | upstream (if webhook.enable were true — it's false here, so not emitted) | — |
+
+After transformations: `injectInitContainer` patches the Deployment with the sidecar. `filterKinds Service source: upstream` drops any upstream Services (none emitted in host mode since `webhook.enable: false`, but the transformation runs harmlessly).
+
+Result: apply all resources in this render to the seed cluster (host).
+
+**Remote render** — operator calls `helm template metal-operator-remote` with values `{...common values..., mode: remote, metal-operator-core.rbac.enable: true, .crd.enable: true, .webhook.enable: true}`:
+
+Rendered manifests:
+| Resource | From | Target |
+|---|---|---|
+| `CustomResourceDefinition/endpoints.metal.ironcore.dev` (and others) | upstream (crd.enable=true) | remote |
+| `ClusterRole/manager-role` | upstream (rbac.enable=true) | remote |
+| `ClusterRoleBinding/manager-rolebinding` | upstream | remote |
+| `Role/leader-election-role` | upstream | remote (renamed to ClusterRole below) |
+| `RoleBinding/leader-election-rolebinding` | upstream | remote |
+| `ServiceAccount/metal-operator-controller-manager` | upstream | remote |
+| `ValidatingWebhookConfiguration/metal-operator-validating-webhook-configuration` | upstream (webhook.enable=true) | remote |
+| `MutatingWebhookConfiguration/metal-operator-mutating-webhook-configuration` | upstream | remote |
+| `Service/metal-operator-webhook-service` | upstream (webhook.enable=true) | dropped |
+| `Namespace/metal-servers` | additions (mode=remote guard) | remote |
+| `ClusterRoleBinding/cc:oidc-ias-admin` | additions | remote |
+| `ServiceAccount/metal-token-rotate` | additions | remote |
+| `Role/metal-token-rotate` (namespaced, stays a Role) | additions | remote |
+| `RoleBinding/metal-token-rotate` | additions | remote |
+| ... | | |
+
+After transformations:
+- `rewriteWebhookURL` — WebhookConfigurations get URL-based `clientConfig` (service replaced by url).
+- `filterKinds source: upstream, kinds: [Service]` — drops upstream's webhook Service.
+- `packageWebhookConfigsForInjector` (cross-stream) — removes WebhookConfigurations from remote render and emits them wrapped in a ConfigMap on host render.
+
+Note: upstream's Role (leader-election) stays a Role — no renaming under direct-apply. Our `metal-token-rotate` Role also stays a Role. Both apply cleanly to the shoot with their original namespace scope.
+
+Result: apply the remaining resources (CRDs, ClusterRoles, ClusterRoleBindings, Roles/RoleBindings, SA, our namespace, our RBAC) to the shoot cluster. WebhookConfigurations arrive via the injector's ConfigMap consumption.
+
+Each render is a natural, coherent set. No annotation-based classification. No kind rules. No routing decisions. The chart's mode-guards and the CR's `hostValues`/`remoteValues` determine what each render produces.
+
+#### 3.5.5 Why not single render + split
+
+Considered and rejected. Single-render-plus-split requires:
+
+- Either **hardcoded kind rules in the operator** (rejected: doesn't handle multi-Deployment topologies; new operators would need operator releases for new routing) —
+- Or **routing annotations on every resource** (rejected: upstream resources can't be annotated by Helm subcharts; would require operator-time annotation-adding transformations, redundant with what Helm can already express via values) —
+- Or **routing config emitted by the chart as a sentinel resource** (rejected: still requires the operator to consult chart-provided data at split time, doesn't handle multi-Deployment cases cleanly).
+
+Two-render sidesteps all these problems. Chart/kustomization owns what goes where via native mechanisms (values, overlays). Operator just renders and applies.
+
+**Cost of two-render**: two Helm/krusty renders per reconcile. Helm SDK rendering is fast (~50-100ms per render for typical charts). At 10min reconcile intervals per CR, this is negligible operator load. Rendering happens in the operator process, no chart repo pulls beyond the once-per-CR (cached).
+
 
 ### 3.6 Delivery
 
 Operator holds two Kubernetes clients per CR:
 
-- **Host client**: seed cluster in-cluster access via the operator's ServiceAccount (RBAC scoped to the CR's namespace + relevant cluster-scoped resources for CRs that need them, though none should — we deliver cluster-scoped resources only to shoots)
+- **Host client**: seed cluster in-cluster access via the operator's ServiceAccount (RBAC scoped to the CR's namespace)
 - **Shoot client**: constructed from a kubeconfig held in a Secret in the CR's namespace. `spec.remoteKubeconfig.secretName` points at this Secret (typically named `<operator>-remote-kubeconfig`, provisioned by Gardener's token-requestor as today, mounted in the existing operator Pod as `/var/run/remote-kubeconfig/kubeconfig`)
 
-For each resource in the `host` bucket → apply to host client.
-For each resource in the `remote` bucket → apply to shoot client.
+Every resource in the **host render** output → apply to host client (seed).
+Every resource in the **remote render** output → apply to shoot client (shoot).
+
+No split step. Each render's output goes entirely to its target cluster.
 
 #### 3.6.1 Server-side apply
 
 All resources are applied with server-side apply (`k8s.io/client-go` `Apply` verb), field manager `dual-deployment-operator`. This provides:
 
 - **Idempotency**: byte-identical inputs produce byte-identical apply calls with no-op semantics if state is already correct
-- **Field-level ownership**: SSA field managers make multi-writer scenarios (with webhook-injector) safe — see §3.8
+- **Field-level ownership**: SSA tracks which manager owns which field, so if a human or another controller edits a field the operator does not own, the operator's re-apply leaves it alone
 - **Conflict handling**: on field conflicts with other managers, operator uses `force: true` for fields it owns
+
+Note: the operator does not share any shoot resource with the webhook-injector — the injector writes only WebhookConfigurations (which the operator does not deliver), and it uses `Create`/`Update`, not SSA. SSA is used here for the operator's own idempotency and drift correction, not for co-ownership with the injector.
 
 #### 3.6.2 Drift correction
 
 Every reconcile (default: every 10 minutes plus event-driven), the operator re-applies every resource to its target cluster. Because SSA is idempotent, a resource unchanged since the last apply produces no writes.
 
-If a resource has been mutated externally (drift), the next reconcile re-applies the operator's version. Field ownership prevents this from clobbering fields owned by other managers (e.g., caBundle owned by webhook-injector).
+If a resource has been mutated externally (drift), the next reconcile re-applies the operator's version, restoring the fields the operator owns.
 
 #### 3.6.3 Health tracking
 
@@ -577,37 +881,36 @@ CRDs retention (`deletionPolicy.crds: Retain`) is the default because CRDs hold 
 
 ### 3.8 Coexistence with webhook-injector
 
-The webhook-injector runs as a sidecar of each operator Pod (unchanged). Under Option 2 its responsibilities are:
+The webhook-injector runs as a sidecar of each operator Pod (unchanged from today). Its role is:
 
 1. **Watch cert Secret** in the operator's namespace
 2. **Generate initial TLS certs** and populate the cert Secret
 3. **Rotate certs** on expiration with configured overlap window
-4. **Patch caBundle** on the shoot's `ValidatingWebhookConfiguration`, `MutatingWebhookConfiguration`, and CRDs (that have `.spec.conversion.webhook.clientConfig`) whenever certs rotate
+4. **Watch source ConfigMap** — the one produced by the operator's `packageWebhookConfigsForInjector` transformation (see §3.4.6). This ConfigMap contains the WebhookConfigurations (`webhooks.yaml`) that should exist on the shoot.
+5. **Apply WebhookConfigurations to the shoot** — reads from the source ConfigMap (`--webhook-config-name`), injects the current caBundle into each webhook's `clientConfig`, and applies them to the shoot via `Create`/`Update` on its mounted shoot kubeconfig. On cert rotation it re-applies with the fresh caBundle.
 
-It **does not**:
-- Read WebhookConfiguration definitions from a ConfigMap
-- Apply WebhookConfigurations to the shoot (operator does this now)
+Injector's behavior is **unchanged from today** — same `--webhook-config-name` source-ConfigMap contract, same delivery, same caBundle injection, same cert lifecycle. The one difference is upstream of the injector: today the chart bakes the source ConfigMap from a pre-rendered `webhooks.yaml`; under the new design the operator produces it from live-rendered WebhookConfigurations. The injector requires **no code change**.
 
-The chart no longer emits the `webhook-config` ConfigMap. Injector's `--webhook-config-name` argument becomes unused; injector code path for reading from ConfigMap is disabled or removed.
+**The operator does not do any of the injector's work.** It does not deliver WebhookConfigurations, does not inject or stamp caBundle into any resource, and does not manage certs. Its only interaction with the injector is producing the source ConfigMap the injector already knows how to consume.
 
-**Field ownership on shared resources**:
+**No shared-resource field ownership.** On the shoot, the operator and injector write **disjoint** resource sets:
+- Operator (field manager `dual-deployment-operator`, server-side apply): CRDs, ClusterRoles, ClusterRoleBindings, Roles, RoleBindings, ServiceAccounts, and the operator's own additions.
+- Injector (`Create`/`Update`, not SSA): ValidatingWebhookConfigurations and MutatingWebhookConfigurations only.
 
-Operator's SSA field manager: `dual-deployment-operator`
-Injector's SSA field manager: `webhook-injector` (or its existing name; verify)
+Because no resource is written by both, there is no field-ownership coordination, no SSA co-ownership discipline, and no risk of caBundle ping-pong. The `packageWebhookConfigsForInjector` transformation removes WebhookConfigurations from the operator's remote render precisely so the operator never applies them to the shoot.
 
-On a `ValidatingWebhookConfiguration`:
-- Operator owns: all fields **except** `.webhooks[*].clientConfig.caBundle`
-- Injector owns: `.webhooks[*].clientConfig.caBundle` only
+**CRD conversion-webhook caBundle — open limitation.** The injector's only mechanism for stamping caBundle into a CRD's `.spec.conversion.webhook.clientConfig` is its `ManagedResourceReconciler`, which selects Gardener `ManagedResource` objects on the **seed** by `--managed-resource-label` and stamps caBundle into the CRDs embedded in those ManagedResources' referenced Secrets. This design deliberately does **not** produce `ManagedResource` objects (eliminating GRM is a core goal — §2.2.1), so that reconciler never fires for CRDs delivered by this operator. Consequently, for an operator whose CRDs carry a conversion webhook (metal-operator today), **caBundle on those CRDs is not managed under this design as written**. The operator does not take on this responsibility — that would be doing the injector's work, which is explicitly out of scope. Candidate resolutions are recorded in §9.2; the decision is deferred and must be resolved before any operator with conversion-webhook CRDs is migrated.
 
-SSA respects field ownership. Operator's re-applies (in reconcile) that omit caBundle (or set caBundle to empty) don't clobber injector's writes to caBundle. Injector's writes to caBundle don't clobber operator's writes to other fields.
+**Ordering during initial deploy**:
+1. Operator applies CRDs, RBAC, SA, and additions to the shoot.
+2. Operator's `packageWebhookConfigsForInjector` emits the source ConfigMap to the seed.
+3. Injector observes the cert Secret + source ConfigMap, generates certs, and applies WebhookConfigurations to the shoot with the caBundle injected.
+4. Webhook calls succeed once the WebhookConfigurations are present with a valid caBundle.
 
-Requires: injector applies with a stable, distinct field manager name. If injector currently doesn't set a field manager explicitly, add one. Small injector change.
-
-**During cert rotation**: injector updates caBundle; operator's next drift-correction re-apply notices no drift on fields it owns, so no ping-pong.
-
-**Ordering during initial deploy**: operator applies WebhookConfig first (with no caBundle); injector observes and patches caBundle. Between the two applies, webhooks are inert (calls fail because caBundle is empty) — normal bootstrap behavior, same as today.
+Same bootstrap behavior as today for WebhookConfigurations.
 
 ---
+
 
 ## 4. Artifact restructure
 
@@ -641,114 +944,155 @@ system/metal-operator-remote/
     └── rbac.yaml
 ```
 
-**After**:
+**After** (two-render pattern; all templates in one directory, mode-guarded):
 
 ```
 system/metal-operator-remote/
-├── Chart.yaml                                # dep: metal-operator (ENABLED at install)
+├── Chart.yaml                                # dep: metal-operator (subchart, controlled per mode)
 ├── Chart.lock
 ├── charts/metal-operator-*.tgz               # cached upstream
-├── values.yaml                                # upstream ENABLED, our stuff
+├── values.yaml                                # defaults: subchart all-disabled, our defaults
 └── templates/
-    ├── _helpers.tpl                          # stamps target + origin annotations
-    ├── host/
-    │   ├── ingress.yaml
-    │   ├── macdb.yaml
-    │   ├── metal-registry-service.yaml
-    │   ├── networkpolicy.yaml
-    │   ├── remote-kubeconfig-configmap.yaml
-    │   ├── remote-kubeconfig.yaml
-    │   ├── rotate-kubeconfig.yaml
-    │   ├── webhook-injector-rbac.yaml
-    │   └── webhook-service.yaml
-    └── remote/
-        └── namespace.yaml                    # + any extra RBAC our chart adds in remote
+    ├── _helpers.tpl                          # stamps origin: additions on every resource
+    ├── ingress.yaml                          # {{ if eq .Values.mode "host" }} ... {{ end }}
+    ├── macdb.yaml                            # host-guarded
+    ├── metal-registry-service.yaml           # host-guarded
+    ├── networkpolicy.yaml                    # host-guarded
+    ├── remote-kubeconfig-configmap.yaml      # host-guarded
+    ├── remote-kubeconfig.yaml                # host-guarded
+    ├── rotate-kubeconfig.yaml                # host-guarded
+    ├── webhook-injector-rbac.yaml            # host-guarded
+    ├── webhook-service.yaml                  # host-guarded
+    ├── namespace.yaml                        # {{ if eq .Values.mode "remote" }} ... {{ end }}
+    └── extra-rbac.yaml                       # remote-guarded (was managedresources/rbac.yaml)
 ```
 
 **Deleted**:
-- `webhooks.yaml` — upstream renders live via Helm dep
-- `templates/controller-manager.yaml` — upstream renders live, sidecar via operator transformation
-- `templates/managedresource.yaml` — operator applies remote resources directly
+- `webhooks.yaml` — upstream renders live via Helm dep (in remote mode)
+- `templates/controller-manager.yaml` — upstream renders live (in host mode), sidecar via CR's `injectInitContainer` transformation
+- `templates/managedresource.yaml` — operator applies remote resources directly, no MR wrapping
 - `templates/webhook-config.yaml` — no longer needed; operator applies WebhookConfigs directly
 - `templates/_webhook-injector-sidecar.tpl` — sidecar spec moves to CR
-- `managedresources/crds-and-rbac.yaml` — upstream renders live
-- `values-overrides.yaml`, `values-managed-resources.yaml` — only for `make build-`
+- `managedresources/crds-and-rbac.yaml` — upstream renders live in remote render
+- `managedresources/` directory itself — content moves to `templates/` with `mode == "remote"` guard
+- `values-overrides.yaml`, `values-managed-resources.yaml` — only needed by `make build-`; replaced by CR's `hostValues`/`remoteValues`
 
-**Values inversion**: upstream sub-chart values change from all-disabled to all-enabled:
+**Values structure change**. Chart's own `values.yaml` sets upstream subchart to all-disabled defaults; CR enables specific parts per mode via `hostValues` / `remoteValues`:
 
 ```yaml
-# before
+# metal-operator-remote/values.yaml (chart defaults)
+mode: ""    # required — set by operator per render, not by user
+
+# Common defaults for our chart (image tags, resource limits, etc.)
+webhookInjector:
+  repository: keppel.global.cloud.sap/.../webhook-injector
+  tag: latest
+
+# Upstream subchart — everything OFF by default. CR turns things on per mode.
 metal-operator-core:
-  rbac: {enable: false}
-  crd: {enable: false}
-  webhook: {enable: false}
+  rbac:              {enable: false}
+  crd:               {enable: false}
+  webhook:           {enable: false}
   controllerManager: {enable: false}
-
-# after
-metal-operator-core:
-  rbac: {enable: true}
-  crd: {enable: true}
-  webhook: {enable: true}
-  controllerManager: {enable: true}
 ```
 
-**Chart size**: 820 chart lines + 5542 baked lines = ~6360 → ~350 lines.
+The operator injects `.Values.mode` per render (values `{mode: "host"}` for host render, `{mode: "remote"}` for remote render). CR admission rejects any user attempt to set `values.mode` — mode is not user-configurable.
 
-`_helpers.tpl` addition:
+**Chart size**: 820 chart lines + 5542 baked lines = ~6360 → ~400 lines (a bit larger than a naive `.host/.remote/` split due to guards, but no baked YAML).
+
+`_helpers.tpl` addition — stamps origin annotation on every resource in this chart:
 
 ```yaml
-{{- define "dual.hostAnnotations" -}}
-dual-deployment-operator.cc.sap/target: host
-dual-deployment-operator.cc.sap/origin: additions
+{{- /* helpers for the dual-deployment-operator pattern */ -}}
+
+{{- define "dual.additionsAnnotation" -}}
+annotations:
+  dual-deployment-operator.cc.sap/origin: additions
 {{- end }}
 
-{{- define "dual.remoteAnnotations" -}}
-dual-deployment-operator.cc.sap/target: remote
-dual-deployment-operator.cc.sap/origin: additions
+{{- define "dual.isHost" -}}{{ eq .Values.mode "host" }}{{- end }}
+{{- define "dual.isRemote" -}}{{ eq .Values.mode "remote" }}{{- end }}
+```
+
+Templates use the guards:
+
+```yaml
+# templates/webhook-service.yaml
+{{- if eq .Values.mode "host" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: metal-operator-remote-webhook-service
+  namespace: {{ .Release.Namespace }}
+  {{- include "dual.additionsAnnotation" . | nindent 2 }}
+spec:
+  # ...
 {{- end }}
 ```
+
+Note: no `target` annotation. The template's mode guard determines which render it appears in; that render goes entirely to its target cluster. No further routing decision needed.
+
 
 ### 4.2 Ipam-capi
 
 **Before**:
 
 ```
-system/ipam-capi-remote/            # helmify output, generated
+system/ipam-capi-remote/            # helmify output, generated by make build-
 ├── (Helm chart with baked kustomize output)
 
 system/kustomize/ipam-capi-remote/   # source of truth
 ├── manager/                         # upstream Deployment kustomize root
 ├── managedresources/                # upstream CRDs+RBAC kustomize root
 ├── webhooks/                        # upstream WebhookConfig kustomize root
-├── templates/                       # our custom manifests (Helm templates today)
+├── templates/                       # our custom manifests (Helm-templated today)
 ├── netpol-labels.yaml
 └── values-override.yaml
 ```
 
-**After**:
+**After** (two-render pattern with kustomize overlays):
 
 ```
-# system/ipam-capi-remote/ is DELETED
+# system/ipam-capi-remote/ is DELETED (was helmify output, no longer needed)
 
 system/kustomize/ipam-capi-remote/   # sole source of truth, consumed by operator directly
-├── kustomization.yaml               # NEW: top-level, combines sub-roots
-├── manager/, managedresources/, webhooks/    # (unchanged structure, refs pinned)
-├── additions/                       # NEW: our custom manifests as kustomize resources
-│   ├── kustomization.yaml
-│   ├── webhook-service.yaml
-│   ├── remote-kubeconfig-configmap.yaml
-│   ├── network-policy.yaml
-│   └── ...
-├── netpol-labels.yaml
-└── values-override.yaml
+├── host/                             # NEW: host-mode overlay
+│   └── kustomization.yaml            # resources: [../manager, ../additions/host]
+├── remote/                           # NEW: remote-mode overlay
+│   └── kustomization.yaml            # resources: [../managedresources, ../webhooks, ../additions/remote]
+├── manager/                          # upstream Deployment kustomize root (refs pinned)
+│   └── kustomization.yaml            # references upstream at ?ref=v0.1.0
+├── managedresources/                 # upstream CRDs+RBAC (refs pinned)
+│   └── kustomization.yaml
+├── webhooks/                         # upstream WebhookConfigs (refs pinned)
+│   └── kustomization.yaml
+├── additions/                        # NEW: our custom manifests as kustomize resources
+│   ├── host/
+│   │   ├── kustomization.yaml        # commonAnnotations: dual-deployment-operator.cc.sap/origin=additions
+│   │   ├── webhook-service.yaml      # our webhook Service
+│   │   ├── remote-kubeconfig-configmap.yaml
+│   │   ├── network-policy.yaml
+│   │   └── ...
+│   └── remote/
+│       ├── kustomization.yaml        # commonAnnotations: dual-deployment-operator.cc.sap/origin=additions
+│       └── extra-rbac.yaml           # our custom RBAC that goes in the shoot
+└── netpol-labels.yaml
 ```
 
 **Changes**:
-- Top-level `kustomization.yaml` combines all sub-roots
-- Our custom manifests move from `templates/` (Helm templates) to `additions/` (plain kustomize resources); Helm-templated values become kustomize `configMapGenerator` refs or `patches`
-- Upstream refs in `manager/kustomization.yaml`, `managedresources/kustomization.yaml`, `webhooks/kustomization.yaml` pinned to specific tags/SHAs (they're currently unpinned — see §9)
-- `webhook-injector-sidecar.tpl` deleted (sidecar spec moves to CR)
-- No `templates/managedresource.yaml` equivalent needed
+- Top-level directory removed; two mode-specific overlays (`host/`, `remote/`) at the root
+- Our custom manifests split into `additions/host/` and `additions/remote/` subdirs, referenced by the corresponding mode overlay
+- `additions/host/kustomization.yaml` and `additions/remote/kustomization.yaml` use `commonAnnotations` to stamp `dual-deployment-operator.cc.sap/origin: additions` on every resource
+- Upstream refs in `manager/`, `managedresources/`, `webhooks/` kustomization.yaml files are pinned to specific tags/SHAs (they're currently unpinned — see §9.1)
+- `_webhook-injector-sidecar.tpl` deleted (sidecar spec moves to CR's `injectInitContainer`)
+- Helm-templated values in the old `templates/` are converted to plain kustomize resources (no `.Values.*` in kustomize source)
+
+**Deleted**:
+- `system/ipam-capi-remote/` (helmify output)
+- `make build-ipam-capi-remote`
+- Old `templates/` directory (Helm-templated manifests) — content moves to `additions/host/` and `additions/remote/` as plain kustomize resources
+- `values-override.yaml` (Helm-values-style; not applicable in kustomize)
+
 
 ### 4.3 Makefile
 
@@ -800,14 +1144,11 @@ dual-deployment-operator/
 │   │   ├── kustomize.go                        # krusty renderer
 │   │   └── source.go
 │   ├── transform/
-│   │   ├── inject_init_container.go
-│   │   ├── rename_kind.go
+│   │   ├── patch.go                            # strategic-merge + JSON Patch
 │   │   ├── rewrite_webhook_url.go
-│   │   ├── add_labels.go
 │   │   ├── filter_kinds.go
+│   │   ├── package_webhook_configs_for_injector.go   # cross-stream
 │   │   └── transform.go
-│   ├── split/
-│   │   └── split.go
 │   ├── deliver/
 │   │   ├── apply.go                            # SSA against a Kubernetes client
 │   │   ├── health.go                           # per-resource health computation
@@ -815,6 +1156,10 @@ dual-deployment-operator/
 │   ├── clients/
 │   │   ├── host.go                             # in-cluster client
 │   │   └── shoot.go                            # kubeconfig-from-Secret client
+│   ├── webhook/                                # validating admission webhook
+│   │   ├── validator.go                        # webhook.CustomValidator implementation
+│   │   ├── patch_validator.go                  # patch structural + content validation
+│   │   └── suite_test.go                       # envtest-based webhook tests
 │   └── manifest/
 │       └── manifest.go
 ├── go.mod
@@ -826,14 +1171,37 @@ dual-deployment-operator/
 ### 5.2 Interfaces
 
 ```go
+// Source renders manifests for a specific mode (host or remote).
 type Source interface {
-    Render(ctx context.Context, values map[string]any) ([]Manifest, error)
+    Render(ctx context.Context, mode Mode) ([]Manifest, error)
 }
 
-type Transformation interface {
-    Apply(manifests []Manifest) ([]Manifest, error)
+type Mode string
+const (
+    ModeHost   Mode = "host"
+    ModeRemote Mode = "remote"
+)
+
+// Two transformation interfaces, distinguished by scope.
+
+// PerRenderTransformation operates on a single render's manifest stream.
+// The reconciler applies it to each render independently.
+type PerRenderTransformation interface {
     Type() string
+    Apply(manifests []Manifest) ([]Manifest, error)
 }
+
+// CrossStreamTransformation operates on both renders together, potentially
+// moving resources between them. Runs after all PerRenderTransformations.
+type CrossStreamTransformation interface {
+    Type() string
+    ApplyCrossStream(host, remote []Manifest) (newHost, newRemote []Manifest, err error)
+}
+
+// transform.Group parses spec.Transformations and separates entries into
+// the two categories based on the concrete type (packageWebhookConfigsForInjector
+// is currently the only cross-stream type).
+// Preserves declaration order within each category.
 
 type Applier interface {
     Apply(ctx context.Context, resource Manifest) (Status, error)
@@ -843,7 +1211,7 @@ type Applier interface {
 type Manifest struct {
     Unstructured *unstructured.Unstructured
     Origin       Origin   // upstream | additions
-    Target       Target   // host | remote | drop
+    // No Target — target is implicit from which render produced it
 }
 ```
 
@@ -867,39 +1235,53 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx, req) (ctrl.Result, err
         return ctrl.Result{}, r.Update(ctx, cr)
     }
 
-    // 1. Fetch and render source
+    // 1. Build source renderer
     src, err := source.From(cr.Spec.Source)
-    manifests, err := src.Render(ctx, cr.Spec.Source.Values())
+    if err != nil { return r.errStatus(ctx, cr, "InvalidSource", err) }
 
-    // 2. Apply transformations
-    for _, t := range cr.Spec.Transformations {
-        transform, err := transform.From(t)
-        manifests, err = transform.Apply(manifests)
+    // 2. Render TWICE — one per mode
+    hostManifests, err := src.Render(ctx, source.ModeHost)
+    if err != nil { return r.errStatus(ctx, cr, "HostRenderFailed", err) }
+
+    remoteManifests, err := src.Render(ctx, source.ModeRemote)
+    if err != nil { return r.errStatus(ctx, cr, "RemoteRenderFailed", err) }
+
+    // 3. Group transformations by scope (per-render vs cross-stream)
+    perRender, crossStream, err := transform.Group(cr.Spec.Transformations)
+    if err != nil { return r.errStatus(ctx, cr, "InvalidTransformation", err) }
+
+    // 4. Apply per-render transformations to each render independently.
+    //    Same list runs on both; each transformation naturally affects
+    //    only resources present in the render it runs on.
+    for _, t := range perRender {
+        hostManifests, err = t.Apply(hostManifests)
+        if err != nil { return r.errStatus(ctx, cr, "HostTransformFailed", err) }
+        remoteManifests, err = t.Apply(remoteManifests)
+        if err != nil { return r.errStatus(ctx, cr, "RemoteTransformFailed", err) }
     }
 
-    // 3. Split by target
-    host, remote, dropped := split.ByTarget(manifests)
+    // 5. Apply cross-stream transformations. Each may move resources
+    //    between renders, add resources, or remove them.
+    for _, t := range crossStream {
+        hostManifests, remoteManifests, err = t.ApplyCrossStream(hostManifests, remoteManifests)
+        if err != nil { return r.errStatus(ctx, cr, "CrossStreamTransformFailed", err) }
+    }
 
-    // 4. Get clients
+    // 6. Get clients
     hostApplier := r.HostApplier
-    shootApplier, err := r.getShootApplier(ctx, cr.Spec.RemoteKubeconfig)  // reads Secret in CR namespace
+    shootApplier, err := r.buildShootApplier(ctx, cr)
+    if err != nil { return r.errStatus(ctx, cr, "ShootClientFailed", err) }
 
-    // 5. Apply to targets, collect status
-    hostStatus := make([]ResourceStatus, 0, len(host))
-    for _, m := range host {
-        s, err := hostApplier.Apply(ctx, m)
-        hostStatus = append(hostStatus, s)
-    }
-    remoteStatus := make([]ResourceStatus, 0, len(remote))
-    for _, m := range remote {
-        s, err := shootApplier.Apply(ctx, m)
-        remoteStatus = append(remoteStatus, s)
-    }
+    // 7. Apply each render to its target cluster
+    hostStatus := r.applyAll(ctx, hostApplier, hostManifests)
+    remoteStatus := r.applyAll(ctx, shootApplier, remoteManifests)
 
-    // 6. Update inventory + status
+    // 8. Update inventory + status
     cr.Status.HostResources = hostStatus
     cr.Status.RemoteResources = remoteStatus
     cr.Status.Conditions = computeConditions(hostStatus, remoteStatus)
+    cr.Status.LastReconcile = &metav1.Time{Time: time.Now()}
+
     if err := r.Status().Update(ctx, cr); err != nil {
         return ctrl.Result{}, err
     }
@@ -907,6 +1289,13 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx, req) (ctrl.Result, err
     return ctrl.Result{RequeueAfter: 10 * time.Minute}, nil
 }
 ```
+
+**Key differences from a single-render architecture**:
+- Source is rendered twice with mode-specific parameters (Helm: different values maps; kustomize: different overlay paths).
+- No `split` step — each render's output is a coherent bucket for its target cluster.
+- Per-render transformations apply to each render independently. `filterKinds source: upstream` runs on both renders, dropping upstream Services from whichever render emits them.
+- Cross-stream transformations run in a separate phase after per-render. Currently one type: `packageWebhookConfigsForInjector` moves WebhookConfigurations from remote render into a ConfigMap in host render.
+- Only `origin` matters for transformation targeting; there is no `target` on manifests (implicit from the render pipeline).
 
 ### 5.4 Shoot client construction
 
@@ -987,7 +1376,7 @@ Three layers:
 2. **Integration tests** with `envtest`:
    - Real CRD, real reconciler
    - Fake source yields fixture manifests
-   - Verify: split correctness, apply to (mock) both clients, deletion cascade, drift correction via re-reconcile
+   - Verify: two-render correctness (host render produces host resources, remote render produces remote resources), apply to (mock) both clients, deletion cascade, drift correction via re-reconcile
 3. **Equivalence tests** vs. today's charts:
    - Test fixture per operator × representative shoot
    - Render today's chart with `helm template` → capture full manifest stream (host + remote)
@@ -995,7 +1384,7 @@ Three layers:
 
 Additionally:
 4. **Drift tests**: apply resource, mutate externally, verify next reconcile re-applies
-5. **SSA coexistence tests**: apply WebhookConfiguration; mock caBundle writer with distinct field manager; verify operator re-applies don't clobber caBundle
+5. **Disjoint-write tests**: verify the operator's remote render contains no ValidatingWebhookConfiguration or MutatingWebhookConfiguration after `packageWebhookConfigsForInjector` runs (they are removed from the operator's apply set and packaged into the host ConfigMap), so the operator and injector never write the same shoot resource
 6. **Deletion tests**: verify finalizer cleanup on host + remote, verify CRDs retained by default
 
 ---
@@ -1007,32 +1396,35 @@ Eight phases:
 ### Phase 1: Build operator (~2-3 weeks)
 
 - Scaffold kubebuilder
-- Implement source (Helm + kustomize)
+- Implement source (Helm + kustomize) with two-render Render(ctx, mode) interface
 - Implement 5 transformations
-- Implement split + dual-cluster SSA + drift + health + deletion
+- Implement dual-cluster SSA + drift + health + deletion
 - Write unit + integration tests
 - Write equivalence tests for metal-operator
 
-**Success criterion**: Equivalence test passes for metal-operator against a QA shoot's expected output; drift + health + deletion tests pass.
+**Success criterion**: Equivalence test passes for metal-operator against a QA shoot's expected output; drift + health + deletion tests pass; two-render pipeline produces disjoint host/remote manifest sets.
 
 ### Phase 2: Restructure metal-operator-remote (~1 week)
 
-- Move templates to `templates/host/` and `templates/remote/` with target annotations
-- Invert upstream values to enable
-- Add `_helpers.tpl` for annotations
-- Delete `webhooks.yaml`, `controller-manager.yaml`, `managedresource.yaml`, `webhook-config.yaml`, `sidecar.tpl`, `managedresources/`, `values-overrides.yaml`, `values-managed-resources.yaml`
+- Add `.Values.mode` guards to templates (`{{ if eq .Values.mode "host" }}` / `remote`)
+- Move managedresources/*.yaml content to templates/ with `mode: remote` guard
+- Update chart values.yaml: upstream subchart defaults all-disabled (CR turns on per mode); add `mode: ""` placeholder
+- Update `_helpers.tpl` to stamp `dual-deployment-operator.cc.sap/origin: additions` on every resource
+- Delete `webhooks.yaml`, `controller-manager.yaml`, `managedresource.yaml`, `webhook-config.yaml`, `_webhook-injector-sidecar.tpl`, `managedresources/`, `values-overrides.yaml`, `values-managed-resources.yaml`
 - Delete `make build-metal-operator-remote`
 - Chart to `0.7.0` (breaking bump)
 
 **Success criterion**: `helm template metal-operator-remote --values <shoot-values>` produces the expected upstream + additions stream (verified via equivalence test).
 
-### Phase 3: Update webhook-injector for SSA field-manager discipline (~1 week)
+### Phase 3: Verify webhook-injector ConfigMap contract (~1-2 days)
 
-- Verify webhook-injector currently sets a distinct SSA field manager on its writes
-- If not, add flag `--field-manager=webhook-injector` (or similar) and ensure it's used for all writes
-- Test coexistence: operator applies WebhookConfig without caBundle; injector patches caBundle; operator re-apply doesn't clobber
+The injector requires **no code change** under this design — it keeps its existing `--webhook-config-name` source-ConfigMap contract and its `Create`/`Update` delivery. This phase only verifies the contract:
 
-**Success criterion**: SSA coexistence test passes; injector reads no ConfigMap and only manages certs + caBundle in shoot.
+- Confirm the operator's `packageWebhookConfigsForInjector` ConfigMap (name, `webhooks.yaml` data key, YAML shape) exactly matches what the injector's `--webhook-config-name` reader expects
+- Confirm the injector and operator write disjoint resource sets on the shoot (operator: CRDs/RBAC/SA/additions; injector: WebhookConfigurations) — no shared resource, so no field-ownership coordination to test
+- Resolve §9.2 (CRD conversion-webhook caBundle) before migrating any operator whose CRDs carry a conversion webhook (metal-operator)
+
+**Success criterion**: injector consumes the operator-produced ConfigMap unchanged; WebhookConfigurations appear on the shoot with a valid caBundle; operator and injector touch no common resource. §9.2 resolved for metal-operator.
 
 ### Phase 4: Deploy operator to one QA shoot (~1 week)
 
@@ -1088,7 +1480,7 @@ Per transformation, table-driven over fixtures.
 - Deletion cascades correctly per policy
 - Transformation errors surface in CR status
 - Drift correction re-applies mutated resources
-- SSA field-manager coexistence with injector doesn't cause ping-pong
+- Operator's remote apply set excludes WebhookConfigurations (they are packaged for the injector, not applied by the operator), so operator and injector write disjoint shoot resources
 
 ### 7.3 Equivalence tests
 
@@ -1115,11 +1507,13 @@ Before Phase 4 rollout, on a QA shoot:
 - Verify operator's next reconcile re-applies
 - Verify CR status reflects Progressing → Healthy after re-apply
 
-### 7.6 SSA coexistence with injector
+### 7.6 Operator/injector separation on QA
 
 - Deploy operator + injector on QA
-- Verify WebhookConfig lifecycle: operator applies without caBundle → injector patches → operator re-apply preserves caBundle
-- Rotate cert → injector updates caBundle → operator re-apply preserves new caBundle
+- Verify the operator produces the injector's source ConfigMap (`packageWebhookConfigsForInjector`) in the expected name/shape
+- Verify the injector reads that ConfigMap and applies WebhookConfigurations to the shoot with a valid caBundle
+- Verify the operator's remote apply set contains no WebhookConfigurations (operator and injector touch disjoint shoot resources)
+- Verify §9.2 (CRD conversion-webhook caBundle) is resolved for metal-operator before relying on conversion webhooks
 
 ---
 
@@ -1151,11 +1545,18 @@ For ipam-capi migration: operator needs to fetch kustomize source. Currently ref
 
 To be resolved before Phase 7.
 
-### 9.2 Injector field-manager verification
+### 9.2 CRD conversion-webhook caBundle management
 
-Does webhook-injector currently write with a distinct SSA field manager? Needed for SSA coexistence.
+The webhook-injector's only path for stamping caBundle into a CRD's `.spec.conversion.webhook.clientConfig.caBundle` is its `ManagedResourceReconciler`: it selects Gardener `ManagedResource` objects on the seed by `--managed-resource-label`, walks their referenced Secrets, finds embedded CRDs with `conversion.strategy=Webhook`, and stamps caBundle. This design produces **no** `ManagedResource` objects (GRM elimination is a core goal, §2.2.1), so that path never fires for CRDs delivered by this operator.
 
-To be verified during Phase 3. Small injector change if not already the case.
+Result: for an operator whose CRDs carry a conversion webhook (metal-operator today), caBundle on those CRDs is **not managed** under this design as written. The operator must NOT take this on — doing the injector's caBundle work is out of scope (operator/injector separation, §3.8).
+
+Candidate resolutions (decision required before migrating any conversion-webhook operator):
+- **A. Emit a minimal ManagedResource for CRDs only.** Wrap the remote CRDs in a `ManagedResource` carrying `--managed-resource-label`, keeping the injector's existing CRD-stamping path. Reintroduces GRM for one resource class — a targeted, documented exception to the GRM-elimination goal, not a general regression.
+- **B. Extend the injector with a ConfigMap-driven CRD-stamping mode.** Teach the injector to stamp caBundle into CRDs named in a ConfigMap (analogous to its WebhookConfig path), so the operator can feed it via a cross-stream transformation without ManagedResources. Requires an injector code change.
+- **C. Confirm no target operator actually needs it.** Verify whether metal-operator's CRDs genuinely require conversion-webhook caBundle in the remote (virtual) cluster. If conversion webhooks are unused there, the whole concern is moot.
+
+To be resolved before Phase 5 (metal-operator production migration). Does not block the scaffold/CRD-types change.
 
 ### 9.3 Per-CR transformation config duplication
 
@@ -1168,14 +1569,17 @@ Options:
 
 Deferred to Phase 1.
 
-### 9.4 Kustomize values projection
+### 9.4 Kustomize source parameterization for ipam-capi
 
-How are `spec.source.kustomize.values` projected into the kustomize root? Candidates:
-- Generated `configMapGenerator` overlay
-- kustomize `replacements`
-- Convention: kustomize source declares expected literals
+`spec.source.kustomize` has `url` + `hostPath` + `remotePath`, but no equivalent of Helm's `values` map (kustomize has no Helm-values equivalent — see §3.3). Per-cluster parameterization for kustomize sources must come from elsewhere.
 
-Deferred to Phase 7.
+Open question for ipam-capi's specific needs: today's `make build-ipam-capi-remote` sets `.controllerManager.manager.image.tag=$(PROVIDER_IPAM_VERSION)` on the generated Helm chart's values. Under the new design (two-render + direct kustomize), this variability must come from somewhere:
+
+- **Option A**: image tag is baked into the kustomize source's `images:` transformer at a pinned ref; different environments use different refs of the kustomize source (via CR's `spec.source.kustomize.url?ref=...`)
+- **Option B**: operator gains a `setImageTag` transformation type (currently listed as a candidate future transformation in §3.4.6); CR carries the tag override
+- **Option C**: add CR-side `spec.source.kustomize.images` and/or `spec.source.kustomize.patches` — kustomize-native overrides that the operator applies to both renders before krusty build
+
+Deferred to Phase 7. Preference is A if upstream release cadence aligns with kustomize ref bumps, otherwise C (kustomize-native, additive schema).
 
 ### 9.5 CRD versioning strategy
 
@@ -1201,6 +1605,35 @@ Operator is a Deployment in shoot-cp namespace. Deployed by:
 
 CRDs on shoot are retained by default (`spec.deletionPolicy.crds: Retain`) to avoid catastrophic data loss on CR delete. Confirm this default is right, or make explicit configuration required.
 
+### 9.9 Validating admission webhook for `patch` content
+
+**Planned for v2, deferred from v1**.
+
+Under v1, CRD OpenAPI schema validates the shape of `PatchSpec` (`strategicMerge` is an object, `jsonPatch` is an array of ops with valid enum values), but the **inner content** of `strategicMerge` and `jsonPatch[].value` is marked `x-kubernetes-preserve-unknown-fields: true` — Kubernetes doesn't validate it against any schema. Content-level errors (wrong field types inside the patch, unknown fields on the target kind) surface at reconcile time.
+
+A validating admission webhook would parse the patch content against the target kind's OpenAPI schema at admission time. Would catch:
+- Type errors inside strategic-merge patches (e.g., `spec.replicas: "three"` when integer expected)
+- Unknown field references in `jsonPatch` `path` values (e.g., `/spec/repliacs` typo)
+- Structural violations that CRD schema can't express
+
+**Why not v1**:
+- Webhook infrastructure adds cert management, webhook Service, ValidatingWebhookConfiguration
+- Per-shoot deployment topology means either one webhook per operator instance (many endpoints) or a centralized webhook (extra deployment)
+- Runtime reconcile is fast enough that content errors surface within seconds — acceptable delay for v1
+
+**What v1 provides**:
+- Structural admission validation (typed variant selection, `jsonPatch.op` enum, required fields, object-vs-array shape checking)
+- Runtime validation with CR status conditions surfacing errors
+- Operator's `internal/webhook/` package is scaffolded in v1 (via `kubebuilder create webhook`) but not wired into a running webhook — deferred to v2 when we implement content validation
+
+**v2 implementation** (deferred):
+- Register operator as a `ValidatingWebhookConfiguration` targeting `DualDeploymentOperator` CRs
+- Webhook handler parses `patch.strategicMerge` / `patch.jsonPatch` and validates against target kind's OpenAPI schema (fetched from the API server's OpenAPI endpoint at operator startup)
+- Reject CRs with content-level errors at admission
+- Cert management: cert-manager or a self-signed cert rotated by the operator itself
+
+Track in v2 planning issue.
+
 ---
 
 ## 10. Glossary
@@ -1212,14 +1645,15 @@ CRDs on shoot are retained by default (`spec.deletionPolicy.crds: Retain`) to av
 - **Wrapper chart** — historical name for `system/<operator>-remote/` Helm charts. Under this design, only helm-upstream operators have one.
 - **SSA** — Server-Side Apply, Kubernetes API primitive for declarative apply with field ownership
 - **Field manager** — identifier for the client that owns a set of fields in a resource (per-field granularity via SSA)
-- **webhook-injector** — companion controller ([SAP-cloud-infrastructure/webhook-injector](https://github.com/SAP-cloud-infrastructure/webhook-injector)) that manages TLS cert lifecycle and patches caBundles on WebhookConfigurations + CRDs. Under Option 2, its role narrows to certs/caBundle only; delivery of WebhookConfigurations moves to the operator.
-- **Transformation** — a typed Go struct implementing `Apply(manifests) → manifests`, opt-in per CR
-- **Source discriminator** — the `spec.source.{helm,kustomize}` choice in the CR
-- **Target annotation** — `dual-deployment-operator.cc.sap/target: {host|remote|drop}` on a manifest, overrides kind-based split rules
-- **Origin annotation** — `dual-deployment-operator.cc.sap/origin: {upstream|additions}` on a manifest, tagged by chart's `_helpers.tpl` (additions) or by operator on fetch (upstream)
+- **webhook-injector** — companion controller ([SAP-cloud-infrastructure/webhook-injector](https://github.com/SAP-cloud-infrastructure/webhook-injector)) that manages the TLS cert lifecycle and delivers WebhookConfigurations to the shoot from a source ConfigMap (`--webhook-config-name`), injecting the current caBundle. Runs unchanged under this design: the operator produces the source ConfigMap (via `packageWebhookConfigsForInjector`) instead of the chart baking it, but the injector's contract, delivery, and caBundle handling are unmodified. The operator does not deliver WebhookConfigurations, stamp caBundle, or manage certs. (CRD conversion-webhook caBundle: see §9.2 open limitation.)
+- **Transformation** — a typed Go struct implementing `Apply(manifests) → manifests`, opt-in per CR. Applied to each render independently under the two-render pattern.
+- **Source discriminator** — the `spec.source.{helm,kustomize}` choice in the CR. Each source discriminator has its own nested fields (Helm has `values`/`hostValues`/`remoteValues`; kustomize has `url`/`hostPath`/`remotePath`).
+- **Two-render pattern** — the operator renders the source twice per reconcile, once per mode, producing disjoint host and remote manifest sets. See §3.5.
+- **Mode** — one of `host` or `remote`. For Helm sources, injected as `.Values.mode`. For kustomize, selected via `hostPath` / `remotePath`.
+- **Origin annotation** — `dual-deployment-operator.cc.sap/origin: {upstream|additions}` on a manifest. Chart authors stamp `additions` on their own templates via `_helpers.tpl` (Helm) or `commonAnnotations` (kustomize). Operator tags unlabeled manifests as `upstream`.
 - **Gardener token-requestor** — Gardener component that provisions shoot API tokens as Secrets in the seed
 - **GRM** — gardener-resource-manager; per-shoot Gardener component that reconciles `ManagedResource` objects. Not used under this design (operator applies directly).
 
 ---
 
-*Design doc revision 3 — Option 2 chosen. Predecessor revisions: r2 (Model C with MR-based remote delivery), r1 (Model A/B-ish with `spec.upstreamChart` + `spec.host.chart`). Both archived in git history.*
+*Design doc revision 6 — hybrid patch DSL adopted; renameKind removed. Predecessor revisions: r5 (typed-only with 6 transformations), r4 (two-render pattern), r3 (single-render + split, superseded), r2 (MR-based remote delivery, superseded), r1 (two-chart CR, superseded). All archived in git history.*

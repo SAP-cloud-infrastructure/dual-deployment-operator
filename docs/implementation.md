@@ -32,7 +32,8 @@ helm.sh/helm/v3                        # for Helm chart pull + render
 sigs.k8s.io/kustomize/api/krusty       # for kustomize source render
 sigs.k8s.io/controller-runtime         # already brought in by kubebuilder
 k8s.io/client-go                       # for dynamic client + SSA
-k8s.io/apimachinery                    # for unstructured
+k8s.io/apimachinery                    # for unstructured + strategic-merge patch
+github.com/evanphx/json-patch          # for JSON Patch (RFC 6902) in patch transformation
 ```
 
 No Gardener imports needed (we don't emit ManagedResources).
@@ -61,13 +62,10 @@ dual-deployment-operator/
 │   │   └── kustomize.go                        # krusty renderer
 │   ├── transform/
 │   │   ├── transform.go                        # Transformation interface + registry
-│   │   ├── inject_init_container.go
-│   │   ├── rename_kind.go
+│   │   ├── patch.go                            # strategic-merge + JSON Patch
 │   │   ├── rewrite_webhook_url.go
-│   │   ├── add_labels.go
-│   │   └── filter_kinds.go
-│   ├── split/
-│   │   └── split.go                            # kind rules + annotation router
+│   │   ├── filter_kinds.go
+│   │   └── package_webhook_configs_for_injector.go   # cross-stream
 │   ├── deliver/
 │   │   ├── deliver.go                          # Applier interface
 │   │   ├── apply.go                            # SSA implementation
@@ -108,10 +106,17 @@ type Source struct {
 }
 
 type HelmSource struct {
-    Repo    string                       `json:"repo"`
-    Name    string                       `json:"name"`
-    Version string                       `json:"version"`
-    Values  *apiextensionsv1.JSON        `json:"values,omitempty"`
+    Repo         string                `json:"repo"`
+    Name         string                `json:"name"`
+    Version      string                `json:"version"`
+    // Values applied to BOTH host and remote renders (common per-cluster stuff).
+    Values       *apiextensionsv1.JSON `json:"values,omitempty"`
+    // Values applied ONLY to the host render (typically enables the host-side
+    // parts of the upstream subchart).
+    HostValues   *apiextensionsv1.JSON `json:"hostValues,omitempty"`
+    // Values applied ONLY to the remote render (typically enables the remote-side
+    // parts of the upstream subchart).
+    RemoteValues *apiextensionsv1.JSON `json:"remoteValues,omitempty"`
 }
 
 // KustomizeSource references a kustomize root plus its two overlay subpaths.
@@ -132,25 +137,51 @@ type RemoteKubeconfigRef struct {
 
 // Transformation is a discriminated union — exactly one field set.
 type Transformation struct {
-    InjectInitContainer *InjectInitContainerSpec `json:"injectInitContainer,omitempty"`
-    RenameKind          *RenameKindSpec          `json:"renameKind,omitempty"`
-    RewriteWebhookURL   *RewriteWebhookURLSpec   `json:"rewriteWebhookURL,omitempty"`
-    AddLabels           *AddLabelsSpec           `json:"addLabels,omitempty"`
-    FilterKinds         *FilterKindsSpec         `json:"filterKinds,omitempty"`
+    // Per-render transformations (3)
+    Patch             *PatchSpec             `json:"patch,omitempty"`
+    RewriteWebhookURL *RewriteWebhookURLSpec `json:"rewriteWebhookURL,omitempty"`
+    FilterKinds       *FilterKindsSpec       `json:"filterKinds,omitempty"`
+
+    // Cross-stream transformations (1)
+    PackageWebhookConfigsForInjector *PackageWebhookConfigsForInjectorSpec `json:"packageWebhookConfigsForInjector,omitempty"`
 }
 
-type InjectInitContainerSpec struct {
-    Selector            Selector        `json:"selector"`
-    Container           corev1.Container `json:"container"`
-    AdditionalVolumes   []corev1.Volume  `json:"additionalVolumes,omitempty"`
+type PatchSpec struct {
+    Target Selector `json:"target"`
+
+    // Exactly one of the two must be set. Validated by a CEL rule on the CRD:
+    //   has(self.strategicMerge) != has(self.jsonPatch)
+    //
+    // strategicMerge is applied as a Kubernetes strategic-merge patch
+    // (list-key aware; merges arrays by identity fields).
+    // Marked +kubebuilder:pruning:PreserveUnknownFields so arbitrary
+    // patch content is accepted (structural validation only).
+    // +kubebuilder:validation:Schemaless
+    // +kubebuilder:pruning:PreserveUnknownFields
+    StrategicMerge *apiextensionsv1.JSON `json:"strategicMerge,omitempty"`
+
+    // jsonPatch is a list of RFC 6902 operations.
+    // Each op is admission-validated (op enum, required fields).
+    JSONPatch []JSONPatchOp `json:"jsonPatch,omitempty"`
 }
 
-type RenameKindSpec struct {
-    From            string `json:"from"`
-    To              string `json:"to"`
-    FromAPIVersion  string `json:"fromApiVersion,omitempty"`
-    ToAPIVersion    string `json:"toApiVersion,omitempty"`
-    Source          string `json:"source,omitempty"`   // "upstream" | "additions" | ""
+// JSONPatchOp is one operation in a JSON Patch (RFC 6902).
+type JSONPatchOp struct {
+    // Op is the operation kind.
+    // +kubebuilder:validation:Enum=add;remove;replace;move;copy;test
+    Op string `json:"op"`
+
+    // Path is a JSON Pointer identifying the target location.
+    // +kubebuilder:validation:MinLength=1
+    Path string `json:"path"`
+
+    // From is used by move and copy operations.
+    From string `json:"from,omitempty"`
+
+    // Value is the value for add/replace/test operations.
+    // +kubebuilder:validation:Schemaless
+    // +kubebuilder:pruning:PreserveUnknownFields
+    Value *apiextensionsv1.JSON `json:"value,omitempty"`
 }
 
 type RewriteWebhookURLSpec struct {
@@ -158,14 +189,17 @@ type RewriteWebhookURLSpec struct {
     TargetKinds []string `json:"targetKinds,omitempty"`
 }
 
-type AddLabelsSpec struct {
-    Selector Selector          `json:"selector"`
-    Labels   map[string]string `json:"labels"`
-}
-
 type FilterKindsSpec struct {
     Kinds  []string `json:"kinds"`
     Source string   `json:"source,omitempty"`
+}
+
+// PackageWebhookConfigsForInjectorSpec configures the cross-stream transformation
+// that moves WebhookConfigurations from remote render into a ConfigMap on host
+// render, for consumption by the webhook-injector sidecar.
+type PackageWebhookConfigsForInjectorSpec struct {
+    ConfigMapName string `json:"configMapName"`
+    DataKey       string `json:"dataKey,omitempty"`  // default: "webhooks.yaml"
 }
 
 type Selector struct {
@@ -214,13 +248,40 @@ Use CRD OpenAPI validation via kubebuilder annotations:
 
 - `+kubebuilder:validation:MinLength=1` on all string identifiers
 - `+kubebuilder:validation:Enum=Retain;Delete` on `DeletionPolicy.CRDs`
-- Custom webhook or admission-time validation to enforce:
-  - Exactly one of `Source.Helm` / `Source.Kustomize`
-  - Exactly one of the `Transformation` union fields
-  - `KustomizeSource.URL` includes `?ref=` query parameter
-  - `HelmSource.Version` is a valid semver constraint
+- `+kubebuilder:validation:Enum=add;remove;replace;move;copy;test` on `JSONPatchOp.Op`
+- `+kubebuilder:pruning:PreserveUnknownFields` on `PatchSpec.StrategicMerge` and `JSONPatchOp.Value` (arbitrary content allowed inside the object)
 
-Consider using CEL validation rules (Kubernetes 1.29+) for the discriminator constraints — cleaner than a validating webhook for simple discriminators.
+Discriminator constraints via CEL (Kubernetes 1.29+, cleaner than validating webhook):
+
+```go
+// On Source:
+// +kubebuilder:validation:XValidation:rule="has(self.helm) != has(self.kustomize)",message="exactly one of source.helm or source.kustomize must be set"
+
+// On PatchSpec:
+// +kubebuilder:validation:XValidation:rule="has(self.strategicMerge) != has(self.jsonPatch)",message="exactly one of patch.strategicMerge or patch.jsonPatch must be set"
+
+// On Transformation:
+// +kubebuilder:validation:XValidation:rule="(has(self.patch) ? 1 : 0) + (has(self.rewriteWebhookURL) ? 1 : 0) + (has(self.filterKinds) ? 1 : 0) + (has(self.packageWebhookConfigsForInjector) ? 1 : 0) == 1",message="exactly one transformation type must be set per entry"
+
+// On KustomizeSource.URL:
+// +kubebuilder:validation:XValidation:rule="self.matches('.*[?&]ref=.+')",message="kustomize url must include a pinned ref= parameter"
+
+// On HelmSource.Version:
+// +kubebuilder:validation:MinLength=1
+// (semver-strict validation deferred to webhook — CEL can't validate semver format cleanly)
+```
+
+**Admission-time validation gained by typed variants** (r6 refinement):
+- `strategicMerge` must be an object (not string, not array) — enforced by JSON Schema type
+- `jsonPatch` must be an array of ops with valid `op` enum and required `path` — enforced by JSON Schema type + kubebuilder enum
+- CEL rule enforces exactly-one-of
+
+**Not caught at admission** (deferred to runtime + planned admission webhook in v2):
+- Content-level errors inside `strategicMerge` (wrong field types, unknown fields against target's schema)
+- `jsonPatch` paths that don't exist on target
+- Whether the patch will apply cleanly
+
+See design.md §9.9 for planned admission webhook.
 
 ---
 
@@ -233,8 +294,15 @@ package source
 
 import "context"
 
+type Mode string
+const (
+    ModeHost   Mode = "host"
+    ModeRemote Mode = "remote"
+)
+
+// Source renders the manifest stream for a specific mode.
 type Source interface {
-    Render(ctx context.Context) ([]manifest.Manifest, error)
+    Render(ctx context.Context, mode Mode) ([]manifest.Manifest, error)
 }
 
 func From(spec v1alpha1.Source) (Source, error) {
@@ -258,12 +326,12 @@ type Helm struct {
     spec *v1alpha1.HelmSource
 }
 
-func (h *Helm) Render(ctx context.Context) ([]manifest.Manifest, error) {
+func (h *Helm) Render(ctx context.Context, mode Mode) ([]manifest.Manifest, error) {
     // 1. Set up registry client (OCI auth if needed)
     settings := cli.New()
     registryClient, _ := registry.NewClient(...)
 
-    // 2. Pull chart to temp dir
+    // 2. Pull chart to temp dir (cached across renders of same repo+name+version)
     puller := action.NewPullWithOpts(action.WithConfig(...))
     puller.RepoURL = h.spec.Repo
     puller.Version = h.spec.Version
@@ -273,8 +341,20 @@ func (h *Helm) Render(ctx context.Context) ([]manifest.Manifest, error) {
     // 3. Load chart
     chart, err := loader.Load(chartPath)
 
-    // 4. Merge values
-    values := parseValues(h.spec.Values)
+    // 4. Merge values in precedence order:
+    //    chart.values.yaml (chart defaults)
+    //      < spec.Values                     (common per-cluster)
+    //      < spec.HostValues or spec.RemoteValues (mode-specific)
+    //      < {mode: "host"|"remote"}         (operator-injected)
+    values := mergeValues(
+        chart.Values,          // chart defaults (already loaded)
+        parseValues(h.spec.Values),
+        parseValues(h.spec.modeValues(mode)),  // returns HostValues or RemoteValues
+        map[string]any{"mode": string(mode)},
+    )
+
+    // Reject if user tried to set mode via values (only operator sets it)
+    // ...admission validation preferred; runtime check as safeguard...
 
     // 5. Render templates
     installer := action.NewInstall(cfg)
@@ -286,16 +366,25 @@ func (h *Helm) Render(ctx context.Context) ([]manifest.Manifest, error) {
 
     release, err := installer.Run(chart, values)
 
-    // 6. Parse rendered YAML → []Manifest with origin: upstream
-    return parseManifests(release.Manifest, OriginUpstream), nil
+    // 6. Parse rendered YAML → []Manifest, tagged with origin: upstream
+    //    (chart's own templates already carry origin: additions via _helpers.tpl)
+    return parseManifestsWithOriginFallback(release.Manifest, OriginUpstream), nil
+}
+
+func (spec *v1alpha1.HelmSource) modeValues(mode Mode) *apiextensionsv1.JSON {
+    switch mode {
+    case ModeHost:   return spec.HostValues
+    case ModeRemote: return spec.RemoteValues
+    }
+    return nil
 }
 ```
 
 **Key concerns**:
 - OCI registry auth for private repos (`keppel.eu-de-1.cloud.sap`) — reuse existing pull secrets
-- Chart caching to avoid re-pulling on every reconcile (LRU cache keyed by repo+name+version)
-- Values merging — CR values override chart's `values.yaml` per Helm precedence
-- Post-render marking with `origin: upstream` on every manifest
+- Chart caching to avoid re-pulling on every reconcile AND every render (LRU cache keyed by repo+name+version; both renders in one reconcile share the cached chart)
+- Values merging — mode-specific values override common values, per Helm precedence
+- Post-render origin tagging: manifests carrying `dual-deployment-operator.cc.sap/origin: additions` (set by chart's `_helpers.tpl`) keep that origin; all others get `origin: upstream`
 
 ### Kustomize renderer
 
@@ -306,7 +395,21 @@ type Kustomize struct {
     spec *v1alpha1.KustomizeSource
 }
 
-func (k *Kustomize) Render(ctx context.Context) ([]manifest.Manifest, error) {
+func (k *Kustomize) Render(ctx context.Context, mode Mode) ([]manifest.Manifest, error) {
+    // Determine overlay path per mode
+    var subPath string
+    switch mode {
+    case ModeHost:
+        subPath = k.spec.HostPath
+        if subPath == "" { subPath = "host" }
+    case ModeRemote:
+        subPath = k.spec.RemotePath
+        if subPath == "" { subPath = "remote" }
+    }
+
+    // Construct root URL: base URL + subpath (preserving query string / ?ref=)
+    rootURL := joinURLPath(k.spec.URL, subPath)
+
     // 1. Set up krusty options
     opts := krusty.MakeDefaultOptions()
     opts.LoadRestrictions = types.LoadRestrictionsNone   // allow remote refs
@@ -314,24 +417,25 @@ func (k *Kustomize) Render(ctx context.Context) ([]manifest.Manifest, error) {
     // 2. Init file system with remote support
     fSys := filesys.MakeFsOnDisk()  // krusty handles URL resolution
 
-    // 3. Kustomize build
-    k := krusty.MakeKustomizer(opts)
-    resmap, err := k.Run(fSys, spec.URL)
+    // 3. Kustomize build the mode-specific overlay
+    kk := krusty.MakeKustomizer(opts)
+    resmap, err := kk.Run(fSys, rootURL)
     if err != nil { return nil, err }
 
     // 4. Serialize
     yaml, err := resmap.AsYaml()
 
-    // 5. Parse → []Manifest with origin: upstream
-    // Special handling: our additions/ subdir resources get origin: additions
-    return parseManifests(yaml, ...), nil
+    // 5. Parse → []Manifest, respecting origin annotations set by
+    //    additions/*/kustomization.yaml (commonAnnotations); default upstream.
+    return parseManifestsWithOriginFallback(yaml, OriginUpstream), nil
 }
 ```
 
 **Key concerns**:
-- Value projection into kustomize root — spec.Kustomize.Values need a mechanism. Options: generate a configMapGenerator patch on the fly, or convention (source declares expected literals; operator adds patches). Defer decision until Phase 6.
+- No value projection. `spec.source.kustomize` has no `values` field. Per-CR parameterization for kustomize is via mode selection (`hostPath`/`remotePath`) or, if needed, future kustomize-native fields (`images`, `patches` — see design.md §9.4). Not a Helm values map.
 - Ref pinning — reject URLs without `?ref=<sha|tag>` at admission time
-- Distinguishing origin: for ipam-capi, the additions live under `additions/` subdir of the kustomize root. Operator inspects the resource's source path (kustomize preserves `internal.config.kubernetes.io/kustomize-source` annotation) to tag origin.
+- Overlay layout: kustomize source must have two subdirectories (`host/` and `remote/` by default), each with its own `kustomization.yaml` selecting the appropriate resources for that mode. See design.md §4.2 for the ipam-capi layout.
+- Origin tagging: chart authors add `commonAnnotations: {dual-deployment-operator.cc.sap/origin: additions}` on the `additions/host/` and `additions/remote/` kustomization files. Other resources (upstream) default to `origin: upstream`.
 
 ---
 
@@ -339,29 +443,101 @@ func (k *Kustomize) Render(ctx context.Context) ([]manifest.Manifest, error) {
 
 ### Interface
 
+Two transformation interfaces distinguished by scope. The reconciler runs per-render first, then cross-stream.
+
 ```go
 package transform
 
-type Transformation interface {
+// PerRenderTransformation operates on a single render's manifest stream.
+type PerRenderTransformation interface {
     Type() string
     Apply(manifests []manifest.Manifest) ([]manifest.Manifest, error)
 }
 
-func From(spec v1alpha1.Transformation) (Transformation, error) {
-    switch {
-    case spec.InjectInitContainer != nil:
-        return &injectInitContainer{spec: spec.InjectInitContainer}, nil
-    case spec.RenameKind != nil:
-        return &renameKind{spec: spec.RenameKind}, nil
-    case spec.RewriteWebhookURL != nil:
-        return &rewriteWebhookURL{spec: spec.RewriteWebhookURL}, nil
-    case spec.AddLabels != nil:
-        return &addLabels{spec: spec.AddLabels}, nil
-    case spec.FilterKinds != nil:
-        return &filterKinds{spec: spec.FilterKinds}, nil
-    default:
-        return nil, errors.New("no transformation type set")
+// CrossStreamTransformation operates on both renders together, potentially
+// moving resources between them.
+type CrossStreamTransformation interface {
+    Type() string
+    ApplyCrossStream(host, remote []manifest.Manifest) (newHost, newRemote []manifest.Manifest, err error)
+}
+
+// Group parses spec.Transformations and separates entries by scope.
+// Preserves declaration order within each category.
+func Group(specs []v1alpha1.Transformation) (perRender []PerRenderTransformation, crossStream []CrossStreamTransformation, err error) {
+    for _, spec := range specs {
+        switch {
+        case spec.Patch != nil:
+            perRender = append(perRender, &patch{spec: spec.Patch})
+        case spec.RewriteWebhookURL != nil:
+            perRender = append(perRender, &rewriteWebhookURL{spec: spec.RewriteWebhookURL})
+        case spec.FilterKinds != nil:
+            perRender = append(perRender, &filterKinds{spec: spec.FilterKinds})
+        case spec.PackageWebhookConfigsForInjector != nil:
+            crossStream = append(crossStream, &packageWebhookConfigsForInjector{spec: spec.PackageWebhookConfigsForInjector})
+        default:
+            return nil, nil, errors.New("no transformation type set in entry")
+        }
     }
+    return perRender, crossStream, nil
+}
+```
+
+### packageWebhookConfigsForInjector implementation
+
+```go
+package transform
+
+type packageWebhookConfigsForInjector struct {
+    spec *v1alpha1.PackageWebhookConfigsForInjectorSpec
+}
+
+func (p *packageWebhookConfigsForInjector) Type() string { return "packageWebhookConfigsForInjector" }
+
+func (p *packageWebhookConfigsForInjector) ApplyCrossStream(host, remote []manifest.Manifest) ([]manifest.Manifest, []manifest.Manifest, error) {
+    dataKey := p.spec.DataKey
+    if dataKey == "" {
+        dataKey = "webhooks.yaml"
+    }
+
+    // 1. Extract WebhookConfigurations from remote
+    var webhookConfigs []manifest.Manifest
+    var remainingRemote []manifest.Manifest
+    for _, m := range remote {
+        if m.GetKind() == "ValidatingWebhookConfiguration" || m.GetKind() == "MutatingWebhookConfiguration" {
+            webhookConfigs = append(webhookConfigs, m)
+        } else {
+            remainingRemote = append(remainingRemote, m)
+        }
+    }
+    if len(webhookConfigs) == 0 {
+        return host, remote, nil  // nothing to package
+    }
+
+    // 2. Serialize as multi-doc YAML
+    yaml, err := serializeMultiDoc(webhookConfigs)
+    if err != nil { return nil, nil, err }
+
+    // 3. Build ConfigMap
+    cm := &unstructured.Unstructured{Object: map[string]interface{}{
+        "apiVersion": "v1",
+        "kind":       "ConfigMap",
+        "metadata": map[string]interface{}{
+            "name":      p.spec.ConfigMapName,
+            "annotations": map[string]interface{}{
+                "dual-deployment-operator.cc.sap/origin": "additions",
+            },
+        },
+        "data": map[string]interface{}{
+            dataKey: yaml,
+        },
+    }}
+
+    newHost := append(host, manifest.Manifest{
+        Unstructured: cm,
+        Origin:       manifest.OriginAdditions,
+    })
+
+    return newHost, remainingRemote, nil
 }
 ```
 
@@ -370,31 +546,189 @@ func From(spec v1alpha1.Transformation) (Transformation, error) {
 For each transformation, structure tests as:
 
 ```go
-func TestInjectInitContainer(t *testing.T) {
+func TestPatch(t *testing.T) {
     tests := []struct {
         name    string
         input   []manifest.Manifest
-        spec    *v1alpha1.InjectInitContainerSpec
+        spec    *v1alpha1.PatchSpec
         want    []manifest.Manifest
         wantErr string
     }{
         {
-            name: "injects sidecar into matching Deployment",
+            name: "strategicMerge injects sidecar into matching Deployment",
             input: []manifest.Manifest{fixture("upstream-deployment.yaml")},
-            spec: &v1alpha1.InjectInitContainerSpec{...},
+            spec: &v1alpha1.PatchSpec{
+                Target: v1alpha1.Selector{Kind: "Deployment", Name: "controller-manager"},
+                StrategicMerge: mustJSON(`{
+                    "spec": {
+                        "template": {
+                            "spec": {
+                                "initContainers": [
+                                    {"name": "webhook-injector", "image": "keppel.../webhook-injector:sha-abc"}
+                                ],
+                                "volumes": [
+                                    {"name": "webhook-certs", "emptyDir": {}}
+                                ]
+                            }
+                        }
+                    }
+                }`),
+            },
             want: []manifest.Manifest{fixture("expected-deployment-with-sidecar.yaml")},
+        },
+        {
+            name: "strategicMerge adds label to matching CRDs",
+            input: []manifest.Manifest{fixture("upstream-crd.yaml")},
+            spec: &v1alpha1.PatchSpec{
+                Target: v1alpha1.Selector{Kind: "CustomResourceDefinition"},
+                StrategicMerge: mustJSON(`{
+                    "metadata": {
+                        "labels": {"metal-operator-remote-webhook-injector": "true"}
+                    }
+                }`),
+            },
+            want: []manifest.Manifest{fixture("expected-crd-with-label.yaml")},
+        },
+        {
+            name: "jsonPatch applies operations by path",
+            input: []manifest.Manifest{fixture("some-deployment.yaml")},
+            spec: &v1alpha1.PatchSpec{
+                Target: v1alpha1.Selector{Kind: "Deployment"},
+                JSONPatch: []v1alpha1.JSONPatchOp{
+                    {Op: "replace", Path: "/spec/replicas", Value: mustJSON(`3`)},
+                },
+            },
+            want: []manifest.Manifest{fixture("expected-deployment-3-replicas.yaml")},
         },
         {
             name: "error when no matching resource",
             input: []manifest.Manifest{fixture("unrelated.yaml")},
-            spec: &v1alpha1.InjectInitContainerSpec{Selector: Selector{Kind: "Deployment", Name: "does-not-exist"}},
+            spec: &v1alpha1.PatchSpec{
+                Target: v1alpha1.Selector{Kind: "Deployment", Name: "does-not-exist"},
+                StrategicMerge: mustJSON(`{}`),
+            },
             wantErr: "no matching resource",
         },
-        // ...
+        {
+            name: "error when both strategicMerge and jsonPatch set",
+            input: []manifest.Manifest{fixture("some-deployment.yaml")},
+            spec: &v1alpha1.PatchSpec{
+                Target: v1alpha1.Selector{Kind: "Deployment"},
+                StrategicMerge: mustJSON(`{}`),
+                JSONPatch: []v1alpha1.JSONPatchOp{{Op: "test", Path: "/foo"}},
+            },
+            wantErr: "exactly one of strategicMerge or jsonPatch must be set",
+        },
+        {
+            name: "error when neither variant set",
+            input: []manifest.Manifest{fixture("some-deployment.yaml")},
+            spec: &v1alpha1.PatchSpec{
+                Target: v1alpha1.Selector{Kind: "Deployment"},
+            },
+            wantErr: "exactly one of strategicMerge or jsonPatch must be set",
+        },
+        // Additional cases: invalid JSON Patch path, strategic-merge conflict, etc.
     }
     // ...
 }
+
+// Helper for building apiextensionsv1.JSON values in tests
+func mustJSON(s string) *apiextensionsv1.JSON {
+    return &apiextensionsv1.JSON{Raw: []byte(s)}
+}
 ```
+
+Similar tests for `rewriteWebhookURL`, `filterKinds`, `packageWebhookConfigsForInjector`.
+
+### `patch` implementation
+
+```go
+package transform
+
+import (
+    "encoding/json"
+    "k8s.io/apimachinery/pkg/util/strategicpatch"
+    jsonpatch "github.com/evanphx/json-patch"
+)
+
+type patch struct {
+    spec *v1alpha1.PatchSpec
+}
+
+func (p *patch) Type() string { return "patch" }
+
+func (p *patch) Apply(manifests []manifest.Manifest) ([]manifest.Manifest, error) {
+    // Validate that exactly one variant is set. Should be enforced by CEL at
+    // admission, but re-check here as a safety net for older API-server versions
+    // or CRDs installed without CEL.
+    if (p.spec.StrategicMerge == nil) == (p.spec.JSONPatch == nil) {
+        return nil, fmt.Errorf("patch: exactly one of strategicMerge or jsonPatch must be set")
+    }
+
+    // Prepare the patch bytes once — same patch applied to all matched resources.
+    var patchBytes []byte
+    var isStrategic bool
+    switch {
+    case p.spec.StrategicMerge != nil:
+        isStrategic = true
+        patchBytes = p.spec.StrategicMerge.Raw   // already JSON via apiextensionsv1.JSON
+    case p.spec.JSONPatch != nil:
+        isStrategic = false
+        // Convert []JSONPatchOp back to JSON array for the patch library
+        var err error
+        patchBytes, err = json.Marshal(p.spec.JSONPatch)
+        if err != nil {
+            return nil, fmt.Errorf("patch: failed to marshal jsonPatch: %w", err)
+        }
+    }
+
+    matched := 0
+    for i, m := range manifests {
+        if !Match(m, p.spec.Target) {
+            continue
+        }
+        matched++
+
+        // Get current resource as JSON
+        originalBytes, err := json.Marshal(m.Unstructured.Object)
+        if err != nil { return nil, err }
+
+        var mergedBytes []byte
+        if isStrategic {
+            // Strategic-merge patch, Kubernetes-list-key-aware.
+            // Uses m.Unstructured.Object as the schema hint — for core types
+            // this triggers the built-in openapi schema for list merging.
+            mergedBytes, err = strategicpatch.StrategicMergePatch(originalBytes, patchBytes, m.Unstructured.Object)
+        } else {
+            jp, decodeErr := jsonpatch.DecodePatch(patchBytes)
+            if decodeErr != nil {
+                return nil, fmt.Errorf("patch: failed to decode json patch: %w", decodeErr)
+            }
+            mergedBytes, err = jp.Apply(originalBytes)
+        }
+        if err != nil {
+            return nil, fmt.Errorf("patch: failed to apply to %s/%s: %w", m.GetKind(), m.GetName(), err)
+        }
+
+        // Deserialize back into unstructured
+        var newObj map[string]interface{}
+        if err := json.Unmarshal(mergedBytes, &newObj); err != nil { return nil, err }
+        manifests[i].Unstructured.Object = newObj
+    }
+
+    if matched == 0 {
+        return nil, fmt.Errorf("patch: no matching resource for target %+v", p.spec.Target)
+    }
+    return manifests, nil
+}
+```
+
+Notes on strategic-merge patching:
+- Kubernetes strategic merge requires a schema for merge-key resolution (which array items are "the same"). For core Kubernetes types, `strategicpatch.StrategicMergePatch` handles this via the built-in openapi schema.
+- For custom types (CRDs), strategic-merge may fall back to JSON merge patch behavior. In practice, for our transformations (patching Deployment, adding labels to CRDs), the core-type behavior is what we need.
+- If strategic-merge on a CRD becomes an issue, users can switch to `jsonPatch` with an explicit JSON Patch.
+
+
 
 Fixtures under `testdata/fixtures/transform/<transformation-name>/`.
 
@@ -421,71 +755,18 @@ Shared across all transformations that use selectors.
 
 ---
 
-## Phase 4: Split (~2-3 days)
+## Phase 4: (No split needed — two-render pattern)
 
-```go
-package split
+Under the two-render architecture (design.md §3.5), there is no split step. Each render produces manifests destined entirely for one target cluster:
 
-type Buckets struct {
-    Host    []manifest.Manifest
-    Remote  []manifest.Manifest
-    Dropped []manifest.Manifest
-}
+- `Render(ctx, ModeHost)` → all host resources
+- `Render(ctx, ModeRemote)` → all remote resources
 
-func ByTarget(manifests []manifest.Manifest) Buckets {
-    var b Buckets
-    for _, m := range manifests {
-        target := resolveTarget(m)
-        switch target {
-        case TargetHost:
-            b.Host = append(b.Host, m)
-        case TargetRemote:
-            b.Remote = append(b.Remote, m)
-        case TargetDrop:
-            b.Dropped = append(b.Dropped, m)
-        }
-    }
-    return b
-}
+Transformations run on each render independently. Each transformation naturally affects only what's present in that render (e.g., `injectInitContainer` matches a Deployment only in the host render; `rewriteWebhookURL` matches WebhookConfigurations only in the remote render).
 
-func resolveTarget(m manifest.Manifest) Target {
-    // 1. Explicit annotation wins
-    if t, ok := m.GetAnnotations()[TargetAnnotation]; ok {
-        return Target(t)
-    }
-    // 2. Kind-based default
-    return defaultTarget(m.GetKind(), m.Origin)
-}
+**No `internal/split/` package needed.** The reconcile loop (Phase 6) iterates over each render and applies the same transformations to both. Delivery (Phase 5) applies each render's output to its respective cluster.
 
-func defaultTarget(kind string, origin manifest.Origin) Target {
-    switch kind {
-    case "CustomResourceDefinition":
-        return TargetRemote
-    case "ValidatingWebhookConfiguration", "MutatingWebhookConfiguration":
-        return TargetRemote
-    case "ClusterRole", "ClusterRoleBinding":
-        return TargetRemote
-    case "Role", "RoleBinding":
-        return TargetRemote  // should be rare post-renameKind
-    case "ServiceAccount":
-        if origin == manifest.OriginUpstream {
-            return TargetRemote
-        }
-        return TargetHost
-    case "Deployment", "StatefulSet", "DaemonSet":
-        return TargetHost
-    case "Service", "ConfigMap", "Secret", "Ingress", "NetworkPolicy":
-        return TargetHost
-    case "Namespace":
-        // Must have explicit annotation
-        return TargetHost  // fallback, log warning
-    default:
-        return TargetHost  // fallback, log warning
-    }
-}
-```
-
-Test with fixture manifests covering the full rule table.
+Skip this phase's implementation. Time budget rolls into Phase 6.
 
 ---
 
@@ -625,39 +906,51 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
         return ctrl.Result{}, r.Update(ctx, cr)
     }
 
-    // 1. Fetch and render source
+    // 1. Build source renderer
     src, err := source.From(cr.Spec.Source)
     if err != nil {
         return r.errStatus(ctx, cr, "InvalidSource", err)
     }
-    manifests, err := src.Render(ctx)
-    if err != nil {
-        return r.errStatus(ctx, cr, "RenderFailed", err)
+
+    // 2. Render TWICE — one per mode
+    hostManifests, err := src.Render(ctx, source.ModeHost)
+    if err != nil { return r.errStatus(ctx, cr, "HostRenderFailed", err) }
+
+    remoteManifests, err := src.Render(ctx, source.ModeRemote)
+    if err != nil { return r.errStatus(ctx, cr, "RemoteRenderFailed", err) }
+
+    // 3. Group transformations by scope
+    perRender, crossStream, err := transform.Group(cr.Spec.Transformations)
+    if err != nil { return r.errStatus(ctx, cr, "InvalidTransformation", err) }
+
+    // 4. Apply per-render transformations to each render independently.
+    //    Each transformation naturally affects only resources present in
+    //    the render it runs on.
+    for _, t := range perRender {
+        hostManifests, err = t.Apply(hostManifests)
+        if err != nil { return r.errStatus(ctx, cr, "HostTransformFailed", err) }
+        remoteManifests, err = t.Apply(remoteManifests)
+        if err != nil { return r.errStatus(ctx, cr, "RemoteTransformFailed", err) }
     }
 
-    // 2. Apply transformations
-    for _, ts := range cr.Spec.Transformations {
-        t, err := transform.From(ts)
-        if err != nil { return r.errStatus(ctx, cr, "InvalidTransformation", err) }
-        manifests, err = t.Apply(manifests)
-        if err != nil { return r.errStatus(ctx, cr, "TransformFailed", err) }
+    // 5. Apply cross-stream transformations (may move resources between renders)
+    for _, t := range crossStream {
+        hostManifests, remoteManifests, err = t.ApplyCrossStream(hostManifests, remoteManifests)
+        if err != nil { return r.errStatus(ctx, cr, "CrossStreamTransformFailed", err) }
     }
 
-    // 3. Split
-    buckets := split.ByTarget(manifests)
-
-    // 4. Get clients
+    // 6. Get clients
     hostApplier := r.HostApplier   // preconstructed at startup
     shootApplier, err := r.buildShootApplier(ctx, cr)
     if err != nil {
         return r.errStatus(ctx, cr, "ShootClientFailed", err)
     }
 
-    // 5. Apply
-    hostStatuses := r.applyAll(ctx, hostApplier, buckets.Host)
-    remoteStatuses := r.applyAll(ctx, shootApplier, buckets.Remote)
+    // 7. Apply each render to its target cluster
+    hostStatuses := r.applyAll(ctx, hostApplier, hostManifests)
+    remoteStatuses := r.applyAll(ctx, shootApplier, remoteManifests)
 
-    // 6. Update status
+    // 8. Update status
     cr.Status.HostResources = hostStatuses
     cr.Status.RemoteResources = remoteStatuses
     cr.Status.Conditions = computeConditions(hostStatuses, remoteStatuses)
@@ -671,6 +964,12 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
     return ctrl.Result{RequeueAfter: 10 * time.Minute}, nil
 }
 ```
+
+**Key differences from a single-render architecture**:
+- Source is rendered twice with mode-specific parameters.
+- No `split` step — each render's output is a coherent set for its target cluster.
+- Transformations apply to each render independently. `filterKinds source: upstream` runs on both, dropping upstream Services from whichever render emits them.
+- Only `origin` matters for transformation targeting; there is no `target` on manifests.
 
 ### Shoot client construction
 
@@ -815,6 +1114,41 @@ The operator's cluster-side RBAC in seed should be minimal — only what it need
 
 ---
 
+## Phase 9 (v1 scaffolding only): Validating admission webhook
+
+Kubebuilder scaffold created but not wired in v1. Structural validation is provided by CRD schema + CEL rules (§Validation above). Content-level validation of `patch` bodies is deferred to a v2 webhook.
+
+**Scaffold in v1**:
+
+```bash
+kubebuilder create webhook \
+  --group dual-deployment-operator \
+  --version v1alpha1 \
+  --kind DualDeploymentOperator \
+  --programmatic-validation
+```
+
+This generates:
+- `internal/webhook/dualdeploymentoperator_webhook.go` — CustomValidator stub
+- `config/webhook/` — webhook Service + Configuration + patch overlay
+- `config/certmanager/` — cert-manager Issuer + Certificate (or manual cert plumbing)
+
+**v1**: leave the CustomValidator methods as no-op (return `nil` immediately). Do not deploy the webhook ValidatingWebhookConfiguration. CRD schema + CEL handle all v1 admission validation.
+
+**v2** (deferred): implement `ValidateCreate` and `ValidateUpdate`:
+- Parse `spec.transformations[].patch.strategicMerge` / `.jsonPatch`
+- Look up target kind's OpenAPI schema via `discovery.DiscoveryClient` + `openapi.OpenAPISchema()`
+- Validate patch content against the target schema (uses `k8s.io/apimachinery/pkg/util/validation` primitives)
+- Reject with detailed field-path errors
+
+Also v2: cert-manager or self-signed cert rotation, ValidatingWebhookConfiguration deployment via operator's own chart.
+
+Failure mode if v1 CR contains invalid patch content: reconcile fails, CR status shows condition `PatchApplicationFailed` with the error. Same as any other transformation failure.
+
+**Success criterion**: webhook scaffold builds; no-op ValidateCreate/ValidateUpdate methods pass tests; ValidatingWebhookConfiguration NOT deployed by v1's operator chart.
+
+---
+
 ## Concrete v1 dependencies
 
 `go.mod` (illustrative):
@@ -832,6 +1166,7 @@ require (
     k8s.io/apimachinery v0.31.0
     k8s.io/api v0.31.0
     k8s.io/client-go v0.31.0
+    github.com/evanphx/json-patch v5.9.0
     github.com/go-logr/logr v1.4.2
     github.com/onsi/ginkgo/v2 v2.20.0
     github.com/onsi/gomega v1.34.1
@@ -870,14 +1205,15 @@ make test-integration
 | Phase | Success criterion |
 |---|---|
 | 0 | Kubebuilder scaffold builds; CRD registers |
-| 1 | CRD types compile; deepcopy generated; validation webhook (or CEL) rejects invalid discriminators |
-| 2 | Both Helm and kustomize renderers produce parsable manifest streams for a metal-operator fixture; origin tags correct |
-| 3 | Each transformation's unit tests pass with table-driven cases |
-| 4 | Split correctly buckets a mixed manifest stream per rules and annotations |
-| 5 | Applier applies a resource via SSA and returns Healthy status; can also delete |
-| 6 | Reconciler successfully processes a CR end-to-end with mocked source; status populated |
-| 7 | Equivalence test passes for at least metal-operator vs. today's chart output |
+| 1 | CRD types compile; deepcopy generated; validation webhook (or CEL) rejects invalid discriminators and unpinned kustomize URLs |
+| 2 | Both Helm and kustomize renderers produce parsable manifest streams for host and remote modes on a metal-operator fixture; origin tags correct |
+| 3 | Each transformation's unit tests pass with table-driven cases; per-render and cross-stream interfaces implemented; `packageWebhookConfigsForInjector` moves WebhookConfigurations from remote to a ConfigMap on host |
+| 4 | (skipped — no split step) |
+| 5 | Applier applies a resource via SSA and returns Healthy status; can also delete; strips caBundle from WebhookConfigurations before apply |
+| 6 | Reconciler successfully processes a CR end-to-end with mocked source; groups per-render and cross-stream transformations correctly; produces disjoint host/remote manifest sets; status populated |
+| 7 | Equivalence test passes for at least metal-operator vs. today's chart output (host render matches host-side output; remote render matches remote-side output) |
 | 8 | Operator chart installs successfully in a QA shoot-cp namespace |
+| 9 | Webhook scaffold builds; no-op ValidateCreate/ValidateUpdate methods pass tests; ValidatingWebhookConfiguration NOT deployed in v1 (deferred to v2) |
 
 Each phase should merge to `main` with tests before moving to the next.
 
