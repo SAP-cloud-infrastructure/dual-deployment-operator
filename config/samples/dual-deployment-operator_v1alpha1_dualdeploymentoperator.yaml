@@ -1,0 +1,9 @@
+apiVersion: dual-deployment-operator.cc.sap/v1alpha1
+kind: DualDeploymentOperator
+metadata:
+  labels:
+    app.kubernetes.io/name: dual-deployment-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: dualdeploymentoperator-sample
+spec:
+  # TODO(user): Add fields here

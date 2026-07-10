@@ -1,0 +1,54 @@
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.txt
+coverage.html
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Kubebuilder / operator-sdk
+config/dev/
+testbin/
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment / secrets
+.env
+.env.local
+kubeconfig
+*.kubeconfig
+
+# Build artifacts
+tmp/
+build/
+
+# Local test outputs
+testdata/rendered/
+
+# opencode
+.opencode/
+
+# git worktrees
+.worktrees/

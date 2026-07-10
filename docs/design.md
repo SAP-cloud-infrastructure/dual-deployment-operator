@@ -333,7 +333,8 @@ spec:
   source:
     kustomize:
       url: "https://github.com/sapcc/helm-charts//system/kustomize/ipam-capi-remote/?ref=v1.2.31"
-      values: {...}
+      hostPath: "host"
+      remotePath: "remote"
   remoteKubeconfig:
     secretName: ipam-capi-remote-kubeconfig
     key: kubeconfig
@@ -372,7 +373,8 @@ Implementation: `helm.sh/helm/v3`. Standard `Pull` + `Template` action.
 
 **`spec.source.kustomize`**:
 - `url` — kustomize root URL. Format: `https://github.com/{org}/{repo}//{path}?ref={sha|tag}`. `ref` is required — floating references are rejected at CR admission.
-- `values` — key-value pairs projected into the kustomize root (mechanism: `configMapGenerator` overlay)
+- `hostPath` — subpath under `url` for the host overlay root (required; no default). Must be set explicitly per CR.
+- `remotePath` — subpath under `url` for the remote overlay root (required; no default). Must be set explicitly per CR.
 
 Implementation: `sigs.k8s.io/kustomize/api/krusty`. Battle-tested Go library used by Flux and Argo CD.
 

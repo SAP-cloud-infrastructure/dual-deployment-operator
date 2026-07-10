@@ -114,9 +114,15 @@ type HelmSource struct {
     Values  *apiextensionsv1.JSON        `json:"values,omitempty"`
 }
 
+// KustomizeSource references a kustomize root plus its two overlay subpaths.
+// +kubebuilder:validation:XValidation:rule="self.url.matches('.*[?&]ref=.+')",message="kustomize url must include a pinned ref= query parameter"
 type KustomizeSource struct {
-    URL     string                       `json:"url"`
-    Values  *apiextensionsv1.JSON        `json:"values,omitempty"`
+    // +kubebuilder:validation:MinLength=1
+    URL        string `json:"url"`
+    // +kubebuilder:validation:MinLength=1
+    HostPath   string `json:"hostPath"`
+    // +kubebuilder:validation:MinLength=1
+    RemotePath string `json:"remotePath"`
 }
 
 type RemoteKubeconfigRef struct {
