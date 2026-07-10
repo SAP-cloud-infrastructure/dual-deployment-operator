@@ -99,7 +99,7 @@ type Transformation struct {
 type PatchSpec struct {
 	Target Selector `json:"target"`
 	// +optional
-	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:validation:Type=object
 	// +kubebuilder:pruning:PreserveUnknownFields
 	StrategicMerge *apiextensionsv1.JSON `json:"strategicMerge,omitempty"`
 	// +optional
