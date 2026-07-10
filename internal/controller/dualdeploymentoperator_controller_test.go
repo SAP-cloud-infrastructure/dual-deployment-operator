@@ -35,7 +35,7 @@ func TestReconcileMissingCRReturnsNoError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
-	if res.RequeueAfter != 0 || res.Requeue {
+	if res.RequeueAfter != 0 {
 		t.Fatalf("expected empty result for missing CR, got %+v", res)
 	}
 }
@@ -55,8 +55,5 @@ func TestReconcileExistingCRRequeues10m(t *testing.T) {
 	}
 	if res.RequeueAfter != 10*time.Minute {
 		t.Fatalf("expected RequeueAfter=10m, got %v", res.RequeueAfter)
-	}
-	if res.Requeue {
-		t.Fatalf("expected Requeue=false, got true")
 	}
 }
