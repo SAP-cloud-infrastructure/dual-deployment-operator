@@ -50,5 +50,8 @@ testdata/rendered/
 # opencode
 .opencode/
 
+# omo agent session state (local only)
+.omo/
+
 # git worktrees
 .worktrees/
