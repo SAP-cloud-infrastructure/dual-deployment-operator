@@ -1,18 +1,18 @@
 # SPDX-FileCopyrightText: SAP SE or an SAP affiliate company
 # SPDX-License-Identifier: Apache-2.0
 version = 1
-SPDX-PackageName = "go-makefile-maker"
-SPDX-PackageDownloadLocation = "https://github.com/sapcc/go-makefile-maker"
+SPDX-PackageName = "dual-deployment-operator"
+SPDX-PackageDownloadLocation = "https://github.com/SAP-cloud-infrastructure/dual-deployment-operator"
 
 [[annotations]]
 path = [
-  ".github/CODEOWNERS",
   ".github/renovate.json",
   ".gitignore",
-  ".hyperspace/pull_request_bot.json",
   ".license-scan-overrides.jsonl",
   ".license-scan-rules.json",
-  "build/**/*",
+  ".github/workflows/qodana_code_quality.yml",
+  "qodana.yaml",
+  "openspec/config.yaml",
 ]
 SPDX-FileCopyrightText = "SAP SE or an SAP affiliate company"
 SPDX-License-Identifier = "Apache-2.0"
@@ -22,17 +22,43 @@ path = [
   "go.mod",
   "go.sum",
   "Makefile.maker.yaml",
-  "vendor/modules.txt",
 ]
 SPDX-FileCopyrightText = "SAP SE or an SAP affiliate company"
 SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
 path = [
-  "internal/makefile/license-scan-overrides.jsonl.tmpl",
-  "internal/makefile/license-scan-rules.json",
-  "internal/reuse/go-licence-detector.tmpl",
-  "logo*.png",
+  ".github/prompts/**",
+  ".github/skills/**",
+]
+SPDX-FileCopyrightText = "SAP SE or an SAP affiliate company"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Kubebuilder-generated and static config manifests (no per-file header injected
+# by the scaffolder; annotate here to keep generated files free of hand edits).
+[[annotations]]
+path = [
+  "PROJECT",
+  "Dockerfile",
+  ".dockerignore",
+  ".custom-gcl.yml",
+  ".golangci.yml",
+  ".devcontainer/devcontainer.json",
+  ".github/workflows/lint.yml",
+  ".github/workflows/test.yml",
+  ".github/workflows/test-e2e.yml",
+  "config/**",
+]
+SPDX-FileCopyrightText = "SAP SE or an SAP affiliate company"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Project documentation and OpenSpec change artifacts.
+[[annotations]]
+path = [
+  "README.md",
+  "AGENTS.md",
+  "docs/**",
+  "openspec/changes/**",
 ]
 SPDX-FileCopyrightText = "SAP SE or an SAP affiliate company"
 SPDX-License-Identifier = "Apache-2.0"
