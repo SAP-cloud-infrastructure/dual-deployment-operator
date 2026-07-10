@@ -73,7 +73,7 @@ git add PROJECT cmd Makefile Dockerfile .dockerignore .gitignore hack config go.
 git commit -m "chore: kubebuilder init scaffold for dual-deployment-operator"
 ```
 
-- [ ] Task 1 complete
+- [x] Task 1 complete
 
 ---
 
@@ -129,7 +129,7 @@ git add api internal cmd config PROJECT
 git commit -m "chore: scaffold DualDeploymentOperator API, controller, and (non-deployed) webhook"
 ```
 
-- [ ] Task 2 complete
+- [x] Task 2 complete
 
 ---
 
