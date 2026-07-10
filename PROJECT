@@ -8,4 +8,17 @@ layout:
 - go.kubebuilder.io/v4
 projectName: dual-deployment-operator
 repo: github.com/SAP-cloud-infrastructure/dual-deployment-operator
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: cc.sap
+  group: dual-deployment-operator
+  kind: DualDeploymentOperator
+  path: github.com/SAP-cloud-infrastructure/dual-deployment-operator/api/v1alpha1
+  version: v1alpha1
+  webhooks:
+    validation: true
+    webhookVersion: v1
 version: "3"

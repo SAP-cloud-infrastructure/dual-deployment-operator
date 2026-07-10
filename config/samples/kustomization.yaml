@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- dual-deployment-operator_v1alpha1_dualdeploymentoperator.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
