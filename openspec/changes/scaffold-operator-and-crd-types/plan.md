@@ -744,7 +744,7 @@ git add Makefile internal/controller/suite_test.go
 git commit -m "test: pin envtest to 1.29+ and bootstrap CRD install"
 ```
 
-- [ ] Task 8 complete
+- [x] Task 8 complete
 
 ---
 
@@ -905,7 +905,7 @@ git add internal/controller/cel_validation_test.go
 git commit -m "test: envtest coverage for CEL discriminator + defaulting rules"
 ```
 
-- [ ] Task 9 complete
+- [x] Task 9 complete
 
 ---
 
