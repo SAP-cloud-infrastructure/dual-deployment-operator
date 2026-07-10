@@ -20,15 +20,10 @@ import (
 	"context"
 
 	ctrl "sigs.k8s.io/controller-runtime"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	dualdeploymentoperatorv1alpha1 "github.com/SAP-cloud-infrastructure/dual-deployment-operator/api/v1alpha1"
 )
-
-// nolint:unused
-// log is for logging in this package.
-var dualdeploymentoperatorlog = logf.Log.WithName("dualdeploymentoperator-resource")
 
 // SetupDualDeploymentOperatorWebhookWithManager registers the webhook for DualDeploymentOperator in the manager.
 func SetupDualDeploymentOperatorWebhookWithManager(mgr ctrl.Manager) error {
@@ -37,9 +32,6 @@ func SetupDualDeploymentOperatorWebhookWithManager(mgr ctrl.Manager) error {
 		Complete()
 }
 
-// TODO(user): EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-
-// TODO(user): change verbs to "verbs=create;update;delete" if you want to enable deletion validation.
 // NOTE: If you want to customise the 'path', use the flags '--defaulting-path' or '--validation-path'.
 // +kubebuilder:webhook:path=/validate-dual-deployment-operator-cc-sap-v1alpha1-dualdeploymentoperator,mutating=false,failurePolicy=fail,sideEffects=None,groups=dual-deployment-operator.cc.sap,resources=dualdeploymentoperators,verbs=create;update,versions=v1alpha1,name=vdualdeploymentoperator-v1alpha1.kb.io,admissionReviewVersions=v1
 
@@ -48,33 +40,22 @@ func SetupDualDeploymentOperatorWebhookWithManager(mgr ctrl.Manager) error {
 //
 // NOTE: The +kubebuilder:object:generate=false marker prevents controller-gen from generating DeepCopy methods,
 // as this struct is used only for temporary operations and does not need to be deeply copied.
-type DualDeploymentOperatorCustomValidator struct {
-	// TODO(user): Add more fields as needed for validation
-}
+type DualDeploymentOperatorCustomValidator struct{}
 
 // ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type DualDeploymentOperator.
-func (v *DualDeploymentOperatorCustomValidator) ValidateCreate(_ context.Context, obj *dualdeploymentoperatorv1alpha1.DualDeploymentOperator) (admission.Warnings, error) {
-	dualdeploymentoperatorlog.Info("Validation for DualDeploymentOperator upon creation", "name", obj.GetName())
-
-	// TODO(user): fill in your validation logic upon object creation.
-
+// v1: all admission validation is handled by CEL rules on the CRD.
+func (v *DualDeploymentOperatorCustomValidator) ValidateCreate(_ context.Context, _ *dualdeploymentoperatorv1alpha1.DualDeploymentOperator) (admission.Warnings, error) {
 	return nil, nil
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type DualDeploymentOperator.
-func (v *DualDeploymentOperatorCustomValidator) ValidateUpdate(_ context.Context, oldObj, newObj *dualdeploymentoperatorv1alpha1.DualDeploymentOperator) (admission.Warnings, error) {
-	dualdeploymentoperatorlog.Info("Validation for DualDeploymentOperator upon update", "name", newObj.GetName())
-
-	// TODO(user): fill in your validation logic upon object update.
-
+// v1: all admission validation is handled by CEL rules on the CRD.
+func (v *DualDeploymentOperatorCustomValidator) ValidateUpdate(_ context.Context, _, _ *dualdeploymentoperatorv1alpha1.DualDeploymentOperator) (admission.Warnings, error) {
 	return nil, nil
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type DualDeploymentOperator.
-func (v *DualDeploymentOperatorCustomValidator) ValidateDelete(_ context.Context, obj *dualdeploymentoperatorv1alpha1.DualDeploymentOperator) (admission.Warnings, error) {
-	dualdeploymentoperatorlog.Info("Validation for DualDeploymentOperator upon deletion", "name", obj.GetName())
-
-	// TODO(user): fill in your validation logic upon object deletion.
-
+// v1: all admission validation is handled by CEL rules on the CRD.
+func (v *DualDeploymentOperatorCustomValidator) ValidateDelete(_ context.Context, _ *dualdeploymentoperatorv1alpha1.DualDeploymentOperator) (admission.Warnings, error) {
 	return nil, nil
 }
