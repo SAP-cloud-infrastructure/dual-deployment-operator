@@ -29,6 +29,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -155,10 +156,21 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
+	// Per-shoot design mandate: scope the cache to the operator's own namespace
+	// (POD_NAMESPACE, set via the downward API). Empty means local dev — watch all.
+	var cacheOpts cache.Options
+	if namespace := os.Getenv("POD_NAMESPACE"); namespace != "" {
+		cacheOpts.DefaultNamespaces = map[string]cache.Config{namespace: {}}
+		setupLog.Info("Cache scoped to namespace", "namespace", namespace)
+	} else {
+		setupLog.Info("POD_NAMESPACE not set, cache watching all namespaces (local dev)")
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
+		Cache:                  cacheOpts,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "9ca8e82a.cc.sap",

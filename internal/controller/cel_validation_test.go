@@ -6,6 +6,7 @@ import (
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ddov1alpha1 "github.com/SAP-cloud-infrastructure/dual-deployment-operator/api/v1alpha1"
@@ -34,6 +35,7 @@ var _ = Describe("CRD CEL validation", func() {
 		It("rejects when neither source variant is set", func() {
 			err := applyCR("cel-src-neither", ddov1alpha1.DualDeploymentOperatorSpec{Source: ddov1alpha1.Source{}, RemoteKubeconfig: kc()})
 			Expect(err).To(HaveOccurred(), "expected rejection when neither source variant set")
+			Expect(err.Error()).To(ContainSubstring("exactly one of source.helm or source.kustomize must be set"))
 		})
 
 		It("rejects when both source variants are set", func() {
@@ -45,6 +47,7 @@ var _ = Describe("CRD CEL validation", func() {
 				RemoteKubeconfig: kc(),
 			})
 			Expect(err).To(HaveOccurred(), "expected rejection when both source variants set")
+			Expect(err.Error()).To(ContainSubstring("exactly one of source.helm or source.kustomize must be set"))
 		})
 
 		It("accepts a valid helm source", func() {
@@ -68,6 +71,7 @@ var _ = Describe("CRD CEL validation", func() {
 				RemoteKubeconfig: kc(),
 			})
 			Expect(err).To(HaveOccurred(), "expected rejection when kustomize url lacks ?ref=")
+			Expect(err.Error()).To(ContainSubstring("kustomize url must include a pinned ref= query parameter"))
 		})
 
 		It("rejects a kustomize source missing hostPath", func() {
@@ -76,6 +80,22 @@ var _ = Describe("CRD CEL validation", func() {
 				RemoteKubeconfig: kc(),
 			})
 			Expect(err).To(HaveOccurred(), "expected rejection when hostPath missing")
+		})
+
+		It("rejects a kustomize source with hostPath truly omitted (unstructured)", func() {
+			cr := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "dual-deployment-operator.cc.sap/v1alpha1",
+				"kind":       "DualDeploymentOperator",
+				"metadata":   map[string]interface{}{"name": "cel-kust-nohost-omitted", "namespace": "default"},
+				"spec": map[string]interface{}{
+					"source": map[string]interface{}{
+						"kustomize": map[string]interface{}{"url": "https://g//p?ref=v1", "remotePath": "remote"},
+					},
+					"remoteKubeconfig": map[string]interface{}{"secretName": "kc", "key": "kubeconfig"},
+				},
+			}}
+			err := k8sClient.Create(ctx, cr)
+			Expect(err).To(HaveOccurred(), "expected rejection when hostPath key is absent")
 		})
 	})
 
@@ -86,6 +106,7 @@ var _ = Describe("CRD CEL validation", func() {
 				Transformations: []ddov1alpha1.Transformation{{}},
 			})
 			Expect(err).To(HaveOccurred(), "expected rejection for empty transformation entry")
+			Expect(err.Error()).To(ContainSubstring("exactly one transformation type must be set per entry"))
 		})
 
 		It("rejects a transformation entry with two fields set", func() {
@@ -97,6 +118,7 @@ var _ = Describe("CRD CEL validation", func() {
 				}},
 			})
 			Expect(err).To(HaveOccurred(), "expected rejection for two transformation fields in one entry")
+			Expect(err.Error()).To(ContainSubstring("exactly one transformation type must be set per entry"))
 		})
 	})
 
@@ -114,6 +136,7 @@ var _ = Describe("CRD CEL validation", func() {
 				}},
 			})
 			Expect(err).To(HaveOccurred(), "expected rejection when both patch variants set")
+			Expect(err.Error()).To(ContainSubstring("exactly one of patch.strategicMerge or patch.jsonPatch must be set"))
 		})
 
 		It("accepts a strategicMerge-only patch", func() {
@@ -138,6 +161,7 @@ var _ = Describe("CRD CEL validation", func() {
 				}},
 			})
 			Expect(err).To(HaveOccurred(), "expected rejection for invalid JSON Patch op (enum)")
+			Expect(err.Error()).To(ContainSubstring("Unsupported value: \"frobnicate\""))
 		})
 	})
 
