@@ -173,7 +173,7 @@ git add go.mod go.sum
 git commit -m "chore: add k8s.io/apiextensions-apiserver and stage Phase 2 deps (helm, kustomize)"
 ```
 
-- [ ] Task 3 complete
+- [x] Task 3 complete
 
 ---
 
@@ -268,7 +268,7 @@ func TestHealthStateConstants(t *testing.T) {
 Run: `go test ./api/v1alpha1/... 2>&1 | head -20`
 Expected: FAIL — compile errors, `undefined: HelmSource`, `undefined: PatchSpec`, etc.
 
-- [ ] Task 4 complete
+- [x] Task 4 complete
 
 ---
 
@@ -513,7 +513,7 @@ git add api/v1alpha1 config/crd
 git commit -m "feat: add v1alpha1 DualDeploymentOperator CRD types with CEL validation"
 ```
 
-- [ ] Task 5 complete
+- [x] Task 5 complete
 
 ---
 
@@ -667,7 +667,7 @@ git add internal/controller config/rbac
 git commit -m "feat: no-op reconciler that logs and requeues after 10m"
 ```
 
-- [ ] Task 6 complete
+- [x] Task 6 complete
 
 ---
 
@@ -711,7 +711,7 @@ git add internal/webhook
 git commit -m "chore: keep validating webhook scaffolded but no-op and not deployed"
 ```
 
-- [ ] Task 7 complete
+- [x] Task 7 complete
 
 ---
 
