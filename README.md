@@ -2,7 +2,7 @@
 
 A Kubernetes operator that manages the deployment of split host/remote controllers in Gardener environments. Consumes a Helm chart or kustomize source per operator, renders it, applies typed Go transformations, and applies each half to its target cluster (host = seed, remote = shoot) via server-side apply.
 
-**Status**: pre-implementation. Design finalized (revision 3). Scaffold pending.
+**Status**: Phase 0+1 complete. Kubebuilder scaffold, `v1alpha1` CRD types with CEL admission validation, and a no-op reconciler are in place. Rendering, transformation, dual-cluster apply, and status population are future phases.
 
 ## Purpose
 
@@ -38,10 +38,17 @@ Per-shoot. One operator Pod per shoot-cp namespace (`shoot--cp--*`), watching CR
 
 ## Quick start
 
-Not yet scaffolded. Planned scaffold:
+The scaffold, CRD types, and no-op reconciler exist. Build and run unit tests:
 
 ```bash
-kubebuilder init --domain cc.sap --repo github.tools.sap/D065300/dual-deployment-operator
+make build
+make test
+```
+
+The scaffold was initialized with:
+
+```bash
+kubebuilder init --domain cc.sap --repo github.com/SAP-cloud-infrastructure/dual-deployment-operator
 kubebuilder create api --group dual-deployment-operator --version v1alpha1 --kind DualDeploymentOperator
 ```
 
