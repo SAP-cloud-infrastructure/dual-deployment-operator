@@ -43,6 +43,7 @@ kubeconfig
 # Build artifacts
 tmp/
 build/
+custom-gcl
 
 # Local test outputs
 testdata/rendered/

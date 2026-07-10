@@ -48,7 +48,6 @@ path = [
   "hack/**",
   "openspec/**",
   "qodana.yaml",
-  ".custom-gcl.yml",
   ".devcontainer/**",
   "AGENTS.md",
   "README.md",
