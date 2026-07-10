@@ -954,7 +954,7 @@ git add hack/boilerplate.go.txt api config
 git commit -m "chore: SPDX boilerplate header on generated files"
 ```
 
-- [ ] Task 10 complete
+- [x] Task 10 complete
 
 ---
 
@@ -985,7 +985,7 @@ git add docs/design.md docs/implementation.md
 git commit -m "docs: mark kustomize hostPath/remotePath as required (match implementation)"
 ```
 
-- [ ] Task 11 complete
+- [x] Task 11 complete
 
 ---
 
