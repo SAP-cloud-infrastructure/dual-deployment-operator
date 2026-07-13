@@ -105,3 +105,55 @@ metadata:
 func contains(s, sub string) bool {
 	return bytes.Contains([]byte(s), []byte(sub))
 }
+
+func TestParseOriginAdditions(t *testing.T) {
+	raw := []byte(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mine
+  annotations:
+    dual-deployment-operator.cc.sap/origin: additions
+`)
+	got, err := Parse(raw, OriginUpstream)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got[0].Origin != OriginAdditions {
+		t.Errorf("origin = %q, want additions", got[0].Origin)
+	}
+	if got[0].Unstructured.GetAnnotations()[OriginAnnotation] != "additions" {
+		t.Error("origin annotation should be retained on the object")
+	}
+}
+
+func TestParseOriginFallbackWhenAbsent(t *testing.T) {
+	raw := []byte(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: theirs
+`)
+	got, err := Parse(raw, OriginUpstream)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got[0].Origin != OriginUpstream {
+		t.Errorf("origin = %q, want upstream", got[0].Origin)
+	}
+}
+
+func TestParseOriginUnknownValueFallsBack(t *testing.T) {
+	raw := []byte(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: weird
+  annotations:
+    dual-deployment-operator.cc.sap/origin: foreign
+`)
+	got, err := Parse(raw, OriginUpstream)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got[0].Origin != OriginUpstream {
+		t.Errorf("origin = %q, want upstream (unknown value falls back)", got[0].Origin)
+	}
+}
