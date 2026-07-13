@@ -6,124 +6,125 @@
 > verify re-run.
 
 **Change**: `source-renderers-helm-kustomize`
-**Verified at**: `2026-07-13 13:30`
-**Verifier**: `Sisyphus-Junior (claude-sonnet-4-6)`
+**Schema**: `sdd-plus-superpowers`
+**Verified against**: brainstorm.md, design.md, specs/**/*.md, plan.md
+**Implementation branch**: `feature/source-renderers-helm-kustomize` (base `e66ddc7`, HEAD `fe45e19`)
+**Verified at**: `2026-07-13` — post final-code-review (APPROVED) + NIT fix
+
+> Note: This report supersedes an earlier verify.md written pre-review by a subagent
+> that overran its task scope (implemented Tasks 6–11 and archived the change without
+> the mandated final code review). The premature archive was reverted (`6eed3f7`
+> reverted by `f2aa26b`), the final `code-reviewer` gate was run (verdict **APPROVED**),
+> the single review NIT was fixed via `go mod tidy` (`fe45e19`), and this report was
+> regenerated against the post-review state.
 
 ---
 
-## 1. Structural Validation (`openspec validate --all --json`)
+## 1. Structural Validation (`openspec validate`)
 
-- [x] All items return `"valid": true`
-
-**Result**:
+- [x] Change validates in strict mode
 
 ```text
-{
-  "items": [],
-  "summary": {
-    "totals": { "items": 0, "passed": 0, "failed": 0 },
-    "byType": { "change": { "items": 0, "passed": 0, "failed": 0 },
-                "spec": { "items": 0, "passed": 0, "failed": 0 } }
-  }
-}
+Change 'source-renderers-helm-kustomize' is valid
 ```
 
-No items to validate (openspec/specs/ does not yet exist — main specs will be created at archive). No failures.
-
-| Item | Type | Issues |
-|---|---|---|
-| — | — | — |
+`openspec/specs/` does not yet exist — main specs are created at archive time. No items failed.
 
 ---
 
 ## 2. Task Completion (`plan.md`)
 
-- [x] All trailing `- [ ] Task N complete` lines have been changed to `- [x]`
+- [x] All 11 trailing `- [x] Task N complete` checkboxes are checked
 
-All 11 task-group checkboxes are `[x]`:
-
-```
-- [x] Task 1 complete   build: pin helm/v3 v3.21.3 and kustomize v0.21.1
-- [x] Task 2 complete   feat(manifest): add Manifest type and Origin constants
-- [x] Task 3 complete   feat(manifest): add multi-doc YAML parser with skip-empty behavior
-- [x] Task 4 complete   test(manifest): lock apiVersion/kind validation behavior
-- [x] Task 5 complete   test(manifest): lock origin-tagging rule
-- [x] Task 6 complete   feat(source): add Source interface, Mode, and From discriminator factory
-- [x] Task 7 complete   test(source): add fake fetchers and demo Helm chart fixture
-- [x] Task 8 complete   feat(source): implement Helm renderer with mode injection and IncludeCRDs
-- [x] Task 9 complete   test(source): add kustomize base + host/remote overlay fixtures
-- [x] Task 10 complete  feat(source): implement kustomize renderer with overlay selection
-- [x] Task 11 complete  go test + vet + build all pass; gofmt clean; plan marked done
-```
-
-**Incomplete tasks** (if any):
-
-| Task | Reason incomplete | Blocks archive? |
+| Task | Commit | Summary |
 |---|---|---|
-| — | — | — |
+| 1 | `ddf712f` | Pin helm/v3 v3.21.3 + kustomize v0.21.1 |
+| 2 | `8d4e04c` | Manifest type + Origin constants |
+| 3 | `3a47492` | Multi-doc YAML parser + skip-empty |
+| 4 | `6226eae` | apiVersion/kind validation tests |
+| 5 | `0998c7e` | Origin-tagging tests |
+| 6 | `d5a0418` | Source interface + Mode + From() factory |
+| 7 | `4255ff0` | Test fakes + demo Helm chart fixture |
+| 8 | `910c4d8` | Helm renderer (values merge, mode injection, IncludeCRDs) |
+| 9 | `54970fb` | Kustomize overlay fixtures |
+| 10 | `aba7465` | Kustomize renderer (overlay selection + origin) |
+| 11 | `2137f5b` | Full-package verification + lint |
+| (fix) | `fe45e19` | `go mod tidy` — promote kustomize deps to direct requires (review NIT) |
+
+No incomplete tasks.
 
 ---
 
 ## 3. Delta Spec Sync State
 
-`openspec/specs/` does not yet exist in this repository — this is the first spec-driven change producing main specs (to be created at archive time via `openspec archive`).
+`openspec/specs/` does not yet exist — this is the first spec-driven change producing main specs (created at archive time). Archive is **deliberately deferred** pending human review.
 
-| Capability | Sync status | Notes |
+| Capability | Sync status | Source |
 |---|---|---|
-| manifest-parsing | N/A — will be created at archive | `openspec/changes/source-renderers-helm-kustomize/specs/manifest-parsing/spec.md` |
-| source-rendering | N/A — will be created at archive | `openspec/changes/source-renderers-helm-kustomize/specs/source-rendering/spec.md` |
+| manifest-parsing | Not yet synced (archive deferred) | `specs/manifest-parsing/spec.md` |
+| source-rendering | Not yet synced (archive deferred) | `specs/source-rendering/spec.md` |
 
 ---
 
-## 4. Design / Specs Coherence Spot Check
+## 4. Completeness — 12/12 spec requirements implemented + tested
 
-| Sample item | design description | specs counterpart | Gap |
+**manifest-parsing (4):** Manifest type; Multi-document YAML parsing; Per-document validation; Origin tagging.
+**source-rendering (8):** Source interface and Mode; Source discriminator factory; Pluggable chart acquisition; Helm values merge and mode injection; Helm rendering includes CRDs; Pluggable kustomize root acquisition; Kustomize overlay selection by mode; Source rendering test coverage.
+
+| Requirement | Implementation | Test(s) |
+|---|---|---|
+| Manifest type | `internal/manifest/manifest.go` | `TestManifestExposesObjectAndOrigin`, `TestOriginConstantValues` |
+| Multi-document YAML parsing | `internal/manifest/parse.go` `Parse` | `TestParseMultipleDocsInOrder`, `TestParseSkipsEmptyAndCommentDocs`, `TestParseEmptyRenderReturnsEmpty` |
+| Per-document validation | `parse.go` (apiVersion+kind) | `TestParseRejectsMissingAPIVersion`, `TestParseRejectsMissingKind` |
+| Origin tagging | `parse.go` `originOf` | `TestParseOriginAdditions`, `TestParseOriginFallbackWhenAbsent`, `TestParseOriginUnknownValueFallsBack` |
+| Source interface and Mode | `internal/source/source.go` | `TestModeValues` |
+| Source discriminator factory | `source.go` `From` | `TestFromSelectsHelm`, `TestFromSelectsKustomize`, `TestFromRejectsNeither`, `TestFromRejectsBoth` |
+| Pluggable chart acquisition | `source.go` `ChartLoader` | `fakeChartLoader` in all Helm tests |
+| Helm values merge + mode injection | `helm.go` `mergeValues` + guard | `TestHelmHostRenderEnablesControllerAndTagsOrigins`, `TestHelmRejectsUserSuppliedMode` |
+| Helm rendering includes CRDs | `helm.go` `IncludeCRDs=true` | `TestHelmRemoteRenderIncludesCRDs` |
+| Pluggable kustomize root acquisition | `source.go` `RootResolver` | `fakeRootResolver` in kustomize tests |
+| Kustomize overlay selection by mode | `kustomize.go` | `TestKustomizeHostOverlayHasAdditionsAndUpstream`, `TestKustomizeRemoteOverlayExcludesAdditions` |
+| Source rendering test coverage | 20 offline unit tests | full `internal/source` + `internal/manifest` suites |
+
+---
+
+## 5. Coherence — design decisions followed; scope contained
+
+| Sample item | design description | implementation | Gap |
 |---|---|---|---|
-| Two-render pattern | design.md §"two-render + cross-stream": one render per mode | `Source.Render(ctx, mode)` in source-rendering spec | None |
-| Origin is authorship, not routing | design.md: "Origin vs. routing — independent axes" | `Manifest.Origin` field, no destination field in spec | None |
-| Mode injection | design.md: `hostValues`/`remoteValues`; `hostPath`/`remotePath` | Helm values merge + mode injection requirement in spec | None |
-| ChartLoader / RootResolver | design.md: pluggable fetchers for testability | Pluggable chart/root acquisition requirements in spec | None |
-| IncludeCRDs | design.md: CRDs included in remote render | Helm rendering includes CRDs requirement in spec | None |
+| Two-render pattern | one render per mode, no split/routing | `Source.Render(ctx, mode)`; no routing logic | None |
+| Origin = authorship, not routing | "Origin vs. routing — independent axes" | `originOf` classifies only; no destination use | None |
+| mode injection + reject user mode | top-precedence inject; reject user-set mode | `helm.go` guard fires after merge, before inject | None |
+| ChartLoader / RootResolver | pluggable fetchers for offline testability | interfaces + test fakes; prod impls deferred to Phase 6 (non-goal) | None |
+| Parser lenient/strict/empty-OK | skip empties, require apiVersion+kind, empty-OK | `parse.go` | None |
+| Pinned deps | helm v3.21.3, kustomize v0.21.1, k8s v0.36.2 | verified post-`go mod tidy` | None |
 
-**Drift warnings** (non-blocking):
-
-- None
+**Scope discipline:** diff touches only `internal/manifest/`, `internal/source/` (+testdata), `go.mod`/`go.sum`. No `api/`, `cmd/`, `internal/controller/`, `internal/webhook/`, or `config/` changes. No transformation/delivery/reconciler code (correctly deferred).
 
 ---
 
-## 5. Implementation Signal
+## 6. Implementation Signal
 
-- [x] No unstaged files in worktree (`git status --short` is empty)
-- [x] All relevant commits pushed (worktree branch: `feature/source-renderers-helm-kustomize`)
+- [x] Worktree clean (`git status --short` empty)
+- [x] `go build ./...` → exit 0
+- [x] `go vet ./internal/...` → exit 0
+- [x] `go test ./internal/manifest/ ./internal/source/ -count=1` → 20/20 PASS, 0 failures (no cluster, no network)
+- [x] `k8s.io/*` pins unchanged at v0.36.2
 
-**Commit range**: `ddf712f7e859d65a83b3a66622bd2f6c94f9b1ff..2137f5ba299d387ca65d266c723aba59f9488f78`
+**Final code review:** independent `code-reviewer` over `e66ddc7..f2aa26b` → **APPROVED**; sole NIT (`// indirect` on kustomize deps) fixed in `fe45e19`.
 
-Key commits:
-- `ddf712f` build: pin helm/v3 v3.21.3 and kustomize v0.21.1
-- `8fc67d7` feat(manifest): add Manifest type and Origin constants
-- `3a47492` feat(manifest): add multi-doc YAML parser with skip-empty behavior
-- `6226eae` test(manifest): lock apiVersion/kind validation behavior
-- `0998c7e` test(manifest): lock origin-tagging rule
-- `d5a0418` feat(source): add Source interface, Mode, and From discriminator factory
-- `4255ff0` test(source): add fake fetchers and demo Helm chart fixture
-- `910c4d8` feat(source): implement Helm renderer with mode injection and IncludeCRDs
-- `54970fb` test(source): add kustomize base + host/remote overlay fixtures
-- `aba7465` feat(source): implement kustomize renderer with overlay selection
-- `2137f5b` docs(openspec): mark plan Tasks 6-11 complete
+---
 
-**Test results** (20 tests, 0 failures):
-- `internal/manifest`: 10 tests PASS
-- `internal/source`: 10 tests PASS
-- `go vet ./...`: exit 0
-- `go build ./...`: exit 0
-- `gofmt -l ./internal/...`: no output (all files formatted)
+## Issues
+
+- **CRITICAL:** none
+- **WARNING:** none
+- **SUGGESTION (non-blocking, optional future hardening):** add a test asserting `ConfigMap/demo-addition` is absent from the Helm remote render; add a test where `spec.Values` and `spec.HostValues` set the same key to lock mode-specific-wins precedence.
 
 ---
 
 ## Overall Decision
 
-- [x] PASS — ready to proceed to docs gate and finishing-a-development-branch
+- [x] PASS — implementation is complete, correct, and coherent.
 
-**Next step**:
-
-Run `openspec archive --change source-renderers-helm-kustomize` to sync delta specs to `openspec/specs/` and archive the change. Then use `finishing-a-development-branch` to merge or open a PR for `feature/source-renderers-helm-kustomize`.
+**Next step:** proceed to the docs gate (@docs), then **STOP for human review** before archiving. Archive (`openspec archive`) + `finishing-a-development-branch` are deliberately deferred per user directive until the human review is done.
