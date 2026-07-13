@@ -183,7 +183,7 @@ git add internal/manifest/manifest.go internal/manifest/manifest_test.go
 git commit -m "feat(manifest): add Manifest type and Origin constants"
 ```
 
-- [ ] Task 2 complete
+- [x] Task 2 complete
 
 ---
 
