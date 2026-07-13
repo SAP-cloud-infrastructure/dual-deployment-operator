@@ -687,7 +687,7 @@ git add internal/source/source.go internal/source/helm.go internal/source/kustom
 git commit -m "feat(source): add Source interface, Mode, and From discriminator factory"
 ```
 
-- [ ] Task 6 complete
+- [x] Task 6 complete
 
 ---
 
@@ -811,7 +811,7 @@ git add internal/source/fakes_test.go internal/source/testdata/charts/
 git commit -m "test(source): add fake fetchers and demo Helm chart fixture"
 ```
 
-- [ ] Task 7 complete
+- [x] Task 7 complete
 
 ---
 
@@ -1019,7 +1019,7 @@ git add internal/source/helm.go internal/source/helm_test.go
 git commit -m "feat(source): implement Helm renderer with mode injection and IncludeCRDs"
 ```
 
-- [ ] Task 8 complete
+- [x] Task 8 complete
 
 ---
 
@@ -1101,7 +1101,7 @@ git add internal/source/testdata/kustomize/
 git commit -m "test(source): add kustomize base + host/remote overlay fixtures"
 ```
 
-- [ ] Task 9 complete
+- [x] Task 9 complete
 
 ---
 
@@ -1240,7 +1240,7 @@ git add internal/source/kustomize.go internal/source/kustomize_test.go
 git commit -m "feat(source): implement kustomize renderer with overlay selection"
 ```
 
-- [ ] Task 10 complete
+- [x] Task 10 complete
 
 ---
 
@@ -1274,7 +1274,7 @@ git add -A
 git commit -m "chore(source): lint fixups for source rendering packages"
 ```
 
-- [ ] Task 11 complete
+- [x] Task 11 complete
 
 ---
 
