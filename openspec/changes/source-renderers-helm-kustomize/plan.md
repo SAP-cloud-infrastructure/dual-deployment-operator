@@ -410,7 +410,7 @@ git add internal/manifest/parse_test.go
 git commit -m "test(manifest): lock apiVersion/kind validation behavior"
 ```
 
-- [ ] Task 4 complete
+- [x] Task 4 complete
 
 ---
 
@@ -494,7 +494,7 @@ git add internal/manifest/parse_test.go
 git commit -m "test(manifest): lock origin-tagging rule (additions/fallback/retained)"
 ```
 
-- [ ] Task 5 complete
+- [x] Task 5 complete
 
 ---
 
