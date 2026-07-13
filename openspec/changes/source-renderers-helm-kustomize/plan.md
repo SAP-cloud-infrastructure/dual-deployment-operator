@@ -351,7 +351,7 @@ git add internal/manifest/parse.go internal/manifest/parse_test.go
 git commit -m "feat(manifest): add multi-doc YAML parser with skip-empty behavior"
 ```
 
-- [ ] Task 3 complete
+- [x] Task 3 complete
 
 ---
 
