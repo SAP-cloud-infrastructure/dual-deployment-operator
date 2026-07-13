@@ -5,7 +5,10 @@
 
 package manifest
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 func TestParseMultipleDocsInOrder(t *testing.T) {
 	raw := []byte(`apiVersion: v1
@@ -69,4 +72,36 @@ func TestParseEmptyRenderReturnsEmpty(t *testing.T) {
 	if len(got) != 0 {
 		t.Fatalf("len = %d, want 0", len(got))
 	}
+}
+
+func TestParseRejectsMissingAPIVersion(t *testing.T) {
+	raw := []byte(`kind: ConfigMap
+metadata:
+  name: broken
+`)
+	_, err := Parse(raw, OriginUpstream)
+	if err == nil {
+		t.Fatal("expected error for missing apiVersion, got nil")
+	}
+	if !contains(err.Error(), "apiVersion") {
+		t.Errorf("error = %q, want it to mention apiVersion", err.Error())
+	}
+}
+
+func TestParseRejectsMissingKind(t *testing.T) {
+	raw := []byte(`apiVersion: v1
+metadata:
+  name: broken
+`)
+	_, err := Parse(raw, OriginUpstream)
+	if err == nil {
+		t.Fatal("expected error for missing kind, got nil")
+	}
+	if !contains(err.Error(), "kind") {
+		t.Errorf("error = %q, want it to mention kind", err.Error())
+	}
+}
+
+func contains(s, sub string) bool {
+	return bytes.Contains([]byte(s), []byte(sub))
 }
