@@ -71,7 +71,7 @@ git add go.mod go.sum
 git commit -m "build: pin helm/v3 v3.21.3 and kustomize v0.21.1 for source rendering"
 ```
 
-- [ ] Task 1 complete
+- [x] Task 1 complete
 
 ---
 
