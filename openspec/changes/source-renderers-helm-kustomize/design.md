@@ -23,16 +23,18 @@ The governing design is the **two-render pattern** (`docs/design.md` §3.5): the
 - Define `internal/source`: a `Source` interface, a `From(spec, deps)` discriminator factory, and two renderers (`helmSource`, `kustomizeSource`).
 - Helm renderer: acquire chart via a pluggable `ChartLoader`, merge values in Helm precedence with top-precedence `mode` injection (+ runtime reject of user-set `mode`), render with `IncludeCRDs=true`, parse to origin-tagged manifests.
 - Kustomize renderer: acquire overlay root via a pluggable `RootResolver` (mode → `hostPath`/`remotePath`), krusty-build, parse to origin-tagged manifests.
+- Target namespace control: `Source.Render` takes an explicit namespace; host uses the CR's own `metadata.namespace`, remote uses a new required `spec.remoteNamespace`. Helm applies it as the render namespace; kustomize stamps it post-build onto namespaced resources lacking one. Removes the hardcoded `default` placeholder.
 - Add `helm.sh/helm/v3` v3.21.3 and `sigs.k8s.io/kustomize/api` + `kyaml` v0.21.1 to go.mod (pinned; verified to require exactly `k8s.io/*` v0.36.2); build clean.
-- **Phase success criterion** (design §Success table, Phase 2): both renderers produce parsable host/remote manifest streams for a metal-operator fixture with correct origin tags.
+- Add `spec.remoteNamespace` (required, DNS-1123) to the `v1alpha1` CRD types; regenerate manifests/deepcopy.
+- **Phase success criterion** (design §Success table, Phase 2): both renderers produce parsable host/remote manifest streams for a metal-operator fixture with correct origin tags and correct target namespaces.
 
 **Non-Goals:**
-- Transformations (Phase 3), delivery/SSA (Phase 5), reconciler wiring / two-render orchestration in the real reconcile loop (Phase 6).
+- Transformations (Phase 3), delivery/SSA (Phase 5), reconciler wiring / two-render orchestration in the real reconcile loop (Phase 6). Note: the reconciler computing host ns = `cr.Namespace` / remote ns = `spec.remoteNamespace` and passing them per render is Phase 6; this phase only threads the namespace *argument* through `Render` and applies it during rendering.
 - Production OCI-auth hardening and cache-eviction policy beyond a minimal working `ChartLoader` impl (cache strategy refined in Phase 6).
 - Real remote git fetching wired into the reconciler (the real `RootResolver` impl is defined and buildable; its reconciler wiring is Phase 6).
 - Equivalence tests against today's chart output (Phase 7).
 - Pulling the five real upstream sources (metal-operator chart from `keppel.eu-de-1.cloud.sap`, ipam-capi kustomize from its pinned git ref, etc.) or verifying registry/git access from this environment. Phase 2 validates the rendering *code* against real-shaped local fixtures only. Whether a real source contains the expected resources is verified by the Phase 7 equivalence tests (operator output vs. today's `make build-` output); whether the operator can reach real sources is an environment/egress concern verified in a real shoot at Phase 4, with seed→source egress feasibility tracked in design.md §9.1 (gated before Phase 7). A local `helm pull` / git fetch succeeding here would not represent the in-cluster token-requestor + egress path, so it is deliberately not a Phase 2 signal.
-- Any change to CRD types or admission validation.
+- Live RESTMapper-based namespaced-kind detection during rendering (Phase 2 uses a static cluster-scoped-kind list; a client-backed check can replace it in Phase 6).
 
 ## Decisions
 
@@ -116,6 +118,16 @@ The chart maintainer therefore does **not** inject any "host" or "remote" annota
 - Reason: Tolerates real chart output (trailing `---`, comments) while catching malformed objects before they reach downstream phases; legitimately-empty modes are valid.
 - Alternatives considered: strict (empty render = error) — rejected: breaks intentionally-empty modes. Minimal (silently drop bad docs) — rejected: passes malformed objects downstream.
 
+**Decision: Target namespace — host = CR namespace, remote = required `spec.remoteNamespace`, passed into `Render`**
+- Chosen: `Source.Render(ctx, mode, namespace)` takes an explicit namespace. The reconciler (Phase 6) passes `cr.Namespace` for the host render and `cr.Spec.RemoteNamespace` for the remote render. Helm sets `inst.Namespace = namespace` (drives `.Release.Namespace` templating **and** the fallback stamp on namespaced resources lacking one). Kustomize stamps `metadata.namespace = namespace` **post-build** on namespaced resources that omit one — mirroring Helm's fallback-only semantics. Cluster-scoped kinds and resources with an explicit namespace are left untouched by both engines. `spec.remoteNamespace` is a **required** DNS-1123 field.
+- Reason: Removes the hardcoded `inst.Namespace = "default"` placeholder (which silently routed fallback-namespaced resources to `default`). Host deploys into the operator's own control-plane namespace (per-shoot topology), so `cr.Namespace` is the natural default and needs no field. A cross-cluster shoot write must name its target explicitly — hence `remoteNamespace` is required, never implicitly inheriting the seed namespace. Passing the resolved namespace per `Render` call keeps the renderer a pure function of (source, mode, namespace) rather than reaching into CR shape.
+- Alternatives considered:
+  - Single `spec.targetNamespace` for both — rejected: conflates seed and shoot namespaces, which are independent in the per-shoot topology.
+  - Optional `remoteNamespace` defaulting to `cr.Namespace` — rejected: a shoot write silently inheriting the seed namespace is a footgun; explicit is safer.
+  - Carry both namespaces in `Deps`/constructor and select by mode internally — rejected: forces the renderer to know CR-level facts (`cr.Namespace`) it otherwise doesn't; the per-call argument is cleaner.
+  - Kustomize `namespace:` transformer as the mechanism — rejected: it *forces* the namespace onto all resources (overriding explicit ones) and rewrites some references, diverging from Helm's fallback-only semantics. Overlay authors can still set `namespace:` themselves if they want that; the operator does not impose it.
+- Offline namespaced-kind detection: Phase 2 uses a static list of well-known cluster-scoped kinds (CRD, ClusterRole, ClusterRoleBinding, Namespace, PriorityClass, StorageClass, …). A live RESTMapper check can replace it in Phase 6.
+
 ## Risks / Trade-offs
 
 - [go.mod version conflicts: `helm.sh/helm/v3` and `sigs.k8s.io/kustomize/api` might pull `k8s.io/*` versions conflicting with the current v0.36.2 pins] → **Resolved**: pinned to `helm.sh/helm/v3` v3.21.3 and `sigs.k8s.io/kustomize/api`/`kyaml` v0.21.1, each verified (via probe `go get` + `go build ./...`) to require exactly `k8s.io/*` v0.36.2 with no pin movement. Implementation uses these exact versions (not `@latest`); see plan Task 1.
@@ -126,7 +138,7 @@ The chart maintainer therefore does **not** inject any "host" or "remote" annota
 
 ## Migration Plan
 
-Greenfield additive change — two new packages, new deps, no modification to existing CRD types, controller, or webhook. No runtime migration concern.
+Additive change — two new packages (`internal/manifest`, `internal/source`), new pinned deps, plus one new required CRD field `spec.remoteNamespace` (regenerated manifests/deepcopy). No behavioral change to the existing controller or webhook. No runtime migration concern.
 
 Deployment steps:
 1. Add deps at pinned versions (`go get helm.sh/helm/v3@v3.21.3 sigs.k8s.io/kustomize/api@v0.21.1 sigs.k8s.io/kustomize/kyaml@v0.21.1`); defer `go mod tidy` until code imports them (they'd otherwise be pruned).
@@ -141,3 +153,39 @@ Rollback:
 
 - [x] ~~Exact go.mod versions for `helm.sh/helm/v3` and `sigs.k8s.io/kustomize/api`~~ — **Resolved**: pinned `helm.sh/helm/v3` v3.21.3 + `sigs.k8s.io/kustomize/api`/`kyaml` v0.21.1, verified to require exactly `k8s.io/*` v0.36.2 (probe `go get` + `go build ./...` clean, pins unchanged).
 - [ ] `ChartLoader` cache lifetime (process LRU vs per-reconcile) — Phase 2 defines the interface + a minimal working impl; cache policy refined when the reconciler wires it in. — owner: implementer (Phase 6)
+- [x] ~~Target-namespace control~~ — **Resolved**: host = `cr.Namespace`, remote = required `spec.remoteNamespace`, passed into `Render(ctx, mode, namespace)`; Helm via `inst.Namespace`, kustomize via post-build stamp; cluster-scoped and explicit-namespace resources untouched. See the "Target namespace" decision above. Replaces the former `inst.Namespace = "default"` placeholder.
+
+---
+
+## Implementation notes: target namespace
+
+Concrete sketches for the implementer (rationale + alternatives are in the "Target namespace" decision above).
+
+**CRD field** (`api/v1alpha1`, `DualDeploymentOperatorSpec`):
+```go
+// RemoteNamespace is the target namespace for the remote (shoot) render and
+// delivery. Namespaced resources in the remote render that omit an explicit
+// metadata.namespace are placed here; the remote SSA applier also uses it.
+// Cluster-scoped resources are unaffected.
+// +kubebuilder:validation:MinLength=1
+// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+RemoteNamespace string `json:"remoteNamespace"`
+```
+Required (no `+optional`, no `omitempty`). Regenerate with `make manifests` + `make generate`. Host has no field — reconciler uses `cr.Namespace`.
+
+**Interface** (`internal/source`):
+```go
+type Source interface {
+    Render(ctx context.Context, mode Mode, namespace string) ([]manifest.Manifest, error)
+}
+```
+Reconciler (Phase 6) passes `cr.Namespace` for host, `cr.Spec.RemoteNamespace` for remote. This phase only threads the argument and applies it during rendering.
+
+**Helm** (`helm.go`): `inst.Namespace = namespace` (replaces `= "default"`). Drives `.Release.Namespace` templating + the fallback stamp; explicit template namespaces still win.
+
+**Kustomize** (`kustomize.go`): post-build, after `resMap.AsYaml()` → `manifest.Parse`, stamp `metadata.namespace = namespace` on each **namespaced** resource whose namespace is empty. Skip cluster-scoped kinds and resources with an explicit namespace. Namespaced-kind detection uses a static cluster-scoped-kind list (CRD, ClusterRole, ClusterRoleBinding, Namespace, PriorityClass, StorageClass, …); RESTMapper-based detection deferred to Phase 6. Consider placing the shared stamp helper in `internal/manifest` so both engines (and future delivery) reuse it.
+
+**Tests (this phase):**
+- Helm: a namespaced resource lacking `metadata.namespace` → lands in the passed namespace (host = CR ns, remote = `remoteNamespace`); a CRD → **no** namespace; a resource with an explicit namespace → **unchanged**.
+- Kustomize: same three assertions (add a namespaced resource lacking `namespace:` to the `base/` fixture).
+- CRD: `remoteNamespace` required + DNS-1123 validation (envtest acceptance/rejection, matching the existing CEL test style).

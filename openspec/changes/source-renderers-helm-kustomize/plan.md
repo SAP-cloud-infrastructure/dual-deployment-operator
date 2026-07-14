@@ -1278,6 +1278,252 @@ git commit -m "chore(source): lint fixups for source rendering packages"
 
 ---
 
+## Task 12: Add required `spec.remoteNamespace` CRD field
+
+**Files:**
+- Modify: `api/v1alpha1/dualdeploymentoperator_types.go`
+- Regenerated: `api/v1alpha1/zz_generated.deepcopy.go`, `config/crd/bases/*.yaml` (via `make generate` + `make manifests` — DO NOT hand-edit)
+- Test: `api/v1alpha1/dualdeploymentoperator_types_test.go` (round-trip), `internal/controller/cel_validation_test.go` or a new envtest for admission
+
+- [ ] **Step 1: Add the field to `DualDeploymentOperatorSpec`**
+
+In `api/v1alpha1/dualdeploymentoperator_types.go`, add to `DualDeploymentOperatorSpec` (after `RemoteKubeconfig`):
+```go
+	// RemoteNamespace is the target namespace for the remote (shoot) render and
+	// delivery. Namespaced resources in the remote render that omit an explicit
+	// metadata.namespace are placed here; cluster-scoped resources are unaffected.
+	// The host render/delivery uses the CR's own metadata.namespace.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	RemoteNamespace string `json:"remoteNamespace"`
+```
+Required: no `+optional`, no `omitempty`.
+
+- [ ] **Step 2: Regenerate**
+
+Run:
+```bash
+make generate
+make manifests
+```
+Expected: `zz_generated.deepcopy.go` and `config/crd/bases/*.yaml` update; `remoteNamespace` appears in the CRD's `spec.properties` and in `required`.
+
+- [ ] **Step 3: envtest admission test (RED→GREEN)**
+
+Add an envtest case (same style as existing CEL tests): a CR missing `remoteNamespace` is rejected; a CR with an invalid value (`Bad_NS`) is rejected; a CR with `metal-operator` is accepted. Run the controller/webhook suite that hosts envtest.
+Expected: rejections/acceptance as specified.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add api/v1alpha1/ config/crd/bases/ internal/controller/
+git commit -m "feat(api): add required spec.remoteNamespace (DNS-1123)"
+```
+
+- [ ] Task 12 complete
+
+---
+
+## Task 13: Namespace-stamp helper in `internal/manifest`
+
+**Files:**
+- Create: `internal/manifest/namespace.go`
+- Test: `internal/manifest/namespace_test.go`
+
+- [ ] **Step 1: Write the failing test**
+
+`internal/manifest/namespace_test.go` — table-driven cases:
+- namespaced kind (`ConfigMap`) with empty namespace → stamped with target
+- namespaced kind with explicit namespace `X` → unchanged
+- cluster-scoped kind (`CustomResourceDefinition`, `ClusterRole`, `ClusterRoleBinding`, `Namespace`) → never stamped
+- empty target namespace → no-op (leave as-is)
+
+- [ ] **Step 2: Run — expect FAIL** (`ApplyNamespace` undefined)
+
+`go test ./internal/manifest/ -run TestApplyNamespace -v`
+
+- [ ] **Step 3: Implement `internal/manifest/namespace.go`**
+
+```go
+// SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company
+// Copyright 2026.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package manifest
+
+// clusterScopedKinds is a static set of well-known cluster-scoped kinds. Used
+// while rendering is offline (no RESTMapper); a live mapper can replace this
+// in the reconciler phase.
+var clusterScopedKinds = map[string]struct{}{
+	"CustomResourceDefinition":       {},
+	"ClusterRole":                    {},
+	"ClusterRoleBinding":             {},
+	"Namespace":                      {},
+	"PriorityClass":                  {},
+	"StorageClass":                   {},
+	"ClusterIssuer":                  {},
+	"APIService":                     {},
+	"ValidatingWebhookConfiguration": {},
+	"MutatingWebhookConfiguration":   {},
+	"PersistentVolume":               {},
+	"IngressClass":                   {},
+	"CustomResourceConversion":       {},
+	"RuntimeClass":                   {},
+	"PriorityLevelConfiguration":     {},
+	"FlowSchema":                     {},
+	"ClusterRoleBindingList":         {},
+}
+
+// IsClusterScoped reports whether kind is a known cluster-scoped kind.
+func IsClusterScoped(kind string) bool {
+	_, ok := clusterScopedKinds[kind]
+	return ok
+}
+
+// ApplyNamespace stamps ns onto each namespaced manifest that lacks an explicit
+// metadata.namespace. Cluster-scoped kinds and resources with an explicit
+// namespace are left unchanged. An empty ns is a no-op.
+func ApplyNamespace(manifests []Manifest, ns string) {
+	if ns == "" {
+		return
+	}
+	for i := range manifests {
+		u := manifests[i].Unstructured
+		if IsClusterScoped(u.GetKind()) {
+			continue
+		}
+		if u.GetNamespace() != "" {
+			continue
+		}
+		u.SetNamespace(ns)
+	}
+}
+```
+
+- [ ] **Step 4: Run — expect PASS**
+
+`go test ./internal/manifest/ -run TestApplyNamespace -v`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/manifest/namespace.go internal/manifest/namespace_test.go
+git commit -m "feat(manifest): add ApplyNamespace fallback-stamp helper"
+```
+
+- [ ] Task 13 complete
+
+---
+
+## Task 14: Thread namespace through `Source.Render` + Helm
+
+**Files:**
+- Modify: `internal/source/source.go` (interface), `internal/source/helm.go`
+- Modify tests: `internal/source/source_test.go`, `internal/source/helm_test.go`, `internal/source/kustomize_test.go` (call-site signature)
+
+- [ ] **Step 1: Update failing tests first**
+
+Change all `Render(ctx, mode)` call sites to `Render(ctx, mode, ns)`. Add Helm assertions: a namespaced fixture resource lacking `metadata.namespace` → lands in the passed ns; a CRD → no namespace; an explicit-namespace resource → unchanged.
+
+- [ ] **Step 2: Run — expect FAIL** (signature mismatch / namespace assertions fail)
+
+`go test ./internal/source/ -run 'TestHelm|TestMode|TestFrom' -v`
+
+- [ ] **Step 3: Update the interface + Helm renderer**
+
+`source.go`:
+```go
+type Source interface {
+	Render(ctx context.Context, mode Mode, namespace string) ([]manifest.Manifest, error)
+}
+```
+`helm.go`: change signature to `Render(ctx context.Context, mode Mode, namespace string)`; set `inst.Namespace = namespace` (replace `"default"`). Helm's fallback stamp handles most cases; call `manifest.ApplyNamespace(out, namespace)` after parse as a belt-and-suspenders for any resource Helm left unnamespaced. (Kustomize relies on `ApplyNamespace` entirely — Task 15.)
+
+- [ ] **Step 4: Run — expect PASS**
+
+`go test ./internal/source/ -run 'TestHelm|TestMode|TestFrom' -v`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/source/source.go internal/source/helm.go internal/source/source_test.go internal/source/helm_test.go internal/source/kustomize_test.go
+git commit -m "feat(source): thread target namespace into Render; Helm applies it"
+```
+
+- [ ] Task 14 complete
+
+---
+
+## Task 15: Kustomize post-build namespace stamp
+
+**Files:**
+- Modify: `internal/source/kustomize.go`, `internal/source/kustomize_test.go`
+- Modify fixture: add a namespaced resource lacking `namespace:` to `internal/source/testdata/kustomize/base/`
+
+- [ ] **Step 1: Add fixture + failing test**
+
+Add e.g. `base/upstream-cm.yaml` already exists (a ConfigMap with no namespace); assert after render it carries the passed namespace; add a cluster-scoped resource and assert it stays unnamespaced; keep an explicit-namespace resource unchanged.
+
+- [ ] **Step 2: Run — expect FAIL** (namespace not applied yet)
+
+`go test ./internal/source/ -run TestKustomize -v`
+
+- [ ] **Step 3: Implement**
+
+`kustomize.go`: change signature to include `namespace string`; after `manifest.Parse(...)`, call `manifest.ApplyNamespace(out, namespace)` before returning.
+
+- [ ] **Step 4: Run — expect PASS**
+
+`go test ./internal/source/ -run TestKustomize -v`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/source/kustomize.go internal/source/kustomize_test.go internal/source/testdata/kustomize/
+git commit -m "feat(source): kustomize post-build namespace stamp"
+```
+
+- [ ] Task 15 complete
+
+---
+
+## Task 16: Full verification (namespace change)
+
+**Files:** (no new files)
+
+- [ ] **Step 1: Full suites + build + vet**
+
+```bash
+go build ./...
+go vet ./internal/...
+go test ./internal/manifest/ ./internal/source/ -count=1 -v
+```
+Expected: exit 0; all tests PASS.
+
+- [ ] **Step 2: Lint (CI parity) + REUSE**
+
+```bash
+./bin/golangci-lint run ./internal/... ./api/...
+reuse lint
+```
+Expected: `0 issues`; REUSE compliant. Fix and re-run if needed.
+
+- [ ] **Step 3: envtest (CRD admission) if not run in Task 12**
+
+Run the controller suite hosting envtest; confirm `remoteNamespace` required/pattern behavior.
+
+- [ ] **Step 4: Commit any fixups**
+
+```bash
+git add -A
+git commit -m "chore: verification fixups for remoteNamespace/target-namespace work"
+```
+
+- [ ] Task 16 complete
+
+---
+
 ## Notes for the implementer
 
 - **Type alias verification (Task 8):** Before writing `helm.go`, open `api/v1alpha1/dualdeploymentoperator_types.go` and confirm the exact type of `HelmSource.Values` / `HostValues` / `RemoteValues`. The plan assumes `*apiextensionsv1.JSON` (per design §Phase 1). Use whatever the field actually declares; adjust `mergeValues` and `jsonVal` accordingly.
