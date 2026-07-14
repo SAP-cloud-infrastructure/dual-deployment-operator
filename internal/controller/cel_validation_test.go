@@ -22,6 +22,9 @@ import (
 // suite_test.go — no second envtest is started.
 var _ = Describe("CRD CEL validation", func() {
 	applyCR := func(name string, spec ddov1alpha1.DualDeploymentOperatorSpec) error {
+		if spec.RemoteNamespace == "" {
+			spec.RemoteNamespace = "remote-ns"
+		}
 		cr := &ddov1alpha1.DualDeploymentOperator{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 			Spec:       spec,
@@ -96,6 +99,7 @@ var _ = Describe("CRD CEL validation", func() {
 						"kustomize": map[string]any{"url": "https://g//p?ref=v1", "remotePath": "remote"},
 					},
 					"remoteKubeconfig": map[string]any{"secretName": "kc", "key": "kubeconfig"},
+					"remoteNamespace":  "remote-ns",
 				},
 			}}
 			err := k8sClient.Create(ctx, cr)
@@ -177,6 +181,41 @@ var _ = Describe("CRD CEL validation", func() {
 			var got ddov1alpha1.DualDeploymentOperator
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: "default"}, &got)).To(Succeed())
 			Expect(got.Spec.DeletionPolicy.CRDs).To(Equal("Retain"), "expected DeletionPolicy.CRDs to default to Retain")
+		})
+	})
+
+	Context("remoteNamespace", func() {
+		newCR := func(name, remoteNamespace string) *unstructured.Unstructured {
+			spec := map[string]any{
+				"source":           map[string]any{"helm": map[string]any{"repo": "oci://x", "name": "y", "version": "1.0.0"}},
+				"remoteKubeconfig": map[string]any{"secretName": "kc", "key": "kubeconfig"},
+			}
+			if remoteNamespace != "\x00" {
+				spec["remoteNamespace"] = remoteNamespace
+			}
+			return &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "dual-deployment-operator.cc.sap/v1alpha1",
+				"kind":       "DualDeploymentOperator",
+				"metadata":   map[string]any{"name": name, "namespace": "default"},
+				"spec":       spec,
+			}}
+		}
+
+		It("rejects a CR without remoteNamespace", func() {
+			err := k8sClient.Create(ctx, newCR("cel-ns-missing", "\x00"))
+			Expect(err).To(HaveOccurred(), "expected rejection when remoteNamespace omitted")
+			Expect(err.Error()).To(ContainSubstring("remoteNamespace"))
+		})
+
+		It("rejects a remoteNamespace that is not a DNS-1123 label", func() {
+			err := k8sClient.Create(ctx, newCR("cel-ns-invalid", "Invalid_NS"))
+			Expect(err).To(HaveOccurred(), "expected rejection for invalid remoteNamespace")
+			Expect(err.Error()).To(ContainSubstring("remoteNamespace"))
+		})
+
+		It("accepts a valid DNS-1123 remoteNamespace", func() {
+			err := k8sClient.Create(ctx, newCR("cel-ns-ok", "metal-operator"))
+			Expect(err).ToNot(HaveOccurred(), "expected acceptance for valid remoteNamespace")
 		})
 	})
 })
