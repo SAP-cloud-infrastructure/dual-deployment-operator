@@ -88,7 +88,7 @@ Only `additions` is a recognized positive value. The default is `upstream` so th
 
 - **Kustomize**: the `additions/host/` and `additions/remote/` overlays set it via `commonAnnotations` in their `kustomization.yaml` (design §3.5.3), stamping every resource in those directories. Upstream refs (`manager/`, `managedresources/`, `webhooks/`) are un-annotated and default to `upstream`.
 
-**Why it matters (downstream consumer):** Phase 3's `patch` transformation targets by origin — e.g. `patch: target: {origin: upstream}` patches the upstream Deployment and deliberately spares a same-named `additions` resource. A mis-tag would send the patch to the wrong object, so this classification is a load-bearing output contract of this phase and is covered by the parser's table-driven tests (annotation present → additions; absent → upstream; other value → upstream).
+**Why it matters (downstream consumer):** Phase 3's `patch` transformation targets by origin — e.g. `patch: target: {origin: upstream}` patches the upstream Deployment and deliberately spares a same-named `additions` resource. A mistagged resource would send the patch to the wrong object, so this classification is a load-bearing output contract of this phase and is covered by the parser's table-driven tests (annotation present → additions; absent → upstream; other value → upstream).
 
 **Origin vs. routing — independent axes (do not conflate).** Origin (`upstream` | `additions`) is **not** a deployment/routing switch. These are two orthogonal questions answered by two unrelated mechanisms:
 
@@ -99,7 +99,7 @@ Only `additions` is a recognized positive value. The default is `upstream` so th
 
 The chart maintainer therefore does **not** inject any "host" or "remote" annotation — routing is already fully decided by which pass emits the resource. The only annotation they set is `origin: additions` on resources their own team wrote, so that **within a single render** a Phase 3 `patch: target:{origin: upstream}` can distinguish the upstream object from a same-named addition. Origin never crosses passes and never influences host-vs-remote placement. A single render legitimately contains both origins (e.g. the metal-operator host render holds the `upstream` controller-manager Deployment alongside `additions` Services/ConfigMaps — all destined for the host). Were origin ever used to route, that would regress to the single-render-plus-split design that §3.5.5 rejected.
 
-**Validation stance (this phase):** the renderer trusts the author's label. It does **not** verify that an `additions`-tagged resource genuinely originated from our additions, nor reject unknown annotation values (they simply fall through to `upstream`). Detecting a mis-labeled resource is out of scope here; the Phase 7 equivalence tests (operator output vs. today's chart output) are where such a mistake would surface. See Risks / Trade-offs.
+**Validation stance (this phase):** the renderer trusts the author's label. It does **not** verify that an `additions`-tagged resource genuinely originated from our additions, nor reject unknown annotation values (they simply fall through to `upstream`). Detecting a mislabeled resource is out of scope here; the Phase 7 equivalence tests (operator output vs. today's chart output) are where such a mistake would surface. See Risks / Trade-offs.
 
 **Decision: `mode` injection at top precedence + runtime guard (Helm)**
 - Chosen: Merge `chart.Values < spec.Values < spec.{Host,Remote}Values < {mode: <mode>}`; reject at runtime if merged user values already set `mode`.
