@@ -7,6 +7,7 @@ package source
 
 import (
 	"context"
+	"path/filepath"
 
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chart/loader"
@@ -22,6 +23,6 @@ func (f fakeChartLoader) Load(_ context.Context, _, _, _ string) (*chart.Chart, 
 // fakeRootResolver resolves any url+subPath to baseDir/subPath on local disk.
 type fakeRootResolver struct{ baseDir string }
 
-func (f fakeRootResolver) Resolve(_ context.Context, _, subPath string) (string, func(), error) {
-	return f.baseDir + "/" + subPath, func() {}, nil
+func (f fakeRootResolver) Resolve(_ context.Context, _, subPath string) (fsPath string, cleanup func(), err error) {
+	return filepath.Join(f.baseDir, subPath), func() {}, nil
 }

@@ -8,6 +8,7 @@ package source
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"helm.sh/helm/v3/pkg/action"
@@ -35,7 +36,7 @@ func (h *helmSource) Render(ctx context.Context, mode Mode) ([]manifest.Manifest
 		return nil, err
 	}
 	if _, set := userVals["mode"]; set {
-		return nil, fmt.Errorf("source: 'mode' is operator-controlled and must not be set in values")
+		return nil, errors.New("source: 'mode' is operator-controlled and must not be set in values")
 	}
 	userVals["mode"] = string(mode)
 
@@ -65,13 +66,13 @@ func (h *helmSource) modeValues(mode Mode) *apiextensionsv1.JSON {
 }
 
 // mergeValues merges common values then mode-specific values (mode-specific wins).
-func mergeValues(common, modeSpecific *apiextensionsv1.JSON) (map[string]interface{}, error) {
-	base := map[string]interface{}{}
+func mergeValues(common, modeSpecific *apiextensionsv1.JSON) (map[string]any, error) {
+	base := map[string]any{}
 	for _, j := range []*apiextensionsv1.JSON{common, modeSpecific} {
 		if j == nil || len(j.Raw) == 0 {
 			continue
 		}
-		m := map[string]interface{}{}
+		m := map[string]any{}
 		if err := json.Unmarshal(j.Raw, &m); err != nil {
 			return nil, fmt.Errorf("source: parse values: %w", err)
 		}

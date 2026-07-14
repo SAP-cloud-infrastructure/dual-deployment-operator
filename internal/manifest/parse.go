@@ -7,6 +7,7 @@ package manifest
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 
@@ -25,9 +26,9 @@ func Parse(raw []byte, fallback Origin) ([]Manifest, error) {
 	var out []Manifest
 	idx := 0
 	for {
-		obj := map[string]interface{}{}
+		obj := map[string]any{}
 		err := dec.Decode(&obj)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
