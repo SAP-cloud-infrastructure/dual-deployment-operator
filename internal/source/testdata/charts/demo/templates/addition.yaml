@@ -1,0 +1,10 @@
+{{- if eq .Values.mode "host" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-addition
+  annotations:
+    dual-deployment-operator.cc.sap/origin: additions
+data:
+  hello: world
+{{- end }}

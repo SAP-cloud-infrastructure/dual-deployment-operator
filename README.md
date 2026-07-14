@@ -4,7 +4,7 @@
 
 A Kubernetes operator that manages the deployment of split host/remote controllers in Gardener environments. Consumes a Helm chart or kustomize source per operator, renders it, applies typed Go transformations, and applies each half to its target cluster (host = seed, remote = shoot) via server-side apply.
 
-**Status**: Phase 0+1 complete (design revision 6 — two-render + cross-stream + hybrid patch DSL). Kubebuilder scaffold, `v1alpha1` CRD types with CEL admission validation, and a no-op reconciler are in place. Rendering, transformation, dual-cluster apply, and status population are future phases.
+**Status**: Phase 0+1+2 complete (design revision 6 — two-render + cross-stream + hybrid patch DSL). Kubebuilder scaffold, `v1alpha1` CRD types with CEL admission validation, and a no-op reconciler are in place. Source rendering (`internal/manifest` — multi-doc YAML parser + origin tagging; `internal/source` — Helm and kustomize renderers, two-render per reconcile, mode injection) is implemented and unit-tested offline (with fakes). Transformation, dual-cluster apply, reconciler wiring, and status population are future phases.
 
 ## Purpose
 

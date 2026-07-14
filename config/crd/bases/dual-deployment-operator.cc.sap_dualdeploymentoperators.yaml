@@ -63,6 +63,15 @@ spec:
                 - key
                 - secretName
                 type: object
+              remoteNamespace:
+                description: |-
+                  RemoteNamespace is the target namespace for the remote (shoot) render and
+                  delivery. Namespaced resources in the remote render that omit an explicit
+                  metadata.namespace are placed here; cluster-scoped resources are unaffected.
+                  The host render/delivery uses the CR's own metadata.namespace.
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
               source:
                 description: Source is a discriminated union — exactly one of Helm
                   or Kustomize.
@@ -211,6 +220,7 @@ spec:
                 type: array
             required:
             - remoteKubeconfig
+            - remoteNamespace
             - source
             type: object
           status:

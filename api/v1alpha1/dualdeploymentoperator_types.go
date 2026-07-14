@@ -15,6 +15,13 @@ import (
 type DualDeploymentOperatorSpec struct {
 	Source           Source              `json:"source"`
 	RemoteKubeconfig RemoteKubeconfigRef `json:"remoteKubeconfig"`
+	// RemoteNamespace is the target namespace for the remote (shoot) render and
+	// delivery. Namespaced resources in the remote render that omit an explicit
+	// metadata.namespace are placed here; cluster-scoped resources are unaffected.
+	// The host render/delivery uses the CR's own metadata.namespace.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	RemoteNamespace string `json:"remoteNamespace"`
 	// +optional
 	Transformations []Transformation `json:"transformations,omitempty"`
 	// +optional

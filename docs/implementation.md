@@ -300,9 +300,9 @@ const (
     ModeRemote Mode = "remote"
 )
 
-// Source renders the manifest stream for a specific mode.
+// Source renders the manifest stream for a specific mode into a target namespace.
 type Source interface {
-    Render(ctx context.Context, mode Mode) ([]manifest.Manifest, error)
+    Render(ctx context.Context, mode Mode, namespace string) ([]manifest.Manifest, error)
 }
 
 func From(spec v1alpha1.Source) (Source, error) {
@@ -326,7 +326,7 @@ type Helm struct {
     spec *v1alpha1.HelmSource
 }
 
-func (h *Helm) Render(ctx context.Context, mode Mode) ([]manifest.Manifest, error) {
+func (h *Helm) Render(ctx context.Context, mode Mode, namespace string) ([]manifest.Manifest, error) {
     // 1. Set up registry client (OCI auth if needed)
     settings := cli.New()
     registryClient, _ := registry.NewClient(...)
@@ -395,7 +395,7 @@ type Kustomize struct {
     spec *v1alpha1.KustomizeSource
 }
 
-func (k *Kustomize) Render(ctx context.Context, mode Mode) ([]manifest.Manifest, error) {
+func (k *Kustomize) Render(ctx context.Context, mode Mode, namespace string) ([]manifest.Manifest, error) {
     // Determine overlay path per mode
     var subPath string
     switch mode {
@@ -912,11 +912,12 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
         return r.errStatus(ctx, cr, "InvalidSource", err)
     }
 
-    // 2. Render TWICE — one per mode
-    hostManifests, err := src.Render(ctx, source.ModeHost)
+    // 2. Render TWICE — one per mode. Host uses the CR's own namespace;
+    //    remote uses spec.remoteNamespace.
+    hostManifests, err := src.Render(ctx, source.ModeHost, cr.Namespace)
     if err != nil { return r.errStatus(ctx, cr, "HostRenderFailed", err) }
 
-    remoteManifests, err := src.Render(ctx, source.ModeRemote)
+    remoteManifests, err := src.Render(ctx, source.ModeRemote, cr.Spec.RemoteNamespace)
     if err != nil { return r.errStatus(ctx, cr, "RemoteRenderFailed", err) }
 
     // 3. Group transformations by scope

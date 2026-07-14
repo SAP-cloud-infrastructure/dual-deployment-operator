@@ -320,6 +320,12 @@ spec:
     secretName: metal-operator-remote-kubeconfig
     key: kubeconfig
 
+  # Target namespace for the remote (shoot) render + delivery (required).
+  # Namespaced resources in the remote render that omit metadata.namespace are
+  # placed here; cluster-scoped resources are unaffected. The host render/delivery
+  # uses the CR's own metadata.namespace.
+  remoteNamespace: metal-operator
+
   transformations:
     # Sidecar injection via strategic-merge patch on the upstream Deployment.
     - patch:
@@ -1173,7 +1179,7 @@ dual-deployment-operator/
 ```go
 // Source renders manifests for a specific mode (host or remote).
 type Source interface {
-    Render(ctx context.Context, mode Mode) ([]Manifest, error)
+    Render(ctx context.Context, mode Mode, namespace string) ([]Manifest, error)
 }
 
 type Mode string
@@ -1239,11 +1245,12 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx, req) (ctrl.Result, err
     src, err := source.From(cr.Spec.Source)
     if err != nil { return r.errStatus(ctx, cr, "InvalidSource", err) }
 
-    // 2. Render TWICE — one per mode
-    hostManifests, err := src.Render(ctx, source.ModeHost)
+    // 2. Render TWICE — one per mode. Host uses the CR's own namespace;
+    //    remote uses spec.remoteNamespace.
+    hostManifests, err := src.Render(ctx, source.ModeHost, cr.Namespace)
     if err != nil { return r.errStatus(ctx, cr, "HostRenderFailed", err) }
 
-    remoteManifests, err := src.Render(ctx, source.ModeRemote)
+    remoteManifests, err := src.Render(ctx, source.ModeRemote, cr.Spec.RemoteNamespace)
     if err != nil { return r.errStatus(ctx, cr, "RemoteRenderFailed", err) }
 
     // 3. Group transformations by scope (per-render vs cross-stream)

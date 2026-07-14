@@ -1,0 +1,17 @@
+{{- if and (eq .Values.mode "host") .Values.controllerManager.enable }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-controller-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: demo}
+  template:
+    metadata:
+      labels: {app: demo}
+    spec:
+      containers:
+        - name: manager
+          image: demo:latest
+{{- end }}
