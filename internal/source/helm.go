@@ -54,7 +54,7 @@ func (h *helmSource) Render(ctx context.Context, mode Mode, namespace string) ([
 	}
 	manifests, err := manifest.Parse([]byte(rel.Manifest), manifest.OriginUpstream)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("source: parse rendered manifests: %w", err)
 	}
 	manifest.ApplyNamespace(manifests, namespace)
 	return manifests, nil

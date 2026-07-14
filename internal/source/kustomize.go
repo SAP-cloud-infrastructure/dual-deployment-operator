@@ -47,7 +47,7 @@ func (k *kustomizeSource) Render(ctx context.Context, mode Mode, namespace strin
 	}
 	manifests, err := manifest.Parse(yamlBytes, manifest.OriginUpstream)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("source: parse rendered manifests: %w", err)
 	}
 	manifest.ApplyNamespace(manifests, namespace)
 	return manifests, nil
