@@ -25,7 +25,7 @@ func newKustomize(t *testing.T) Source {
 }
 
 func TestKustomizeHostOverlayHasAdditionsAndUpstream(t *testing.T) {
-	ms, err := newKustomize(t).Render(context.Background(), ModeHost)
+	ms, err := newKustomize(t).Render(context.Background(), ModeHost, "host-ns")
 	if err != nil {
 		t.Fatalf("render host: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestKustomizeHostOverlayHasAdditionsAndUpstream(t *testing.T) {
 }
 
 func TestKustomizeRemoteOverlayExcludesAdditions(t *testing.T) {
-	ms, err := newKustomize(t).Render(context.Background(), ModeRemote)
+	ms, err := newKustomize(t).Render(context.Background(), ModeRemote, "remote-ns")
 	if err != nil {
 		t.Fatalf("render remote: %v", err)
 	}
@@ -49,5 +49,17 @@ func TestKustomizeRemoteOverlayExcludesAdditions(t *testing.T) {
 	}
 	if k["ConfigMap/upstream-cm"] != manifest.OriginUpstream {
 		t.Errorf("upstream-cm origin = %q, want upstream", k["ConfigMap/upstream-cm"])
+	}
+}
+
+func TestKustomizeAppliesTargetNamespace(t *testing.T) {
+	ms, err := newKustomize(t).Render(context.Background(), ModeHost, "host-ns")
+	if err != nil {
+		t.Fatalf("render host: %v", err)
+	}
+	for _, m := range ms {
+		if m.Unstructured.GetKind() == "ConfigMap" && m.Unstructured.GetNamespace() != "host-ns" {
+			t.Errorf("%s namespace = %q, want host-ns", m.Unstructured.GetName(), m.Unstructured.GetNamespace())
+		}
 	}
 }

@@ -25,7 +25,7 @@ type helmSource struct {
 	loader ChartLoader
 }
 
-func (h *helmSource) Render(ctx context.Context, mode Mode) ([]manifest.Manifest, error) {
+func (h *helmSource) Render(ctx context.Context, mode Mode, namespace string) ([]manifest.Manifest, error) {
 	ch, err := h.loader.Load(ctx, h.spec.Repo, h.spec.Name, h.spec.Version)
 	if err != nil {
 		return nil, fmt.Errorf("source: load chart: %w", err)
@@ -46,13 +46,18 @@ func (h *helmSource) Render(ctx context.Context, mode Mode) ([]manifest.Manifest
 	inst.ClientOnly = true
 	inst.IncludeCRDs = true
 	inst.ReleaseName = h.spec.Name
-	inst.Namespace = "default"
+	inst.Namespace = namespace
 
 	rel, err := inst.RunWithContext(ctx, ch, userVals)
 	if err != nil {
 		return nil, fmt.Errorf("source: helm render (mode=%s): %w", mode, err)
 	}
-	return manifest.Parse([]byte(rel.Manifest), manifest.OriginUpstream)
+	manifests, err := manifest.Parse([]byte(rel.Manifest), manifest.OriginUpstream)
+	if err != nil {
+		return nil, err
+	}
+	manifest.ApplyNamespace(manifests, namespace)
+	return manifests, nil
 }
 
 func (h *helmSource) modeValues(mode Mode) *apiextensionsv1.JSON {

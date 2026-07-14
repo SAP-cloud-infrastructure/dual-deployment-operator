@@ -44,7 +44,7 @@ func TestHelmHostRenderEnablesControllerAndTagsOrigins(t *testing.T) {
 		Repo: "r", Name: "demo", Version: "0.1.0",
 		HostValues: jsonVal(t, `{"controllerManager":{"enable":true}}`),
 	}
-	ms, err := newHelm(t, spec).Render(context.Background(), ModeHost)
+	ms, err := newHelm(t, spec).Render(context.Background(), ModeHost, "host-ns")
 	if err != nil {
 		t.Fatalf("render host: %v", err)
 	}
@@ -57,9 +57,45 @@ func TestHelmHostRenderEnablesControllerAndTagsOrigins(t *testing.T) {
 	}
 }
 
+func TestHelmRenderAppliesTargetNamespace(t *testing.T) {
+	spec := &v1alpha1.HelmSource{
+		Repo: "r", Name: "demo", Version: "0.1.0",
+		HostValues: jsonVal(t, `{"controllerManager":{"enable":true}}`),
+	}
+	ms, err := newHelm(t, spec).Render(context.Background(), ModeHost, "host-ns")
+	if err != nil {
+		t.Fatalf("render host: %v", err)
+	}
+	byName := map[string]manifest.Manifest{}
+	for _, m := range ms {
+		byName[m.Unstructured.GetKind()+"/"+m.Unstructured.GetName()] = m
+	}
+	if got := byName["ConfigMap/demo-addition"].Unstructured.GetNamespace(); got != "host-ns" {
+		t.Errorf("addition namespace = %q, want host-ns", got)
+	}
+	if got := byName["Deployment/demo-controller-manager"].Unstructured.GetNamespace(); got != "host-ns" {
+		t.Errorf("deployment namespace = %q, want host-ns", got)
+	}
+}
+
+func TestHelmRenderRemoteNamespaceAndClusterScoped(t *testing.T) {
+	spec := &v1alpha1.HelmSource{Repo: "r", Name: "demo", Version: "0.1.0"}
+	ms, err := newHelm(t, spec).Render(context.Background(), ModeRemote, "remote-ns")
+	if err != nil {
+		t.Fatalf("render remote: %v", err)
+	}
+	for _, m := range ms {
+		if m.Unstructured.GetKind() == "CustomResourceDefinition" {
+			if got := m.Unstructured.GetNamespace(); got != "" {
+				t.Errorf("CRD namespace = %q, want empty (cluster-scoped)", got)
+			}
+		}
+	}
+}
+
 func TestHelmRemoteRenderIncludesCRDs(t *testing.T) {
 	spec := &v1alpha1.HelmSource{Repo: "r", Name: "demo", Version: "0.1.0"}
-	ms, err := newHelm(t, spec).Render(context.Background(), ModeRemote)
+	ms, err := newHelm(t, spec).Render(context.Background(), ModeRemote, "remote-ns")
 	if err != nil {
 		t.Fatalf("render remote: %v", err)
 	}
@@ -77,7 +113,7 @@ func TestHelmRejectsUserSuppliedMode(t *testing.T) {
 		Repo: "r", Name: "demo", Version: "0.1.0",
 		Values: jsonVal(t, `{"mode":"host"}`),
 	}
-	_, err := newHelm(t, spec).Render(context.Background(), ModeHost)
+	_, err := newHelm(t, spec).Render(context.Background(), ModeHost, "host-ns")
 	if err == nil {
 		t.Fatal("expected error when user values set mode")
 	}

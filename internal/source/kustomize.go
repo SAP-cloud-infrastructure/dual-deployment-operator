@@ -22,7 +22,7 @@ type kustomizeSource struct {
 	resolver RootResolver
 }
 
-func (k *kustomizeSource) Render(ctx context.Context, mode Mode) ([]manifest.Manifest, error) {
+func (k *kustomizeSource) Render(ctx context.Context, mode Mode, namespace string) ([]manifest.Manifest, error) {
 	subPath := k.spec.HostPath
 	if mode == ModeRemote {
 		subPath = k.spec.RemotePath
@@ -45,5 +45,10 @@ func (k *kustomizeSource) Render(ctx context.Context, mode Mode) ([]manifest.Man
 	if err != nil {
 		return nil, fmt.Errorf("source: kustomize serialize: %w", err)
 	}
-	return manifest.Parse(yamlBytes, manifest.OriginUpstream)
+	manifests, err := manifest.Parse(yamlBytes, manifest.OriginUpstream)
+	if err != nil {
+		return nil, err
+	}
+	manifest.ApplyNamespace(manifests, namespace)
+	return manifests, nil
 }

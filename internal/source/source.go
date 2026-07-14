@@ -29,7 +29,7 @@ const (
 
 // Source renders the manifest stream for a specific mode.
 type Source interface {
-	Render(ctx context.Context, mode Mode) ([]manifest.Manifest, error)
+	Render(ctx context.Context, mode Mode, namespace string) ([]manifest.Manifest, error)
 }
 
 // ChartLoader acquires a Helm chart. Production pulls from OCI/HTTP; tests fake it.
