@@ -1320,7 +1320,7 @@ git add api/v1alpha1/ config/crd/bases/ internal/controller/
 git commit -m "feat(api): add required spec.remoteNamespace (DNS-1123)"
 ```
 
-- [ ] Task 12 complete
+- [x] Task 12 complete
 
 ---
 
@@ -1412,7 +1412,7 @@ git add internal/manifest/namespace.go internal/manifest/namespace_test.go
 git commit -m "feat(manifest): add ApplyNamespace fallback-stamp helper"
 ```
 
-- [ ] Task 13 complete
+- [x] Task 13 complete
 
 ---
 
@@ -1451,7 +1451,7 @@ git add internal/source/source.go internal/source/helm.go internal/source/source
 git commit -m "feat(source): thread target namespace into Render; Helm applies it"
 ```
 
-- [ ] Task 14 complete
+- [x] Task 14 complete
 
 ---
 
@@ -1484,7 +1484,7 @@ git add internal/source/kustomize.go internal/source/kustomize_test.go internal/
 git commit -m "feat(source): kustomize post-build namespace stamp"
 ```
 
-- [ ] Task 15 complete
+- [x] Task 15 complete
 
 ---
 
@@ -1520,7 +1520,7 @@ git add -A
 git commit -m "chore: verification fixups for remoteNamespace/target-namespace work"
 ```
 
-- [ ] Task 16 complete
+- [x] Task 16 complete
 
 ---
 
