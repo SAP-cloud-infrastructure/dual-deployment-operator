@@ -141,16 +141,6 @@ spec:
                       required:
                       - kinds
                       type: object
-                    packageWebhookConfigsForInjector:
-                      properties:
-                        configMapName:
-                          minLength: 1
-                          type: string
-                        dataKey:
-                          type: string
-                      required:
-                      - configMapName
-                      type: object
                     patch:
                       description: PatchSpec is a Kubernetes-native patch (strategic-merge
                         XOR JSON Patch) with a target selector.
@@ -201,10 +191,6 @@ spec:
                         rule: has(self.strategicMerge) != has(self.jsonPatch)
                     rewriteWebhookURL:
                       properties:
-                        targetKinds:
-                          items:
-                            type: string
-                          type: array
                         urlPrefix:
                           minLength: 1
                           type: string
@@ -215,8 +201,7 @@ spec:
                   x-kubernetes-validations:
                   - message: exactly one transformation type must be set per entry
                     rule: '(has(self.patch) ? 1 : 0) + (has(self.rewriteWebhookURL)
-                      ? 1 : 0) + (has(self.filterKinds) ? 1 : 0) + (has(self.packageWebhookConfigsForInjector)
-                      ? 1 : 0) == 1'
+                      ? 1 : 0) + (has(self.filterKinds) ? 1 : 0) == 1'
                 type: array
             required:
             - remoteKubeconfig
