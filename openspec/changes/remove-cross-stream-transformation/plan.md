@@ -75,7 +75,7 @@ applies WebhookConfigurations directly; the webhook-injector target
 patch mode keeps caBundle in sync."
 ```
 
-- [ ] Task 1 complete
+- [x] Task 1 complete
 
 ---
 
@@ -116,7 +116,7 @@ git add api/v1alpha1/dualdeploymentoperator_types_test.go
 git commit -m "test(crd): drop packageWebhookConfigsForInjector round-trip case"
 ```
 
-- [ ] Task 2 complete
+- [x] Task 2 complete
 
 ---
 
@@ -160,7 +160,7 @@ git add api/v1alpha1/zz_generated.deepcopy.go config/crd/ config/rbac/
 git commit -m "chore(crd): regenerate deepcopy + manifests after type removal"
 ```
 
-- [ ] Task 3 complete
+- [x] Task 3 complete
 
 ---
 
@@ -203,7 +203,7 @@ git add -A
 git commit -m "chore: lint fixes after cross-stream type removal" || echo "nothing to commit"
 ```
 
-- [ ] Task 4 complete
+- [x] Task 4 complete
 
 ---
 
