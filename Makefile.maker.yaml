@@ -10,6 +10,9 @@ binaries:
 
 controllerGen:
   enabled: true
+  # crdOutputPath override: maker default is top-level `crd/` (unreferenced by kustomize, litters the tree); use the canonical config/crd/bases.
+  crdOutputPath: config/crd/bases
+  rbacRoleName: dual-deployment-operator
 
 dockerfile:
   enabled: false
@@ -21,6 +24,10 @@ golang:
 golangciLint:
   createConfig: true
   timeout: 3m
+
+typos:
+  extendWords:
+    mis: mis
 
 githubWorkflow:
   global:
@@ -64,6 +71,9 @@ reuse:
         - AGENTS.md
         - README.md
         - CONTRIBUTING.md
+        - "**/zz_generated.*.go"
+        - "internal/source/testdata/**"
+        - "assets/**"
 
 testPackages:
   except: test/e2e

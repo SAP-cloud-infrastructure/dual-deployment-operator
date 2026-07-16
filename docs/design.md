@@ -19,7 +19,7 @@ Key characteristics:
 - **Operator supports both Helm and kustomize** via a CR source discriminator (`spec.source.helm` xor `spec.source.kustomize`).
 - **Small transformation menu:** 3 types — `patch` (DSL: strategic-merge or JSON Patch), `rewriteWebhookURL`, `filterKinds`. All per-render (a single scope). No general-purpose DSL, no scripting. `patch` replaces the historical `injectInitContainer` and `addLabels` typed types for patch-shaped operations. `renameKind` is not needed (was an artifact of ManagedResource-based delivery). The r5/r6 cross-stream `packageWebhookConfigsForInjector` type is **removed** in r7 — the operator now applies WebhookConfigurations directly to the shoot rather than packaging them for the injector (see §2.2.4).
 - **Dual-cluster direct apply** — operator holds two Kubernetes clients per CR, applies host + remote uniformly with server-side apply + drift correction + per-resource health tracking. No `ManagedResource` wrapping. WebhookConfigurations and CRDs are applied by the operator with `caBundle` left unset (unowned), so the injector can own that one field.
-- **webhook-injector retained for caBundle + cert lifecycle only.** Under r7 it runs in **target patch mode** ([webhook-injector#14](https://github.com/SAP-cloud-infrastructure/webhook-injector/pull/14)): it watches labeled CRD/Validating/Mutating WebhookConfiguration objects **on the shoot** (`--target-crd-label`) and keeps their `.caBundle` in sync as certs rotate, patching **only** `caBundle` — it does not create, delete, or rewrite `clientConfig`. It does NOT deliver WebhookConfigurations from a source ConfigMap anymore (`--webhook-config-name` is left unset). The operator and injector write the same objects but **disjoint fields**: the operator owns everything except `caBundle`; the injector owns `caBundle` only. SSA field ownership keeps them from clobbering each other.
+- **webhook-injector retained for caBundle + cert lifecycle only.** Under r7 it runs in **target patch mode** ([webhook-injector#14](https://github.com/SAP-cloud-infrastructure/webhook-injector/pull/14)): it watches labeled CRD/Validating/Mutating WebhookConfiguration objects **on the shoot** (`--target-label`) and keeps their `.caBundle` in sync as certs rotate, patching **only** `caBundle` — it does not create, delete, or rewrite `clientConfig`. It does NOT deliver WebhookConfigurations from a source ConfigMap anymore (`--webhook-config-name` is left unset). The operator and injector write the same objects but **disjoint fields**: the operator owns everything except `caBundle`; the injector owns `caBundle` only. SSA field ownership keeps them from clobbering each other.
 - **Zero `make build-` targets remain.** All pre-rendered YAML deleted.
 - **Estimated size:** ~900-1200 lines of Go (slightly less than r6 — cross-stream scope removed), shared across all five current remote operators.
 - **Deployment topology**: per-shoot (one operator instance per shoot-cp namespace), matching the webhook-injector's existing per-shoot footprint.
@@ -195,8 +195,8 @@ Option 3 remains a valid future consolidation if the injector becomes a maintena
 
 [webhook-injector#14](https://github.com/SAP-cloud-infrastructure/webhook-injector/pull/14) adds an opt-in **target patch mode** that removes both constraints:
 
-- **`--target-crd-label=<key>=<value>`** — the injector watches labeled `CustomResourceDefinition`, `ValidatingWebhookConfiguration`, and `MutatingWebhookConfiguration` objects **directly on the shoot** and keeps their `.caBundle` in sync as certs rotate. It patches **only** `caBundle` (per-webhook merge by name via `StrategicMergeFrom` for MWC/VWC; `MergeFrom` for CRD conversion), never creates/deletes, and never rewrites `clientConfig` Service→URL.
-- **`--webhook-config-name` becomes optional** — with only `--target-crd-label` + `--cert-sans`, the injector runs a cert-only + patch mode: it owns the cert Secret and rotation state machine, applies no WebhookConfigs from any ConfigMap.
+- **`--target-label=<key>=<value>`** — the injector watches labeled `CustomResourceDefinition`, `ValidatingWebhookConfiguration`, and `MutatingWebhookConfiguration` objects **directly on the shoot** and keeps their `.caBundle` in sync as certs rotate. It patches **only** `caBundle` (per-webhook merge by name via `StrategicMergeFrom` for MWC/VWC; `MergeFrom` for CRD conversion), never creates/deletes, and never rewrites `clientConfig` Service→URL.
+- **`--webhook-config-name` becomes optional** — with only `--target-label` + `--cert-sans`, the injector runs a cert-only + patch mode: it owns the cert Secret and rotation state machine, applies no WebhookConfigs from any ConfigMap.
 - Labeled CRDs participate in the injector's rotation gate, so cert promotion waits for shoot propagation (zero-downtime).
 
 **r7's delivery (form C′):**
@@ -205,8 +205,8 @@ Option 3 remains a valid future consolidation if the injector becomes a maintena
 - ✅ **No cross-stream transformation.** `packageWebhookConfigsForInjector` is removed; the operator no longer moves WebhookConfigs between renders or emits a source ConfigMap. The transformation menu is a single per-render scope (§3.4).
 - ✅ **Disjoint SSA *field* ownership** replaces disjoint *resource* ownership. The operator applies WebhookConfigs (and conversion-webhook CRDs) with `caBundle` **left unset**, so it never owns that field; the injector's target patch mode owns `caBundle` only. Two managers, same object, non-overlapping fields — SSA keeps them from clobbering each other, and there is no caBundle ping-pong.
 - ✅ **§9.2 closed** — conversion-webhook CRD caBundle is now stamped on the shoot CRD directly by the injector's target patch mode; no ManagedResource needed. (§9.2 records this resolution.)
-- ⚠️ **New coupling: a label contract.** The operator's WebhookConfig/CRD output must carry the injector's `--target-crd-label` so the injector adopts them. This is a one-line annotation/label on those resources (added by the chart or a `patch`), and is strictly simpler than the ConfigMap name/dataKey/YAML-shape contract it replaces.
-- ⚠️ **New deployment requirement: injector flags.** The injector sidecar must be started with `--target-crd-label` (+ `--cert-sans`) and **without** `--webhook-config-name`. This is a deployment-manifest change, tracked as a migration step (§6).
+- ⚠️ **New coupling: a label contract.** The operator's WebhookConfig/CRD output must carry the injector's `--target-label` so the injector adopts them. This is a one-line annotation/label on those resources (added by the chart or a `patch`), and is strictly simpler than the ConfigMap name/dataKey/YAML-shape contract it replaces.
+- ⚠️ **New deployment requirement: injector flags.** The injector sidecar must be started with `--target-label` (+ `--cert-sans`) and **without** `--webhook-config-name`. This is a deployment-manifest change, tracked as a migration step (§6).
 
 **Preferred over form C because** it removes the last remote-delivery asymmetry (WebhookConfigs now flow through the operator like everything else), deletes an entire transformation scope and interface (§5.2), and closes the only open production blocker (§9.2) — at the cost of a label contract that is cheaper than the ConfigMap contract it replaces. The injector shrinks to exactly its specialty (caBundle + certs), which is the shape r5 originally wanted.
 
@@ -238,14 +238,14 @@ webhook-injector (sidecar of each operator Pod, per shoot)
      ├── Watches cert Secret in seed
      ├── Generates + rotates TLS certs (writes to cert Secret)
      ├── Watches LABELED CRD/Validating/Mutating WebhookConfiguration
-     │   objects ON THE SHOOT (--target-crd-label), applied there by
+     │   objects ON THE SHOOT (--target-label), applied there by
      │   the operator
      └── Patches ONLY .caBundle on those objects, keeping it current
          as certs rotate (never creates/deletes, never rewrites
          clientConfig). --webhook-config-name is left unset.
 ```
 
-The injector no longer delivers WebhookConfigurations from a source ConfigMap; the operator delivers them directly. The injector's job narrows to exactly caBundle + cert lifecycle. This requires the injector sidecar to be started in target patch mode (`--target-crd-label` + `--cert-sans`, no `--webhook-config-name`); see §6.
+The injector no longer delivers WebhookConfigurations from a source ConfigMap; the operator delivers them directly. The injector's job narrows to exactly caBundle + cert lifecycle. This requires the injector sidecar to be started in target patch mode (`--target-label` + `--cert-sans`, no `--webhook-config-name`); see §6.
 
 The operator and injector write the **same** shoot objects (WebhookConfigurations, conversion-webhook CRDs) but **disjoint fields**:
 - Operator (field manager `dual-deployment-operator`, server-side apply) owns every field **except** `.caBundle` on WebhookConfigurations and `.spec.conversion.webhook.clientConfig.caBundle` on CRDs. It applies these resources with `caBundle` **unset**, so it never owns or writes that field.
@@ -325,7 +325,7 @@ spec:
                     # Target patch mode: watch labeled webhook objects on the shoot
                     # and keep their caBundle current. No --webhook-config-name.
                     args:
-                      - --target-crd-label=dual-deployment-operator.cc.sap/webhook-injector=metal-operator
+                      - --target-label=dual-deployment-operator.cc.sap/webhook-injector=metal-operator
                       - --cert-sans=metal-operator-remote-webhook-service.metal-operator.svc
                     volumeMounts:
                       - {name: webhook-certs, mountPath: /tmp/k8s-webhook-server/serving-certs, readOnly: true}
@@ -401,7 +401,7 @@ spec:
                   - name: webhook-injector
                     image: "..."
                     args:
-                      - --target-crd-label=dual-deployment-operator.cc.sap/webhook-injector=ipam-capi
+                      - --target-label=dual-deployment-operator.cc.sap/webhook-injector=ipam-capi
                       - --cert-sans=ipam-capi-remote-webhook-service.ipam-capi.svc
                     volumeMounts: [...]
                 volumes:
@@ -588,7 +588,7 @@ Drops resources of listed kinds from the manifest stream (neither host nor remot
 
 #### 3.4.4 Labeling webhook objects for the injector (r7)
 
-There is **no** dedicated transformation for the webhook-injector under r7. The operator applies WebhookConfigurations (and conversion-webhook CRDs) directly to the shoot as part of the normal remote render; the only requirement is that those objects carry the injector's `--target-crd-label` so the injector's target patch mode adopts them and keeps their `.caBundle` current.
+There is **no** dedicated transformation for the webhook-injector under r7. The operator applies WebhookConfigurations (and conversion-webhook CRDs) directly to the shoot as part of the normal remote render; the only requirement is that those objects carry the injector's `--target-label` so the injector's target patch mode adopts them and keeps their `.caBundle` current.
 
 This label is added with the existing `patch` transformation (or, equivalently, stamped by the chart/kustomization on the upstream webhook objects). Example (metal-operator):
 
@@ -615,7 +615,7 @@ This label is added with the existing `patch` transformation (or, equivalently, 
 
 **caBundle ownership**: the operator applies these objects via SSA with the `caBundle` field **unset**, so it does not own that field. The injector's target patch mode owns `caBundle` only (§3.8). This is the r7 replacement for the r5/r6 cross-stream `packageWebhookConfigsForInjector` transformation, which packaged WebhookConfigurations into a host-side ConfigMap for the injector to read — no longer needed now that the injector patches labeled shoot objects directly (§2.2.4).
 
-**Injector deployment**: the sidecar must run in target patch mode — `--target-crd-label=<key>=<value>` matching the label above, `--cert-sans=<webhook service DNS name>`, and **no** `--webhook-config-name` (§6). The label key/value is a per-operator convention; the example uses `dual-deployment-operator.cc.sap/webhook-injector: <operator>`.
+**Injector deployment**: the sidecar must run in target patch mode — `--target-label=<key>=<value>` matching the label above, `--cert-sans=<webhook service DNS name>`, and **no** `--webhook-config-name` (§6). The label key/value is a per-operator convention; the example uses `dual-deployment-operator.cc.sap/webhook-injector: <operator>`.
 
 **Applicability**: charts that use the webhook-injector (metal-operator, ipam-capi). Charts without webhooks (boot, argora, khalkeon) add no label and run the injector-free.
 
@@ -788,7 +788,7 @@ Rendered manifests:
 After transformations:
 - `rewriteWebhookURL` — WebhookConfigurations get URL-based `clientConfig` (service replaced by url); conversion-webhook CRDs likewise get their `.spec.conversion.webhook.clientConfig` rewritten service→url (§3.4.2).
 - `filterKinds {kinds: [Service]}` — drops the webhook Service.
-- `patch` (label) — stamps the injector's `--target-crd-label` onto the Validating/Mutating WebhookConfigurations (and conversion-webhook CRDs) so the injector adopts them on the shoot and keeps their caBundle current (§3.4.4).
+- `patch` (label) — stamps the injector's `--target-label` onto the Validating/Mutating WebhookConfigurations (and conversion-webhook CRDs) so the injector adopts them on the shoot and keeps their caBundle current (§3.4.4).
 
 Note: upstream's Role (leader-election) stays a Role — no renaming under direct-apply. Our `metal-token-rotate` Role also stays a Role. Both apply cleanly to the shoot with their original namespace scope.
 
@@ -904,12 +904,12 @@ Under r7 the webhook-injector runs as a sidecar of each operator Pod in **target
 1. **Watch cert Secret** in the operator's namespace
 2. **Generate initial TLS certs** and populate the cert Secret (SANs from `--cert-sans`)
 3. **Rotate certs** on expiration with configured overlap window
-4. **Watch labeled webhook objects on the shoot** — Validating/Mutating WebhookConfigurations and conversion-webhook CRDs carrying `--target-crd-label`, applied there by the operator. It watches them via a label-scoped cache on the shoot cluster.
+4. **Watch labeled webhook objects on the shoot** — Validating/Mutating WebhookConfigurations and conversion-webhook CRDs carrying `--target-label`, applied there by the operator. It watches them via a label-scoped cache on the shoot cluster.
 5. **Patch `.caBundle` on those objects** — for each labeled object, keep `caBundle` in sync with the current cert (per-webhook `StrategicMergeFrom` for MWC/VWC; `MergeFrom` on `.spec.conversion.webhook.clientConfig` for CRDs). It patches **only** `caBundle` — it never creates or deletes objects and never rewrites `clientConfig` Service→URL. Labeled CRDs join the rotation gate so cert promotion waits for shoot propagation.
 
 The injector is **no longer a delivery mechanism**. It does not read a source ConfigMap (`--webhook-config-name` is unset) and does not apply WebhookConfigurations. It touches exactly one field on objects someone else created.
 
-**The operator delivers WebhookConfigurations; the injector owns their caBundle.** The operator applies WebhookConfigurations (and conversion-webhook CRDs) to the shoot via SSA as part of the normal remote render, with the `caBundle` field **unset** so it never owns that field. It stamps the injector's `--target-crd-label` on those objects (via `patch`, §3.4.4) so the injector adopts them. The operator does not generate or rotate certs.
+**The operator delivers WebhookConfigurations; the injector owns their caBundle.** The operator applies WebhookConfigurations (and conversion-webhook CRDs) to the shoot via SSA as part of the normal remote render, with the `caBundle` field **unset** so it never owns that field. It stamps the injector's `--target-label` on those objects (via `patch`, §3.4.4) so the injector adopts them. The operator does not generate or rotate certs.
 
 **Disjoint SSA *field* ownership** (not disjoint resources). On the shoot, the operator and injector write the **same** WebhookConfiguration/CRD objects but **non-overlapping fields**:
 - Operator (field manager `dual-deployment-operator`, server-side apply): every field **except** `caBundle`. Plus CRDs (non-conversion), ClusterRoles, ClusterRoleBindings, Roles, RoleBindings, ServiceAccounts, and the operator's own additions — those are operator-only.
@@ -917,7 +917,7 @@ The injector is **no longer a delivery mechanism**. It does not read a source Co
 
 Because the two managers own non-overlapping fields, SSA prevents either from clobbering the other: the operator's periodic re-apply omits `caBundle` (so it never reverts the injector's write), and the injector patches only `caBundle` (so it never disturbs the operator's fields). No caBundle ping-pong, no `force` conflicts on shared fields.
 
-**CRD conversion-webhook caBundle — resolved (r7).** The injector's target patch mode stamps caBundle directly onto labeled conversion-webhook CRDs on the shoot. No `ManagedResource`, no seed-side `ManagedResourceReconciler`, no GRM. This closes the r5/r6 open limitation (§9.2) that blocked metal-operator's production migration. The only requirement is that the operator label the conversion-webhook CRDs with `--target-crd-label` (non-conversion CRDs may carry the label too — the injector skips CRDs without a webhook conversion strategy).
+**CRD conversion-webhook caBundle — resolved (r7).** The injector's target patch mode stamps caBundle directly onto labeled conversion-webhook CRDs on the shoot. No `ManagedResource`, no seed-side `ManagedResourceReconciler`, no GRM. This closes the r5/r6 open limitation (§9.2) that blocked metal-operator's production migration. The only requirement is that the operator label the conversion-webhook CRDs with `--target-label` (non-conversion CRDs may carry the label too — the injector skips CRDs without a webhook conversion strategy).
 
 **Ordering during initial deploy**:
 1. Operator applies CRDs, RBAC, SA, additions, and the labeled WebhookConfigurations (caBundle unset) to the shoot.
@@ -1390,7 +1390,7 @@ Three layers:
 
 Additionally:
 4. **Drift tests**: apply resource, mutate externally, verify next reconcile re-applies
-5. **Disjoint-field tests**: verify the operator applies Validating/Mutating WebhookConfigurations (and conversion-webhook CRDs) to the remote render with the `caBundle` field **unset**, and stamps the injector's `--target-crd-label` on them — so the injector's target patch mode can own `caBundle` without the operator reverting it on re-apply. (Under SSA, the operator's field manager must not appear as owner of `caBundle`.)
+5. **Disjoint-field tests**: verify the operator applies Validating/Mutating WebhookConfigurations (and conversion-webhook CRDs) to the remote render with the `caBundle` field **unset**, and stamps the injector's `--target-label` on them — so the injector's target patch mode can own `caBundle` without the operator reverting it on re-apply. (Under SSA, the operator's field manager must not appear as owner of `caBundle`.)
 6. **Deletion tests**: verify finalizer cleanup on host + remote, verify CRDs retained by default
 
 ---
@@ -1426,8 +1426,8 @@ Eight phases:
 
 The injector requires **the r7 code** ([webhook-injector#14](https://github.com/SAP-cloud-infrastructure/webhook-injector/pull/14)) — target patch mode. This phase configures and verifies its coexistence contract with the operator:
 
-- Configure the injector sidecar (in the operator's `patch`-injected sidecar spec, §3.4.4) with `--target-crd-label=<key>=<value>`, `--cert-sans=<webhook service DNS>`, and **no** `--webhook-config-name`.
-- Confirm the operator stamps the same `--target-crd-label` on the Validating/Mutating WebhookConfigurations (and conversion-webhook CRDs) it applies to the shoot, and applies them with `caBundle` unset.
+- Configure the injector sidecar (in the operator's `patch`-injected sidecar spec, §3.4.4) with `--target-label=<key>=<value>`, `--cert-sans=<webhook service DNS>`, and **no** `--webhook-config-name`.
+- Confirm the operator stamps the same `--target-label` on the Validating/Mutating WebhookConfigurations (and conversion-webhook CRDs) it applies to the shoot, and applies them with `caBundle` unset.
 - Confirm disjoint SSA **field** ownership: the operator owns every field except `caBundle`; the injector owns `caBundle` only. Re-apply by the operator must not revert the injector's caBundle write, and the injector's patch must not disturb operator-owned fields.
 
 **Success criterion**: with the injector in target patch mode, the operator-applied WebhookConfigurations and conversion-webhook CRDs on the shoot receive a valid caBundle from the injector and keep it across a simulated cert rotation; the operator's periodic re-apply does not revert caBundle. §9.2 is resolved by the injector's direct CRD stamping (no per-operator resolution needed).
@@ -1486,7 +1486,7 @@ Per transformation, table-driven over fixtures.
 - Deletion cascades correctly per policy
 - Transformation errors surface in CR status
 - Drift correction re-applies mutated resources
-- Operator's remote apply set **includes** WebhookConfigurations, applied with `caBundle` unset and carrying the injector's `--target-crd-label` (operator and injector share these objects but own disjoint fields — §3.8)
+- Operator's remote apply set **includes** WebhookConfigurations, applied with `caBundle` unset and carrying the injector's `--target-label` (operator and injector share these objects but own disjoint fields — §3.8)
 
 ### 7.3 Equivalence tests
 
@@ -1559,7 +1559,7 @@ A CRD carrying a conversion webhook (`.spec.conversion.strategy == "Webhook"`) h
 
 *caBundle — original problem (r5/r6):* the webhook-injector's only path for stamping caBundle into `.spec.conversion.webhook.clientConfig.caBundle` was its `ManagedResourceReconciler`, which selects Gardener `ManagedResource` objects on the seed by `--managed-resource-label` and stamps caBundle into their embedded CRDs. This design produces **no** `ManagedResource` objects (GRM elimination is a core goal, §2.2.1), so that path never fired — leaving conversion-webhook CRD caBundle (metal-operator) unmanaged, and blocking metal-operator's production migration.
 
-*caBundle — resolution:* the injector's new **target patch mode** (`--target-crd-label`) stamps caBundle directly onto labeled conversion-webhook CRDs **on the shoot**, with no `ManagedResource` involved (it uses `MergeFrom` on `.spec.conversion.webhook.clientConfig`, patches only `caBundle`, and skips CRDs that don't use webhook conversion). The operator labels its conversion-webhook CRDs with the same `--target-crd-label` it uses for WebhookConfigurations (§3.4.4). This is candidate resolution "B" from the r6 draft, realized upstream — but keyed on the shoot CRD object's label rather than a ConfigMap, and without any operator-side cross-stream transformation.
+*caBundle — resolution:* the injector's new **target patch mode** (`--target-label`) stamps caBundle directly onto labeled conversion-webhook CRDs **on the shoot**, with no `ManagedResource` involved (it uses `MergeFrom` on `.spec.conversion.webhook.clientConfig`, patches only `caBundle`, and skips CRDs that don't use webhook conversion). The operator labels its conversion-webhook CRDs with the same `--target-label` it uses for WebhookConfigurations (§3.4.4). This is candidate resolution "B" from the r6 draft, realized upstream — but keyed on the shoot CRD object's label rather than a ConfigMap, and without any operator-side cross-stream transformation.
 
 *Service→URL rewrite — original gap:* `rewriteWebhookURL` in r5/r6 iterated only `.webhooks[].clientConfig` (Validating/Mutating WebhookConfigurations) and never touched a CRD's `.spec.conversion.webhook.clientConfig`, so a conversion-webhook CRD's Service reference was left pointing at a seed Service the shoot cannot route to. The injector deliberately does **not** rewrite `clientConfig` Service→URL (it patches only caBundle), so nothing covered this.
 
@@ -1654,8 +1654,8 @@ Track in v2 planning issue.
 - **Wrapper chart** — historical name for `system/<operator>-remote/` Helm charts. Under this design, only helm-upstream operators have one.
 - **SSA** — Server-Side Apply, Kubernetes API primitive for declarative apply with field ownership
 - **Field manager** — identifier for the client that owns a set of fields in a resource (per-field granularity via SSA)
-- **webhook-injector** — companion controller ([SAP-cloud-infrastructure/webhook-injector](https://github.com/SAP-cloud-infrastructure/webhook-injector)) that manages the TLS cert lifecycle and, under r7, runs in **target patch mode** ([webhook-injector#14](https://github.com/SAP-cloud-infrastructure/webhook-injector/pull/14)): it watches labeled Validating/Mutating WebhookConfigurations and conversion-webhook CRDs **on the shoot** (`--target-crd-label`) and keeps their `.caBundle` in sync as certs rotate, patching **only** `caBundle`. It does **not** deliver WebhookConfigurations (no `--webhook-config-name`), does not rewrite `clientConfig`, and does not create/delete objects. The operator delivers WebhookConfigurations (caBundle unset); the injector owns caBundle via disjoint SSA field ownership (§3.8). (CRD conversion-webhook caBundle: resolved in r7 — see §9.2.)
-- **target patch mode** — the webhook-injector run mode that keeps `caBundle` current on labeled shoot objects applied by another writer (the operator), rather than delivering WebhookConfigurations from a source ConfigMap. Enabled by `--target-crd-label` + `--cert-sans`, with `--webhook-config-name` unset. Introduced in [webhook-injector#14](https://github.com/SAP-cloud-infrastructure/webhook-injector/pull/14).
+- **webhook-injector** — companion controller ([SAP-cloud-infrastructure/webhook-injector](https://github.com/SAP-cloud-infrastructure/webhook-injector)) that manages the TLS cert lifecycle and, under r7, runs in **target patch mode** ([webhook-injector#14](https://github.com/SAP-cloud-infrastructure/webhook-injector/pull/14)): it watches labeled Validating/Mutating WebhookConfigurations and conversion-webhook CRDs **on the shoot** (`--target-label`) and keeps their `.caBundle` in sync as certs rotate, patching **only** `caBundle`. It does **not** deliver WebhookConfigurations (no `--webhook-config-name`), does not rewrite `clientConfig`, and does not create/delete objects. The operator delivers WebhookConfigurations (caBundle unset); the injector owns caBundle via disjoint SSA field ownership (§3.8). (CRD conversion-webhook caBundle: resolved in r7 — see §9.2.)
+- **target patch mode** — the webhook-injector run mode that keeps `caBundle` current on labeled shoot objects applied by another writer (the operator), rather than delivering WebhookConfigurations from a source ConfigMap. Enabled by `--target-label` + `--cert-sans`, with `--webhook-config-name` unset. Introduced in [webhook-injector#14](https://github.com/SAP-cloud-infrastructure/webhook-injector/pull/14).
 - **Transformation** — a typed Go struct implementing `Apply(manifests) → manifests`, opt-in per CR. Applied to each render independently under the two-render pattern.
 - **Source discriminator** — the `spec.source.{helm,kustomize}` choice in the CR. Each source discriminator has its own nested fields (Helm has `values`/`hostValues`/`remoteValues`; kustomize has `url`/`hostPath`/`remotePath`).
 - **Two-render pattern** — the operator renders the source twice per reconcile, once per mode, producing disjoint host and remote manifest sets. See §3.5.

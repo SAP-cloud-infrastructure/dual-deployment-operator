@@ -161,7 +161,7 @@ Both fields are `MinLength=1`. `SecretName` names a Secret in the same namespace
 
 ---
 
-### Requirement: Transformation discriminated union with 4 types across 2 scopes
+### Requirement: Transformation discriminated union with 3 per-render types
 
 `Transformation` MUST declare exactly three pointer fields, forming a discriminated union where exactly one is set per entry. All three are per-render transformations (a single scope):
 

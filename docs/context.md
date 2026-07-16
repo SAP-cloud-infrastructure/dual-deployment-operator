@@ -203,8 +203,8 @@ r5/r6 lived under two "the injector cannot be modified" constraints:
 
 PR #14 removes both:
 
-- **`--target-crd-label=<key>=<value>`**: the injector watches labeled `CustomResourceDefinition` / `ValidatingWebhookConfiguration` / `MutatingWebhookConfiguration` objects **directly on the shoot** and keeps their `.caBundle` current as certs rotate. It patches **only** `caBundle` (per-webhook `StrategicMergeFrom` for MWC/VWC; `MergeFrom` for CRD conversion), never creates/deletes, never rewrites `clientConfig` Service→URL, and skips non-webhook CRDs. Labeled CRDs join the rotation gate for zero-downtime promotion.
-- **`--webhook-config-name` becomes optional**: with only `--target-crd-label` + `--cert-sans`, the injector owns the cert Secret + rotation state machine and delivers no WebhookConfigs from any ConfigMap.
+- **`--target-label=<key>=<value>`**: the injector watches labeled `CustomResourceDefinition` / `ValidatingWebhookConfiguration` / `MutatingWebhookConfiguration` objects **directly on the shoot** and keeps their `.caBundle` current as certs rotate. It patches **only** `caBundle` (per-webhook `StrategicMergeFrom` for MWC/VWC; `MergeFrom` for CRD conversion), never creates/deletes, never rewrites `clientConfig` Service→URL, and skips non-webhook CRDs. Labeled CRDs join the rotation gate for zero-downtime promotion.
+- **`--webhook-config-name` becomes optional**: with only `--target-label` + `--cert-sans`, the injector owns the cert Secret + rotation state machine and delivers no WebhookConfigs from any ConfigMap.
 
 **Changes vs. r6**:
 
@@ -212,8 +212,8 @@ PR #14 removes both:
 2. **Single transformation interface.** `CrossStreamTransformation` and the `Group()` scope-splitter are gone; `transform.Build()` returns one ordered `[]Transformation`, all per-render.
 3. **Disjoint *field* ownership replaces disjoint *resource* ownership.** The operator applies WebhookConfigs / conversion-webhook CRDs with `caBundle` **unset** (never owns that field); the injector owns `caBundle` only. Two managers, same objects, non-overlapping fields — SSA keeps them from clobbering each other. This is the SSA co-ownership story that r3 wanted but abandoned when it turned out the injector didn't do SSA; PR #14's caBundle-only strategic-merge patch is the moral equivalent.
 4. **§9.2 closed.** Conversion-webhook CRD caBundle is stamped on the shoot CRD directly by the injector — no ManagedResource, no GRM.
-5. **New label contract** (operator stamps `--target-crd-label` on its webhook objects, via `patch`) replaces the ConfigMap contract (name / dataKey / YAML shape). The label is cheaper.
-6. **New injector deployment flags**: `--target-crd-label` + `--cert-sans`, no `--webhook-config-name`.
+5. **New label contract** (operator stamps `--target-label` on its webhook objects, via `patch`) replaces the ConfigMap contract (name / dataKey / YAML shape). The label is cheaper.
+6. **New injector deployment flags**: `--target-label` + `--cert-sans`, no `--webhook-config-name`.
 
 **r7 transformation menu**:
 - Per-render (3 types, single scope): `patch` (DSL — also used to stamp the injector label), `rewriteWebhookURL` (typed — still needed; the injector does NOT rewrite Service→URL, and r7 extends this transformation to also rewrite conversion-webhook CRDs), `filterKinds` (typed).
@@ -342,7 +342,7 @@ Under r7, the operator and injector write the **same** WebhookConfiguration / co
 - **Operator** (field manager `dual-deployment-operator`, server-side apply): every field **except** `caBundle`. It applies WebhookConfigs and conversion-webhook CRDs with `caBundle` unset, so SSA never records it as owner of that field. Plus CRDs (non-conversion), ClusterRoles, ClusterRoleBindings, Roles, RoleBindings, ServiceAccounts, and additions — operator-only objects.
 - **Injector** (target patch mode): `.caBundle` on labeled MWC/VWC and `.spec.conversion.webhook.clientConfig.caBundle` on labeled conversion-webhook CRDs — nothing else. Plus cert generation/rotation.
 
-Because the two managers own non-overlapping fields, SSA prevents clobbering: the operator's periodic re-apply omits `caBundle` (never reverts the injector's write), and the injector patches only `caBundle` (never disturbs operator-owned fields). No caBundle ping-pong. The operator labels its webhook objects with the injector's `--target-crd-label` (via `patch`, §3.4.4 in design.md) so the injector adopts them.
+Because the two managers own non-overlapping fields, SSA prevents clobbering: the operator's periodic re-apply omits `caBundle` (never reverts the injector's write), and the injector patches only `caBundle` (never disturbs operator-owned fields). No caBundle ping-pong. The operator labels its webhook objects with the injector's `--target-label` (via `patch`, §3.4.4 in design.md) so the injector adopts them.
 
 **CRD conversion-webhook caBundle — resolved (r7).** The injector's target patch mode stamps caBundle directly onto labeled conversion-webhook CRDs on the shoot — no `ManagedResource`, no seed-side `ManagedResourceReconciler`, no GRM. This closes the r5/r6 open limitation (§9.2) that blocked metal-operator's production migration. The operator only needs to label those CRDs; the injector skips CRDs without a webhook conversion strategy.
 
@@ -361,7 +361,7 @@ Three transformations in v1, **one scope** (all per-render; r7 removed the cross
 | Transformation | Type | Replaces (in today's `make build-`) |
 |---|---|---|
 | `patch` | DSL (strategic-merge or JSON Patch) with target selector | Sidecar injection: `sed -e '/containers:/i\ initContainers:\n {{ include ... }}'`  |
-| | | Label addition: `yq eval '(select(.kind == "CustomResourceDefinition") \| .metadata.labels."...") = "true"'` — under r7 also used to stamp the injector's `--target-crd-label` on WebhookConfigs/CRDs |
+| | | Label addition: `yq eval '(select(.kind == "CustomResourceDefinition") \| .metadata.labels."...") = "true"'` — under r7 also used to stamp the injector's `--target-label` on WebhookConfigs/CRDs |
 | `rewriteWebhookURL` | Typed Go | `yq eval '(.webhooks[].clientConfig \| select(.service)) \|= ({"url": ..." + .service.path})'` |
 | `filterKinds` | Typed Go | `yq eval 'select(.kind != "Service" and ...)'` |
 
@@ -383,7 +383,7 @@ Adding a new typed transformation type requires an operator release; existing CR
 2. Rewrites (`rewriteWebhookURL`) after structural changes
 3. Filters (`filterKinds`) last
 
-Stamping the injector's `--target-crd-label` is a `patch` that only adds a label, so it is order-insensitive relative to the others. (The r5/r6 cross-stream ordering rule — `packageWebhookConfigsForInjector` after `rewriteWebhookURL` — no longer applies; that type is gone.)
+Stamping the injector's `--target-label` is a `patch` that only adds a label, so it is order-insensitive relative to the others. (The r5/r6 cross-stream ordering rule — `packageWebhookConfigsForInjector` after `rewriteWebhookURL` — no longer applies; that type is gone.)
 
 ---
 
@@ -422,7 +422,7 @@ Not every operator needs every transformation. Menu is opt-in per CR:
 | khalkeon | `filterKinds` (Service) |
 
 Notes:
-- metal-operator labels both its conversion-webhook CRDs and its WebhookConfigurations with the injector's `--target-crd-label`; ipam-capi labels only its WebhookConfigurations (its CRDs have no conversion webhook, and the injector skips non-webhook CRDs anyway).
+- metal-operator labels both its conversion-webhook CRDs and its WebhookConfigurations with the injector's `--target-label`; ipam-capi labels only its WebhookConfigurations (its CRDs have no conversion webhook, and the injector skips non-webhook CRDs anyway).
 - Only metal-operator and ipam-capi interact with the injector (they have webhooks) — under r7 that interaction is a `patch` adding a label, not a `packageWebhookConfigsForInjector` cross-stream transformation.
 - The 3 simpler operators (boot, argora, khalkeon) use just ONE transformation each — a `filterKinds`. They run without the injector.
 - No `renameKind` in any CR (r6+) — direct-apply preserves Roles as Roles. No `packageWebhookConfigsForInjector` in any CR (r7+) — the operator applies WebhookConfigs directly.
@@ -477,5 +477,5 @@ If any of these become concretely needed, they can be added — but they're reje
 - **"Kustomize source has a `values` map like Helm"** — no. Kustomize has no Helm-values equivalent. Per-CR parameterization for kustomize sources is via `hostPath`/`remotePath` (mode selection) plus, if needed, future kustomize-native fields (`images`, `patches`). Not a values map.
 - **"Replace ALL typed transformations with generic JSON manipulation (DSL)"** — considered, rejected. Loss of self-describing names for stream-level operations and complex iteration/conditional operations. However, r6 adopted `patch` DSL specifically for the 2 patch-shaped operations (`injectInitContainer`, `addLabels`) where typed wrapping hid the same content that patch would show. Non-patch-shaped operations stay typed (`rewriteWebhookURL`, `filterKinds`).
 - **"ConfigMap-based patch library that operator resolves"** — considered as middle-ground between typed and DSL. Rejected: adds templating engine complexity, ConfigMap versioning, and runtime failure surface. `patch` DSL inline in the CR is simpler and equally flexible.
-- **"webhook-injector should be scoped narrowly via labels so operator can apply WebhookConfigs directly (pure Option 2)"** — was rejected in r5 ("the injector cannot be modified"), then **adopted in r7** once [webhook-injector#14](https://github.com/SAP-cloud-infrastructure/webhook-injector/pull/14) added exactly this: `--target-crd-label` label-scoping + caBundle-only patching. The operator now applies WebhookConfigs directly and the injector patches caBundle in place. The r5/r6 `packageWebhookConfigsForInjector` cross-stream workaround is removed. See revision 7.
+- **"webhook-injector should be scoped narrowly via labels so operator can apply WebhookConfigs directly (pure Option 2)"** — was rejected in r5 ("the injector cannot be modified"), then **adopted in r7** once [webhook-injector#14](https://github.com/SAP-cloud-infrastructure/webhook-injector/pull/14) added exactly this: `--target-label` label-scoping + caBundle-only patching. The operator now applies WebhookConfigs directly and the injector patches caBundle in place. The r5/r6 `packageWebhookConfigsForInjector` cross-stream workaround is removed. See revision 7.
 - **"`renameKind Role→ClusterRole` is needed on all upstream Roles"** — was true under ManagedResource-based delivery in r2. Under direct-apply (r3+) the operator preserves namespace and applies Roles as Roles. `renameKind` removed in r6.
