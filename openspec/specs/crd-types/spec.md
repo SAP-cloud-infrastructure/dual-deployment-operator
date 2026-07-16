@@ -163,7 +163,7 @@ Both fields are `MinLength=1`. `SecretName` names a Secret in the same namespace
 
 ### Requirement: Transformation discriminated union with 4 types across 2 scopes
 
-`Transformation` MUST declare exactly four pointer fields, forming a discriminated union where exactly one is set per entry:
+`Transformation` MUST declare exactly three pointer fields, forming a discriminated union where exactly one is set per entry. All three are per-render transformations (a single scope):
 
 ```go
 type Transformation struct {
@@ -171,19 +171,21 @@ type Transformation struct {
     Patch             *PatchSpec             `json:"patch,omitempty"`
     RewriteWebhookURL *RewriteWebhookURLSpec `json:"rewriteWebhookURL,omitempty"`
     FilterKinds       *FilterKindsSpec       `json:"filterKinds,omitempty"`
-    // Cross-stream (1)
-    PackageWebhookConfigsForInjector *PackageWebhookConfigsForInjectorSpec `json:"packageWebhookConfigsForInjector,omitempty"`
 }
 ```
 
-The "exactly one" invariant is enforced by CEL (see `cel-admission-validation` spec).
+There is no cross-stream scope and no `PackageWebhookConfigsForInjector` field. The "exactly one" invariant is enforced by CEL (see `cel-admission-validation` spec).
 
 #### Scenario: Round-trip for each variant
 
-- **WHEN** a Go program constructs a `Transformation` with each of the four fields (one at a time)
+- **WHEN** a Go program constructs a `Transformation` with each of the three fields (one at a time)
 - **THEN** each `json.Marshal`/`json.Unmarshal` cycle round-trips without loss
 
----
+#### Scenario: No cross-stream field exists
+
+- **WHEN** the `Transformation` struct is inspected via reflection
+- **THEN** it declares exactly three fields (`Patch`, `RewriteWebhookURL`, `FilterKinds`)
+- **AND** no `PackageWebhookConfigsForInjector` field is present
 
 ### Requirement: PatchSpec typed variants
 
@@ -236,23 +238,20 @@ type JSONPatchOp struct {
 
 ### Requirement: RewriteWebhookURLSpec fields
 
-`RewriteWebhookURLSpec` MUST declare exactly two fields:
+`RewriteWebhookURLSpec` MUST declare exactly one field:
 
 ```go
 type RewriteWebhookURLSpec struct {
-    URLPrefix   string   `json:"urlPrefix"`
-    TargetKinds []string `json:"targetKinds,omitempty"`
+    URLPrefix string `json:"urlPrefix"`
 }
 ```
 
-`URLPrefix` is `MinLength=1`. `TargetKinds` is optional; when empty, the transformation applies to Validating and Mutating WebhookConfiguration kinds by default.
+The previously-declared optional `TargetKinds []string` field is REMOVED — v1 does not support per-kind narrowing. `URLPrefix` is `MinLength=1`. The transformation applies to three kinds — `ValidatingWebhookConfiguration` and `MutatingWebhookConfiguration` (rewriting each `.webhooks[].clientConfig`), and `CustomResourceDefinition` (rewriting `.spec.conversion.webhook.clientConfig`, only when `.spec.conversion.strategy == "Webhook"`). Targeting is unconditional across all three kinds.
 
 #### Scenario: Minimal spec is accepted
 
 - **WHEN** a CR is applied with `spec.transformations[0].rewriteWebhookURL.urlPrefix: "https://example:443"`
 - **THEN** the API server accepts the request
-
----
 
 ### Requirement: FilterKindsSpec fields
 
@@ -271,26 +270,6 @@ type FilterKindsSpec struct {
 
 - **WHEN** a CR is applied with `spec.transformations[0].filterKinds: {kinds: []}`
 - **THEN** the API server rejects the request
-
----
-
-### Requirement: PackageWebhookConfigsForInjectorSpec fields
-
-`PackageWebhookConfigsForInjectorSpec` MUST declare exactly two fields:
-
-```go
-type PackageWebhookConfigsForInjectorSpec struct {
-    ConfigMapName string `json:"configMapName"`
-    DataKey       string `json:"dataKey,omitempty"`
-}
-```
-
-`ConfigMapName` is `MinLength=1`. `DataKey` is optional; the operator uses `"webhooks.yaml"` when empty.
-
-#### Scenario: Only ConfigMapName is required
-
-- **WHEN** a CR is applied with `spec.transformations[0].packageWebhookConfigsForInjector.configMapName: "webhook-config"`
-- **THEN** the API server accepts the request
 
 ---
 

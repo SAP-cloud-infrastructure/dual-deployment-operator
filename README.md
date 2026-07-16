@@ -4,7 +4,7 @@
 
 A Kubernetes operator that manages the deployment of split host/remote controllers in Gardener environments. Consumes a Helm chart or kustomize source per operator, renders it, applies typed Go transformations, and applies each half to its target cluster (host = seed, remote = shoot) via server-side apply.
 
-**Status**: Phase 0+1+2 complete (design revision 6 — two-render + cross-stream + hybrid patch DSL). Kubebuilder scaffold, `v1alpha1` CRD types with CEL admission validation, and a no-op reconciler are in place. Source rendering (`internal/manifest` — multi-doc YAML parser + origin tagging; `internal/source` — Helm and kustomize renderers, two-render per reconcile, mode injection) is implemented and unit-tested offline (with fakes). Transformation, dual-cluster apply, reconciler wiring, and status population are future phases.
+**Status**: Phase 0+1+2 complete (design revision 7 — two-render + hybrid patch DSL). Kubebuilder scaffold, `v1alpha1` CRD types with CEL admission validation, and a no-op reconciler are in place. Source rendering (`internal/manifest` — multi-doc YAML parser + origin tagging; `internal/source` — Helm and kustomize renderers, two-render per reconcile, mode injection) is implemented and unit-tested offline (with fakes). Transformation, dual-cluster apply, reconciler wiring, and status population are future phases.
 
 ## Purpose
 
@@ -27,14 +27,12 @@ Goals:
 
 - Operator watches `DualDeploymentOperator` CRs
 - **Renders the source twice per reconcile** — once for host, once for remote — using mode-specific configuration (Helm: `hostValues`/`remoteValues`; kustomize: `hostPath`/`remotePath` selecting overlay directories)
-- Applies transformations to each render in two scopes:
-  - Per-render (3): `patch` (strategic-merge or JSON Patch DSL), `rewriteWebhookURL` (typed), `filterKinds` (typed) — applied to each render independently
-  - Cross-stream (1): `packageWebhookConfigsForInjector` (typed) — moves WebhookConfigurations from remote render into a ConfigMap on host render, for consumption by the webhook-injector sidecar
+- Applies 3 per-render transformations to each render independently: `patch` (strategic-merge or JSON Patch DSL), `rewriteWebhookURL` (typed; rewrites webhook and conversion-webhook URLs, also rewrites `.spec.conversion.webhook.clientConfig` on CRDs), `filterKinds` (typed)
+- No cross-stream scope: WebhookConfigurations are applied directly to the shoot with `caBundle` unset; the webhook-injector patches `caBundle` in place via target patch mode ([webhook-injector#14](https://github.com/SAP-cloud-infrastructure/webhook-injector/pull/14)), with disjoint SSA field ownership
 - No split step, no routing rules — each render goes entirely to its target cluster
 - Applies host render's output to the seed cluster (in-cluster client)
 - Applies remote render's output to the shoot cluster (kubeconfig from a Gardener token-requestor Secret)
 - Tracks per-resource health, drift-corrects on periodic reconcile
-- webhook-injector retained for cert lifecycle only (SSA field-manager coexistence)
 
 ## Deployment topology
 
@@ -62,7 +60,7 @@ See [`docs/implementation.md`](docs/implementation.md) for phase-by-phase steps.
 
 | File | Purpose |
 |---|---|
-| [`docs/design.md`](docs/design.md) | Full design (revision 6, two-render + cross-stream + hybrid patch DSL). Architecture, CRD, transformations, delivery, migration plan, verification. |
+| [`docs/design.md`](docs/design.md) | Full design (revision 7, two-render + hybrid patch DSL). Architecture, CRD, transformations, delivery, migration plan, verification. |
 | [`docs/context.md`](docs/context.md) | Conversation history and design-decision rationale. Why Model C over B; why Option 2 over Option 1 or 3; why per-shoot topology; why two-render over single-render+split. |
 | [`docs/implementation.md`](docs/implementation.md) | Phase-by-phase implementation guide with concrete Go interfaces, file layout, and dependency list. |
 | [`docs/related-artifacts.md`](docs/related-artifacts.md) | Links: tracking issue, archived POC, current wrapper charts, upstream repos. |

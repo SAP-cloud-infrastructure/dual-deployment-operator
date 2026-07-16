@@ -3,9 +3,7 @@
 ## Purpose
 
 Defines the CEL (Common Expression Language) validation rules embedded in the CRD schema for `DualDeploymentOperator`, covering discriminated-union enforcement for `spec.source`, `spec.transformations[]`, and `PatchSpec`, as well as the kustomize URL ref-pinning rule. Also specifies that the v1 `ValidatingWebhookConfiguration` is scaffolded but not deployed, and that Kubernetes 1.29+ is required for these features to function.
-
 ## Requirements
-
 ### Requirement: Source discriminator enforced by CEL
 
 The CRD schema for `spec.source` MUST carry a CEL rule that rejects any CR where the number of set variants under `spec.source` is not exactly one. The rule MUST be:
@@ -39,13 +37,12 @@ with the message `"exactly one of source.helm or source.kustomize must be set"`.
 
 ### Requirement: Transformation union enforced by CEL
 
-The CRD schema for each entry of `spec.transformations[]` MUST carry a CEL rule that rejects any entry where the number of set union fields is not exactly one. The rule MUST count the four union fields explicitly:
+The CRD schema for each entry of `spec.transformations[]` MUST carry a CEL rule that rejects any entry where the number of set union fields is not exactly one. The rule MUST count the three union fields explicitly:
 
 ```
 (has(self.patch) ? 1 : 0) +
 (has(self.rewriteWebhookURL) ? 1 : 0) +
-(has(self.filterKinds) ? 1 : 0) +
-(has(self.packageWebhookConfigsForInjector) ? 1 : 0) == 1
+(has(self.filterKinds) ? 1 : 0) == 1
 ```
 
 with the message `"exactly one transformation type must be set per entry"`.
@@ -60,7 +57,7 @@ with the message `"exactly one transformation type must be set per entry"`.
 - **WHEN** a CR is applied with `spec.transformations: [{patch: {...}, filterKinds: {...}}]`
 - **THEN** the API server rejects the request
 
-#### Scenario: Each of the four variants is accepted alone
+#### Scenario: Each of the three variants is accepted alone
 
 - **WHEN** a CR is applied with `spec.transformations: [{patch: {target: {}, strategicMerge: {...}}}]`
 - **THEN** the API server accepts the request
@@ -71,10 +68,10 @@ with the message `"exactly one transformation type must be set per entry"`.
 - **WHEN** a CR is applied with `spec.transformations: [{filterKinds: {kinds: ["Service"]}}]`
 - **THEN** the API server accepts the request
 
-- **WHEN** a CR is applied with `spec.transformations: [{packageWebhookConfigsForInjector: {configMapName: "webhooks"}}]`
-- **THEN** the API server accepts the request
+#### Scenario: Removed packageWebhookConfigsForInjector variant is rejected
 
----
+- **WHEN** a CR is applied with `spec.transformations: [{packageWebhookConfigsForInjector: {configMapName: "webhooks"}}]`
+- **THEN** the API server rejects the request because `packageWebhookConfigsForInjector` is no longer a known field of `Transformation` (pruned by the structural schema)
 
 ### Requirement: PatchSpec variant enforced by CEL
 
@@ -182,3 +179,4 @@ The CRD MUST rely on Kubernetes 1.29+ features (CEL rules on CRD schemas). The o
 - **WHEN** a maintainer overrides `ENVTEST_K8S_VERSION` to `1.28.x` and runs `make test`
 - **THEN** the envtest suite fails
 - **AND** the failure is caused by the CEL rules being silently ignored (invalid CRs are accepted where they should be rejected)
+

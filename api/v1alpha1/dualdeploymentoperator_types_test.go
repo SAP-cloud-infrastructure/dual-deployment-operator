@@ -54,7 +54,6 @@ func TestTransformationVariantsRoundTrip(t *testing.T) {
 		{Patch: &PatchSpec{Target: Selector{Kind: "Deployment"}, JSONPatch: []JSONPatchOp{{Op: "add", Path: "/metadata/labels/a", Value: &apiextensionsv1.JSON{Raw: []byte(`"b"`)}}}}},
 		{RewriteWebhookURL: &RewriteWebhookURLSpec{URLPrefix: "https://x:443"}},
 		{FilterKinds: &FilterKindsSpec{Kinds: []string{"Service"}}},
-		{PackageWebhookConfigsForInjector: &PackageWebhookConfigsForInjectorSpec{ConfigMapName: "webhooks"}},
 	}
 	for i, c := range cases {
 		b, err := json.Marshal(c)
