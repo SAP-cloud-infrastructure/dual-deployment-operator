@@ -218,48 +218,13 @@ Option 3 remains a valid future consolidation if the injector becomes a maintena
 
 ### 3.1 Architecture
 
-```
-                  DualDeploymentOperator (CR, in seed's shoot-cp-* namespace)
-                            │
-                            ▼
-              ┌─────────────────────────────┐
-              │   dual-deployment-operator  │
-              │  (Go binary in shoot-cp-*)  │
-              └─────────────────────────────┘
-                            │
-              ┌─────────────┴─────────────┐
-              ▼                           ▼
-   HOST RENDER                      REMOTE RENDER
-   Helm SDK: values +               Helm SDK: values +
-     hostValues                       remoteValues
-        or                              or
-   Krusty: url/hostPath             Krusty: url/remotePath
-              │                           │
-              ▼                           ▼
-    Host manifest stream         Remote manifest stream
-              │                           │
-              ▼                           ▼
-    Per-render transforms        Per-render transforms
-    (3 typed types)              (3 typed types)
-              │                           │
-              ▼                           ▼
-    seed Kubernetes client       shoot Kubernetes client
-    (in-cluster SA)              (kubeconfig from Gardener
-              │                   token-requestor Secret)
-              ▼                           │
-   Server-side apply to seed              ▼
-              │                Server-side apply to shoot
-              │                (incl. WebhookConfigs/CRDs,
-              │                 caBundle field left unset)
-              └─────────────┬─────────────┘
-                            │
-                            ▼
-         Per-resource drift correction + health
-              (unified across both clients)
-                            │
-                            ▼
-                     CR status update
-```
+![dual-deployment-operator reconcile dataflow (two-render, r7)](../assets/architecture-dataflow.drawio.svg)
+
+*Reconcile dataflow: CR → operator → host render + remote render → per-render transforms (patch, rewriteWebhookURL, filterKinds) → server-side apply to seed / shoot → unified drift correction + health → CR status. Editable in [draw.io / diagrams.net](https://app.diagrams.net).*
+
+![dual-deployment-operator per-shoot deployment topology](../assets/architecture-topology.drawio.svg)
+
+*Deployment topology: one operator Pod per `shoot--cp--*` namespace, two Kubernetes clients (seed in-cluster + shoot via Gardener token-requestor kubeconfig). Webhook-injector sidecar present only for `metal-operator` and `ipam-capi`. Editable in [draw.io / diagrams.net](https://app.diagrams.net).*
 
 Two independent renders per reconcile. Each render produces only the resources for its target cluster — the chart/kustomization is responsible for emitting the right set per mode via values or overlay path. Operator does not decide routing; the source decides.
 
