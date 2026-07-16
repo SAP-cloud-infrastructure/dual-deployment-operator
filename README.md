@@ -28,7 +28,7 @@ Goals:
 - Operator watches `DualDeploymentOperator` CRs
 - **Renders the source twice per reconcile** — once for host, once for remote — using mode-specific configuration (Helm: `hostValues`/`remoteValues`; kustomize: `hostPath`/`remotePath` selecting overlay directories)
 - Applies 3 per-render transformations to each render independently: `patch` (strategic-merge or JSON Patch DSL), `rewriteWebhookURL` (typed; rewrites webhook and conversion-webhook URLs, also rewrites `.spec.conversion.webhook.clientConfig` on CRDs), `filterKinds` (typed)
-- No cross-stream scope: WebhookConfigurations are applied directly to the shoot with `caBundle` unset; the webhook-injector patches `caBundle` in place via target patch mode ([webhook-injector#14](https://github.com/sapcc/webhook-injector/issues/14)), with disjoint SSA field ownership
+- No cross-stream scope: WebhookConfigurations are applied directly to the shoot with `caBundle` unset; the webhook-injector patches `caBundle` in place via target patch mode ([webhook-injector#14](https://github.com/SAP-cloud-infrastructure/webhook-injector/pull/14)), with disjoint SSA field ownership
 - No split step, no routing rules — each render goes entirely to its target cluster
 - Applies host render's output to the seed cluster (in-cluster client)
 - Applies remote render's output to the shoot cluster (kubeconfig from a Gardener token-requestor Secret)
