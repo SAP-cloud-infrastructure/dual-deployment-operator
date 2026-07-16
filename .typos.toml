@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [default.extend-words]
+# "mis-" is a legitimate English prefix (mis-tag, mis-labeled, mis-match, etc.)
+mis = "mis"
 
 
 [files]

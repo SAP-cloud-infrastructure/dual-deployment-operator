@@ -34,6 +34,18 @@ Goals:
 - Applies remote render's output to the shoot cluster (kubeconfig from a Gardener token-requestor Secret)
 - Tracks per-resource health, drift-corrects on periodic reconcile
 
+## Architecture
+
+The following diagrams reflect the current design (revision 7). Both are editable in [draw.io / diagrams.net](https://app.diagrams.net).
+
+![dual-deployment-operator reconcile dataflow (two-render, r7)](assets/architecture-dataflow.drawio.svg)
+
+*Reconcile dataflow: the operator renders the source twice (host + remote), applies three per-render transforms, and applies each render directly to its target cluster via server-side apply. The webhook-injector sidecar (target patch mode) patches only `.caBundle` on labeled objects on the shoot — it is not a delivery path for WebhookConfigurations.*
+
+![dual-deployment-operator per-shoot deployment topology](assets/architecture-topology.drawio.svg)
+
+*Deployment topology: one operator Pod per `shoot--cp--*` namespace, with two Kubernetes clients (seed in-cluster + shoot via Gardener token-requestor kubeconfig). The webhook-injector sidecar is present only for `metal-operator` and `ipam-capi` (the two operators with webhooks). See [`docs/design.md`](docs/design.md) for full design detail.*
+
 ## Deployment topology
 
 Per-shoot. One operator Pod per shoot-cp namespace (`shoot--cp--*`), watching CRs in its own namespace, with two Kubernetes clients (seed in-cluster + shoot via kubeconfig).
