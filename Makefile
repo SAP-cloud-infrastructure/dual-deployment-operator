@@ -158,7 +158,7 @@ check: FORCE static-check build/cover.html build-all
 
 generate: install-controller-gen
 	@printf "\e[1;36m>> controller-gen\e[0m\n"
-	@controller-gen crd rbac:roleName=dual-deployment-operator webhook paths="./..." output:crd:artifacts:config=crd output:rbac:artifacts:config=config/rbac
+	@controller-gen crd rbac:roleName=dual-deployment-operator webhook paths="./..." output:crd:artifacts:config=config/crd/bases output:rbac:artifacts:config=config/rbac
 	@controller-gen object paths="./..."
 	@controller-gen applyconfiguration paths="./..."
 

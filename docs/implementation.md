@@ -482,7 +482,7 @@ func Build(specs []v1alpha1.Transformation) ([]Transformation, error) {
 
 ### Webhook-injector integration (r7): label, don't package
 
-There is **no** `packageWebhookConfigsForInjector` transformation in r7. The operator applies WebhookConfigurations (and conversion-webhook CRDs) directly to the shoot in the remote render; the only requirement is that those objects carry the webhook-injector's `--target-crd-label` so its target patch mode adopts them and keeps `.caBundle` current (design.md §3.4.4, §3.8).
+There is **no** `packageWebhookConfigsForInjector` transformation in r7. The operator applies WebhookConfigurations (and conversion-webhook CRDs) directly to the shoot in the remote render; the only requirement is that those objects carry the webhook-injector's `--target-label` so its target patch mode adopts them and keeps `.caBundle` current (design.md §3.4.4, §3.8).
 
 That labeling is done with the existing `patch` transformation — no new code:
 
@@ -605,7 +605,7 @@ func mustJSON(s string) *apiextensionsv1.JSON {
 }
 ```
 
-Similar tests for `rewriteWebhookURL` and `filterKinds`. (No `packageWebhookConfigsForInjector` in r7 — injector integration is a `patch` that stamps `--target-crd-label`, covered by the `patch` tests.)
+Similar tests for `rewriteWebhookURL` and `filterKinds`. (No `packageWebhookConfigsForInjector` in r7 — injector integration is a `patch` that stamps `--target-label`, covered by the `patch` tests.)
 
 ### `patch` implementation
 
@@ -849,7 +849,7 @@ func (a *SSAApplier) prepareForApply(m manifest.Manifest) {
 
 Because the operator applies with `caBundle` stripped, SSA does not record `dual-deployment-operator` as the field manager for `caBundle`; the injector's per-webhook strategic-merge patch (and `MergeFrom` on CRD conversion) sets it and keeps it. The operator's periodic re-apply omits `caBundle`, so it never reverts the injector's write; the injector patches only `caBundle`, so it never disturbs operator-owned fields. No caBundle ping-pong, no SSA `force` conflicts on shared fields.
 
-The operator must also stamp the injector's `--target-crd-label` on these objects (via the `patch` transformation, §Phase 3 above) so the injector's target patch mode adopts them.
+The operator must also stamp the injector's `--target-label` on these objects (via the `patch` transformation, §Phase 3 above) so the injector's target patch mode adopts them.
 
 ---
 
@@ -1173,7 +1173,7 @@ make test-integration
 | 0 | Kubebuilder scaffold builds; CRD registers |
 | 1 | CRD types compile; deepcopy generated; validation webhook (or CEL) rejects invalid discriminators and unpinned kustomize URLs |
 | 2 | Both Helm and kustomize renderers produce parsable manifest streams for host and remote modes on a metal-operator fixture; origin tags correct |
-| 3 | Each transformation's unit tests pass with table-driven cases; a single per-render `Transformation` interface + `Build()` implemented (no cross-stream scope); a `patch` that stamps the injector's `--target-crd-label` onto WebhookConfigurations/CRDs is covered. Also: the scaffolded `PackageWebhookConfigsForInjectorSpec` CRD type is removed (see "r7 CRD cleanup") and `make manifests generate` re-run |
+| 3 | Each transformation's unit tests pass with table-driven cases; a single per-render `Transformation` interface + `Build()` implemented (no cross-stream scope); a `patch` that stamps the injector's `--target-label` onto WebhookConfigurations/CRDs is covered. Also: the scaffolded `PackageWebhookConfigsForInjectorSpec` CRD type is removed (see "r7 CRD cleanup") and `make manifests generate` re-run |
 | 4 | (skipped — no split step) |
 | 5 | Applier applies a resource via SSA and returns Healthy status; can also delete; strips caBundle from WebhookConfigurations and conversion-webhook CRDs before apply (so the injector owns caBundle) |
 | 6 | Reconciler successfully processes a CR end-to-end with mocked source; applies the ordered transformation list to both renders; produces host/remote manifest sets where the remote set includes WebhookConfigurations (caBundle stripped, injector-labeled); status populated |
