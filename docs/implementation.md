@@ -61,11 +61,10 @@ dual-deployment-operator/
 │   │   ├── helm.go                             # Helm SDK renderer
 │   │   └── kustomize.go                        # krusty renderer
 │   ├── transform/
-│   │   ├── transform.go                        # Transformation interface + registry
+│   │   ├── transform.go                        # Transformation interface + Build()
 │   │   ├── patch.go                            # strategic-merge + JSON Patch
 │   │   ├── rewrite_webhook_url.go
-│   │   ├── filter_kinds.go
-│   │   └── package_webhook_configs_for_injector.go   # cross-stream
+│   │   └── filter_kinds.go
 │   ├── deliver/
 │   │   ├── deliver.go                          # Applier interface
 │   │   ├── apply.go                            # SSA implementation
@@ -136,14 +135,11 @@ type RemoteKubeconfigRef struct {
 }
 
 // Transformation is a discriminated union — exactly one field set.
+// All three types are per-render (single scope, r7).
 type Transformation struct {
-    // Per-render transformations (3)
     Patch             *PatchSpec             `json:"patch,omitempty"`
     RewriteWebhookURL *RewriteWebhookURLSpec `json:"rewriteWebhookURL,omitempty"`
     FilterKinds       *FilterKindsSpec       `json:"filterKinds,omitempty"`
-
-    // Cross-stream transformations (1)
-    PackageWebhookConfigsForInjector *PackageWebhookConfigsForInjectorSpec `json:"packageWebhookConfigsForInjector,omitempty"`
 }
 
 type PatchSpec struct {
@@ -185,8 +181,7 @@ type JSONPatchOp struct {
 }
 
 type RewriteWebhookURLSpec struct {
-    URLPrefix   string   `json:"urlPrefix"`
-    TargetKinds []string `json:"targetKinds,omitempty"`
+    URLPrefix string `json:"urlPrefix"`
 }
 
 type FilterKindsSpec struct {
@@ -194,13 +189,13 @@ type FilterKindsSpec struct {
     Source string   `json:"source,omitempty"`
 }
 
-// PackageWebhookConfigsForInjectorSpec configures the cross-stream transformation
-// that moves WebhookConfigurations from remote render into a ConfigMap on host
-// render, for consumption by the webhook-injector sidecar.
-type PackageWebhookConfigsForInjectorSpec struct {
-    ConfigMapName string `json:"configMapName"`
-    DataKey       string `json:"dataKey,omitempty"`  // default: "webhooks.yaml"
-}
+// NOTE (r7): PackageWebhookConfigsForInjectorSpec was scaffolded in the archived
+// Phase 0+1 change and still exists in api/v1alpha1/dualdeploymentoperator_types.go
+// (+ zz_generated.deepcopy.go + the CEL union rule + two test files). Under r7 the
+// cross-stream transformation is removed (design.md §2.2.4), so this struct, its
+// Transformation field, its DeepCopy, its CEL term, and its test references must be
+// DELETED as a Phase-3 (or dedicated CRD) follow-up, then `make manifests generate`
+// re-run. See "r7 CRD cleanup" below.
 
 type Selector struct {
     Kind   string `json:"kind,omitempty"`
@@ -260,8 +255,8 @@ Discriminator constraints via CEL (Kubernetes 1.29+, cleaner than validating web
 // On PatchSpec:
 // +kubebuilder:validation:XValidation:rule="has(self.strategicMerge) != has(self.jsonPatch)",message="exactly one of patch.strategicMerge or patch.jsonPatch must be set"
 
-// On Transformation:
-// +kubebuilder:validation:XValidation:rule="(has(self.patch) ? 1 : 0) + (has(self.rewriteWebhookURL) ? 1 : 0) + (has(self.filterKinds) ? 1 : 0) + (has(self.packageWebhookConfigsForInjector) ? 1 : 0) == 1",message="exactly one transformation type must be set per entry"
+// On Transformation (r7 — 3 per-render types; packageWebhookConfigsForInjector term removed):
+// +kubebuilder:validation:XValidation:rule="(has(self.patch) ? 1 : 0) + (has(self.rewriteWebhookURL) ? 1 : 0) + (has(self.filterKinds) ? 1 : 0) == 1",message="exactly one transformation type must be set per entry"
 
 // On KustomizeSource.URL:
 // +kubebuilder:validation:XValidation:rule="self.matches('.*[?&]ref=.+')",message="kustomize url must include a pinned ref= parameter"
@@ -441,105 +436,77 @@ func (k *Kustomize) Render(ctx context.Context, mode Mode, namespace string) ([]
 
 ## Phase 3: Transformations (~1 week)
 
+### r7 CRD cleanup (do this first)
+
+The archived Phase 0+1 scaffold shipped a `PackageWebhookConfigsForInjectorSpec` CRD type for the r5/r6 cross-stream transformation. r7 removes that transformation (design.md §2.2.4), so before implementing the transform package, delete the now-dead type and regenerate:
+
+1. In [`api/v1alpha1/dualdeploymentoperator_types.go`](../api/v1alpha1/dualdeploymentoperator_types.go): remove the `PackageWebhookConfigsForInjector *PackageWebhookConfigsForInjectorSpec` field from `Transformation`, remove the `PackageWebhookConfigsForInjectorSpec` struct, and drop the `packageWebhookConfigsForInjector` term from the `Transformation` `XValidation` CEL rule (leaving the 3-way `patch`/`rewriteWebhookURL`/`filterKinds` count).
+2. Remove the `PackageWebhookConfigsForInjector` references from the type tests ([`dualdeploymentoperator_types_test.go`](../api/v1alpha1/dualdeploymentoperator_types_test.go)) and any CEL test that constructs it.
+3. Run `make manifests generate` to regenerate the CRD YAML, RBAC, and `zz_generated.deepcopy.go` (which currently has `PackageWebhookConfigsForInjectorSpec` DeepCopy methods).
+4. `make build test lint-fix` green.
+
+This is a breaking CRD change, but the field is unused (Phase 3 was never implemented) and no CR in the fleet sets it yet, so no data migration is needed.
+
 ### Interface
 
-Two transformation interfaces distinguished by scope. The reconciler runs per-render first, then cross-stream.
+A single transformation interface (r7 — cross-stream scope removed). The reconciler applies each declared transformation to both renders independently, in declaration order.
 
 ```go
 package transform
 
-// PerRenderTransformation operates on a single render's manifest stream.
-type PerRenderTransformation interface {
+// Transformation operates on a single render's manifest stream.
+type Transformation interface {
     Type() string
     Apply(manifests []manifest.Manifest) ([]manifest.Manifest, error)
 }
 
-// CrossStreamTransformation operates on both renders together, potentially
-// moving resources between them.
-type CrossStreamTransformation interface {
-    Type() string
-    ApplyCrossStream(host, remote []manifest.Manifest) (newHost, newRemote []manifest.Manifest, err error)
-}
-
-// Group parses spec.Transformations and separates entries by scope.
-// Preserves declaration order within each category.
-func Group(specs []v1alpha1.Transformation) (perRender []PerRenderTransformation, crossStream []CrossStreamTransformation, err error) {
+// Build parses spec.Transformations into an ordered []Transformation,
+// preserving declaration order. (No scope split — every type is per-render.)
+func Build(specs []v1alpha1.Transformation) ([]Transformation, error) {
+    var out []Transformation
     for _, spec := range specs {
         switch {
         case spec.Patch != nil:
-            perRender = append(perRender, &patch{spec: spec.Patch})
+            out = append(out, &patch{spec: spec.Patch})
         case spec.RewriteWebhookURL != nil:
-            perRender = append(perRender, &rewriteWebhookURL{spec: spec.RewriteWebhookURL})
+            out = append(out, &rewriteWebhookURL{spec: spec.RewriteWebhookURL})
         case spec.FilterKinds != nil:
-            perRender = append(perRender, &filterKinds{spec: spec.FilterKinds})
-        case spec.PackageWebhookConfigsForInjector != nil:
-            crossStream = append(crossStream, &packageWebhookConfigsForInjector{spec: spec.PackageWebhookConfigsForInjector})
+            out = append(out, &filterKinds{spec: spec.FilterKinds})
         default:
-            return nil, nil, errors.New("no transformation type set in entry")
+            return nil, errors.New("no transformation type set in entry")
         }
     }
-    return perRender, crossStream, nil
+    return out, nil
 }
 ```
 
-### packageWebhookConfigsForInjector implementation
+### Webhook-injector integration (r7): label, don't package
 
-```go
-package transform
+There is **no** `packageWebhookConfigsForInjector` transformation in r7. The operator applies WebhookConfigurations (and conversion-webhook CRDs) directly to the shoot in the remote render; the only requirement is that those objects carry the webhook-injector's `--target-crd-label` so its target patch mode adopts them and keeps `.caBundle` current (design.md §3.4.4, §3.8).
 
-type packageWebhookConfigsForInjector struct {
-    spec *v1alpha1.PackageWebhookConfigsForInjectorSpec
-}
+That labeling is done with the existing `patch` transformation — no new code:
 
-func (p *packageWebhookConfigsForInjector) Type() string { return "packageWebhookConfigsForInjector" }
-
-func (p *packageWebhookConfigsForInjector) ApplyCrossStream(host, remote []manifest.Manifest) ([]manifest.Manifest, []manifest.Manifest, error) {
-    dataKey := p.spec.DataKey
-    if dataKey == "" {
-        dataKey = "webhooks.yaml"
-    }
-
-    // 1. Extract WebhookConfigurations from remote
-    var webhookConfigs []manifest.Manifest
-    var remainingRemote []manifest.Manifest
-    for _, m := range remote {
-        if m.GetKind() == "ValidatingWebhookConfiguration" || m.GetKind() == "MutatingWebhookConfiguration" {
-            webhookConfigs = append(webhookConfigs, m)
-        } else {
-            remainingRemote = append(remainingRemote, m)
-        }
-    }
-    if len(webhookConfigs) == 0 {
-        return host, remote, nil  // nothing to package
-    }
-
-    // 2. Serialize as multi-doc YAML
-    yaml, err := serializeMultiDoc(webhookConfigs)
-    if err != nil { return nil, nil, err }
-
-    // 3. Build ConfigMap
-    cm := &unstructured.Unstructured{Object: map[string]interface{}{
-        "apiVersion": "v1",
-        "kind":       "ConfigMap",
-        "metadata": map[string]interface{}{
-            "name":      p.spec.ConfigMapName,
-            "annotations": map[string]interface{}{
-                "dual-deployment-operator.cc.sap/origin": "additions",
-            },
-        },
-        "data": map[string]interface{}{
-            dataKey: yaml,
-        },
-    }}
-
-    newHost := append(host, manifest.Manifest{
-        Unstructured: cm,
-        Origin:       manifest.OriginAdditions,
-    })
-
-    return newHost, remainingRemote, nil
-}
+```yaml
+- patch:
+    target: {kind: ValidatingWebhookConfiguration}
+    strategicMerge:
+      metadata:
+        labels:
+          dual-deployment-operator.cc.sap/webhook-injector: metal-operator
+# (repeat for MutatingWebhookConfiguration and, if present, conversion-webhook CustomResourceDefinition)
 ```
+
+Two consequences for the delivery layer (Phase 5):
+- The operator applies these objects via SSA with the `caBundle` field **unset**, so its field manager never owns `caBundle` (the injector owns it). See the caBundle handling section below.
+- No `manifest.SerializeMultiDoc` helper is needed for injector integration (it was only used to serialize WebhookConfigs into the packaged ConfigMap). If a later phase needs multi-doc serialization for another reason, add it then.
+
+### rewriteWebhookURL walks three kinds (r7)
+
+`rewriteWebhookURL.Apply` MUST rewrite service-based `clientConfig` to URL-based on:
+- `ValidatingWebhookConfiguration` / `MutatingWebhookConfiguration`: iterate `.webhooks[]`, and for each entry whose `.clientConfig.service` is set, replace it with `.clientConfig.url = urlPrefix + service.path` (path defaults to `""` if absent).
+- `CustomResourceDefinition`: only when `.spec.conversion.strategy == "Webhook"` and `.spec.conversion.webhook.clientConfig.service` is set, replace it with `.spec.conversion.webhook.clientConfig.url = urlPrefix + service.path`.
+
+Rules for all three: an existing `.url` is left unchanged (idempotent); `.caBundle` is preserved (the injector owns it); a manifest of any other kind, or one already using `.url`, is a no-op. This closes the CRD conversion-webhook Service→URL gap (design.md §3.4.2, §9.2). Table-driven tests MUST include a conversion-webhook CRD fixture (service→url rewritten, caBundle preserved) and a non-webhook CRD fixture (untouched).
 
 ### Table-driven tests
 
@@ -638,7 +605,7 @@ func mustJSON(s string) *apiextensionsv1.JSON {
 }
 ```
 
-Similar tests for `rewriteWebhookURL`, `filterKinds`, `packageWebhookConfigsForInjector`.
+Similar tests for `rewriteWebhookURL` and `filterKinds`. (No `packageWebhookConfigsForInjector` in r7 — injector integration is a `patch` that stamps `--target-crd-label`, covered by the `patch` tests.)
 
 ### `patch` implementation
 
@@ -762,7 +729,7 @@ Under the two-render architecture (design.md §3.5), there is no split step. Eac
 - `Render(ctx, ModeHost)` → all host resources
 - `Render(ctx, ModeRemote)` → all remote resources
 
-Transformations run on each render independently. Each transformation naturally affects only what's present in that render (e.g., `injectInitContainer` matches a Deployment only in the host render; `rewriteWebhookURL` matches WebhookConfigurations only in the remote render).
+Transformations run on each render independently. Each transformation naturally affects only what's present in that render (e.g., a sidecar-injecting `patch` matches a Deployment only in the host render; `rewriteWebhookURL` matches Validating/Mutating WebhookConfigurations and conversion-webhook CRDs only in the remote render).
 
 **No `internal/split/` package needed.** The reconcile loop (Phase 6) iterates over each render and applies the same transformations to both. Delivery (Phase 5) applies each render's output to its respective cluster.
 
@@ -865,9 +832,9 @@ func webhookConfigHealth(u *unstructured.Unstructured) HealthState {
 }
 ```
 
-### SSA field-manager coexistence with webhook-injector
+### SSA field-manager coexistence with webhook-injector (r7)
 
-The operator **omits** `caBundle` when applying WebhookConfigurations and CRDs with conversion webhooks:
+Under r7 the operator **applies** WebhookConfigurations and conversion-webhook CRDs to the shoot itself (they are no longer packaged into a ConfigMap), but **omits the `caBundle` field** on apply so its SSA field manager never owns it. The webhook-injector's target patch mode owns `caBundle` (design.md §3.8). Disjoint fields, same object.
 
 ```go
 func (a *SSAApplier) prepareForApply(m manifest.Manifest) {
@@ -880,7 +847,9 @@ func (a *SSAApplier) prepareForApply(m manifest.Manifest) {
 }
 ```
 
-This lets webhook-injector own the `caBundle` field via its own SSA field manager. Operator's re-applies never touch caBundle, so injector's writes persist.
+Because the operator applies with `caBundle` stripped, SSA does not record `dual-deployment-operator` as the field manager for `caBundle`; the injector's per-webhook strategic-merge patch (and `MergeFrom` on CRD conversion) sets it and keeps it. The operator's periodic re-apply omits `caBundle`, so it never reverts the injector's write; the injector patches only `caBundle`, so it never disturbs operator-owned fields. No caBundle ping-pong, no SSA `force` conflicts on shared fields.
+
+The operator must also stamp the injector's `--target-crd-label` on these objects (via the `patch` transformation, §Phase 3 above) so the injector's target patch mode adopts them.
 
 ---
 
@@ -920,38 +889,34 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
     remoteManifests, err := src.Render(ctx, source.ModeRemote, cr.Spec.RemoteNamespace)
     if err != nil { return r.errStatus(ctx, cr, "RemoteRenderFailed", err) }
 
-    // 3. Group transformations by scope
-    perRender, crossStream, err := transform.Group(cr.Spec.Transformations)
+    // 3. Build the ordered transformation list (single per-render scope, r7).
+    transforms, err := transform.Build(cr.Spec.Transformations)
     if err != nil { return r.errStatus(ctx, cr, "InvalidTransformation", err) }
 
-    // 4. Apply per-render transformations to each render independently.
-    //    Each transformation naturally affects only resources present in
-    //    the render it runs on.
-    for _, t := range perRender {
+    // 4. Apply each transformation to both renders independently, in
+    //    declaration order. Each transformation naturally affects only
+    //    resources present in the render it runs on. (No cross-stream phase.)
+    for _, t := range transforms {
         hostManifests, err = t.Apply(hostManifests)
         if err != nil { return r.errStatus(ctx, cr, "HostTransformFailed", err) }
         remoteManifests, err = t.Apply(remoteManifests)
         if err != nil { return r.errStatus(ctx, cr, "RemoteTransformFailed", err) }
     }
 
-    // 5. Apply cross-stream transformations (may move resources between renders)
-    for _, t := range crossStream {
-        hostManifests, remoteManifests, err = t.ApplyCrossStream(hostManifests, remoteManifests)
-        if err != nil { return r.errStatus(ctx, cr, "CrossStreamTransformFailed", err) }
-    }
-
-    // 6. Get clients
+    // 5. Get clients
     hostApplier := r.HostApplier   // preconstructed at startup
     shootApplier, err := r.buildShootApplier(ctx, cr)
     if err != nil {
         return r.errStatus(ctx, cr, "ShootClientFailed", err)
     }
 
-    // 7. Apply each render to its target cluster
+    // 6. Apply each render to its target cluster. WebhookConfigurations and
+    //    conversion-webhook CRDs are applied with caBundle stripped (the
+    //    webhook-injector owns that field via its target patch mode).
     hostStatuses := r.applyAll(ctx, hostApplier, hostManifests)
     remoteStatuses := r.applyAll(ctx, shootApplier, remoteManifests)
 
-    // 8. Update status
+    // 7. Update status
     cr.Status.HostResources = hostStatuses
     cr.Status.RemoteResources = remoteStatuses
     cr.Status.Conditions = computeConditions(hostStatuses, remoteStatuses)
@@ -1208,10 +1173,10 @@ make test-integration
 | 0 | Kubebuilder scaffold builds; CRD registers |
 | 1 | CRD types compile; deepcopy generated; validation webhook (or CEL) rejects invalid discriminators and unpinned kustomize URLs |
 | 2 | Both Helm and kustomize renderers produce parsable manifest streams for host and remote modes on a metal-operator fixture; origin tags correct |
-| 3 | Each transformation's unit tests pass with table-driven cases; per-render and cross-stream interfaces implemented; `packageWebhookConfigsForInjector` moves WebhookConfigurations from remote to a ConfigMap on host |
+| 3 | Each transformation's unit tests pass with table-driven cases; a single per-render `Transformation` interface + `Build()` implemented (no cross-stream scope); a `patch` that stamps the injector's `--target-crd-label` onto WebhookConfigurations/CRDs is covered. Also: the scaffolded `PackageWebhookConfigsForInjectorSpec` CRD type is removed (see "r7 CRD cleanup") and `make manifests generate` re-run |
 | 4 | (skipped — no split step) |
-| 5 | Applier applies a resource via SSA and returns Healthy status; can also delete; strips caBundle from WebhookConfigurations before apply |
-| 6 | Reconciler successfully processes a CR end-to-end with mocked source; groups per-render and cross-stream transformations correctly; produces disjoint host/remote manifest sets; status populated |
+| 5 | Applier applies a resource via SSA and returns Healthy status; can also delete; strips caBundle from WebhookConfigurations and conversion-webhook CRDs before apply (so the injector owns caBundle) |
+| 6 | Reconciler successfully processes a CR end-to-end with mocked source; applies the ordered transformation list to both renders; produces host/remote manifest sets where the remote set includes WebhookConfigurations (caBundle stripped, injector-labeled); status populated |
 | 7 | Equivalence test passes for at least metal-operator vs. today's chart output (host render matches host-side output; remote render matches remote-side output) |
 | 8 | Operator chart installs successfully in a QA shoot-cp namespace |
 | 9 | Webhook scaffold builds; no-op ValidateCreate/ValidateUpdate methods pass tests; ValidatingWebhookConfiguration NOT deployed in v1 (deferred to v2) |
