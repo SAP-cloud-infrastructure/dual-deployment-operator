@@ -60,6 +60,7 @@ path = [
   "AGENTS.md",
   "README.md",
   "CONTRIBUTING.md",
+  "assets/**",
 ]
 SPDX-FileCopyrightText = "SAP SE or an SAP affiliate company"
 SPDX-License-Identifier = "Apache-2.0"
