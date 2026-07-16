@@ -78,7 +78,7 @@ type RemoteKubeconfigRef struct {
 }
 
 // Transformation is a discriminated union — exactly one field set per entry.
-// +kubebuilder:validation:XValidation:rule="(has(self.patch) ? 1 : 0) + (has(self.rewriteWebhookURL) ? 1 : 0) + (has(self.filterKinds) ? 1 : 0) + (has(self.packageWebhookConfigsForInjector) ? 1 : 0) == 1",message="exactly one transformation type must be set per entry"
+// +kubebuilder:validation:XValidation:rule="(has(self.patch) ? 1 : 0) + (has(self.rewriteWebhookURL) ? 1 : 0) + (has(self.filterKinds) ? 1 : 0) == 1",message="exactly one transformation type must be set per entry"
 type Transformation struct {
 	// +optional
 	Patch *PatchSpec `json:"patch,omitempty"`
@@ -86,8 +86,6 @@ type Transformation struct {
 	RewriteWebhookURL *RewriteWebhookURLSpec `json:"rewriteWebhookURL,omitempty"`
 	// +optional
 	FilterKinds *FilterKindsSpec `json:"filterKinds,omitempty"`
-	// +optional
-	PackageWebhookConfigsForInjector *PackageWebhookConfigsForInjectorSpec `json:"packageWebhookConfigsForInjector,omitempty"`
 }
 
 // PatchSpec is a Kubernetes-native patch (strategic-merge XOR JSON Patch) with a target selector.
@@ -119,8 +117,6 @@ type JSONPatchOp struct {
 type RewriteWebhookURLSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	URLPrefix string `json:"urlPrefix"`
-	// +optional
-	TargetKinds []string `json:"targetKinds,omitempty"`
 }
 
 type FilterKindsSpec struct {
@@ -128,13 +124,6 @@ type FilterKindsSpec struct {
 	Kinds []string `json:"kinds"`
 	// +optional
 	Source string `json:"source,omitempty"`
-}
-
-type PackageWebhookConfigsForInjectorSpec struct {
-	// +kubebuilder:validation:MinLength=1
-	ConfigMapName string `json:"configMapName"`
-	// +optional
-	DataKey string `json:"dataKey,omitempty"`
 }
 
 type Selector struct {
