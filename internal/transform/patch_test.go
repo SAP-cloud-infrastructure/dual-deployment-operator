@@ -150,3 +150,36 @@ spec:
 		t.Fatalf("strategic merge did not add initContainer: %v", initContainers)
 	}
 }
+
+func TestPatchStrategicMergeMergesContainersByName(t *testing.T) {
+	dep := mustManifest(t, `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-manager
+spec:
+  template:
+    spec:
+      containers:
+        - name: manager
+          image: manager:v1
+`, manifest.OriginUpstream)
+
+	p := &patch{spec: &v1alpha1.PatchSpec{
+		Target:         v1alpha1.Selector{Kind: "Deployment"},
+		StrategicMerge: mustJSON(`{"spec":{"template":{"spec":{"containers":[{"name":"sidecar","image":"sidecar:v1"}]}}}}`),
+	}}
+	out, err := p.Apply([]manifest.Manifest{dep})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	containers := nestedSlice(t, out[0].Unstructured.Object, "spec", "template", "spec", "containers")
+	names := map[string]bool{}
+	for _, c := range containers {
+		names[c.(map[string]any)["name"].(string)] = true
+	}
+	if !names["manager"] || !names["sidecar"] || len(containers) != 2 {
+		t.Fatalf("strategic merge did not merge containers by name (want manager+sidecar): %v", containers)
+	}
+}
