@@ -38,3 +38,7 @@ func cloneForAssert(in []manifest.Manifest) []manifest.Manifest {
 	}
 	return out
 }
+
+func nestedInt64(m manifest.Manifest, fields ...string) (int64, bool, error) {
+	return unstructured.NestedInt64(m.Unstructured.Object, fields...)
+}
