@@ -1069,8 +1069,12 @@ Expected: `internal/transform` PASS; `make test` PASS (or only pre-existing unre
 
 - [ ] **Step 4: Confirm REUSE/license headers present**
 
+<!-- REUSE-IgnoreStart -->
 Run: `grep -L "SPDX-License-Identifier: Apache-2.0" internal/transform/*.go`
 Expected: no output (every file has the header).
+<!-- REUSE-IgnoreEnd -->
+
+
 
 - [ ] **Step 5: Commit any lint-fix changes**
 
