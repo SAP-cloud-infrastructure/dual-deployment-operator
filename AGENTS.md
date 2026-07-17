@@ -9,6 +9,9 @@ api/<version>/*_types.go       CRD schemas (+kubebuilder markers)
 api/<version>/zz_generated.*   Auto-generated (DO NOT EDIT)
 internal/controller/*          Reconciliation logic
 internal/webhook/*             Validation/defaulting (if present)
+internal/manifest/*            Multi-doc YAML parser + origin tagging
+internal/source/*              Helm and kustomize renderers (two-render per reconcile)
+internal/transform/*           Manifest transformations (patch, rewriteWebhookURL, filterKinds)
 config/crd/bases/*             Generated CRDs (DO NOT EDIT)
 config/rbac/role.yaml          Generated RBAC (DO NOT EDIT)
 config/samples/*               Example CRs (edit these)
