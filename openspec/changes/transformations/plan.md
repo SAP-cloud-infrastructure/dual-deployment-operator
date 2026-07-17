@@ -204,8 +204,8 @@ metadata:
 		{"origin match", dep, v1alpha1.Selector{Origin: "upstream"}, true},
 		{"origin mismatch", dep, v1alpha1.Selector{Origin: "additions"}, false},
 		{"empty selector matches all", svc, v1alpha1.Selector{}, true},
-		{"all fields ANDed true", dep, v1alpha1.Selector{Kind: "Deployment", Name: "metal-*", Origin: "upstream"}, true},
-		{"all fields ANDed one false", dep, v1alpha1.Selector{Kind: "Deployment", Name: "metal-*", Origin: "additions"}, false},
+		{"all fields match (AND) true", dep, v1alpha1.Selector{Kind: "Deployment", Name: "metal-*", Origin: "upstream"}, true},
+		{"all fields match (AND) one false", dep, v1alpha1.Selector{Kind: "Deployment", Name: "metal-*", Origin: "additions"}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
