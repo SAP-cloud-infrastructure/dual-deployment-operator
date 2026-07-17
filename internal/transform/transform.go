@@ -9,7 +9,7 @@
 package transform
 
 import (
-	"errors"
+	"fmt"
 
 	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/api/v1alpha1"
 	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/internal/manifest"
@@ -24,11 +24,26 @@ type Transformation interface {
 }
 
 // Build parses spec.Transformations into an ordered []Transformation,
-// preserving declaration order. An entry with no field set is an error.
+// preserving declaration order. Each entry MUST set exactly one transformation
+// type; an entry with none or more than one set is an error (mirrors the CRD
+// union CEL rule so programmatic callers fail the same way as admission).
 func Build(specs []v1alpha1.Transformation) ([]Transformation, error) {
 	out := make([]Transformation, 0, len(specs))
 	for i := range specs {
 		s := specs[i]
+		set := 0
+		if s.Patch != nil {
+			set++
+		}
+		if s.RewriteWebhookURL != nil {
+			set++
+		}
+		if s.FilterKinds != nil {
+			set++
+		}
+		if set != 1 {
+			return nil, fmt.Errorf("exactly one transformation type must be set per entry, got %d", set)
+		}
 		switch {
 		case s.Patch != nil:
 			out = append(out, &patch{spec: s.Patch})
@@ -36,8 +51,6 @@ func Build(specs []v1alpha1.Transformation) ([]Transformation, error) {
 			out = append(out, &rewriteWebhookURL{spec: s.RewriteWebhookURL})
 		case s.FilterKinds != nil:
 			out = append(out, &filterKinds{spec: s.FilterKinds})
-		default:
-			return nil, errors.New("no transformation type set in entry")
 		}
 	}
 	return out, nil

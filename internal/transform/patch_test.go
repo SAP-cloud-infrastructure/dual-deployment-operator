@@ -117,3 +117,36 @@ metadata:
 		})
 	}
 }
+
+func TestPatchStrategicMergePreservesContainerList(t *testing.T) {
+	dep := mustManifest(t, `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-manager
+spec:
+  template:
+    spec:
+      containers:
+        - name: manager
+          image: manager:v1
+`, manifest.OriginUpstream)
+
+	p := &patch{spec: &v1alpha1.PatchSpec{
+		Target:         v1alpha1.Selector{Kind: "Deployment"},
+		StrategicMerge: mustJSON(`{"spec":{"template":{"spec":{"initContainers":[{"name":"webhook-injector","image":"injector:v1"}]}}}}`),
+	}}
+	out, err := p.Apply([]manifest.Manifest{dep})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	containers := nestedSlice(t, out[0].Unstructured.Object, "spec", "template", "spec", "containers")
+	if len(containers) != 1 || containers[0].(map[string]any)["name"] != "manager" {
+		t.Fatalf("strategic merge dropped existing containers: %v", containers)
+	}
+	initContainers := nestedSlice(t, out[0].Unstructured.Object, "spec", "template", "spec", "initContainers")
+	if len(initContainers) != 1 || initContainers[0].(map[string]any)["name"] != "webhook-injector" {
+		t.Fatalf("strategic merge did not add initContainer: %v", initContainers)
+	}
+}

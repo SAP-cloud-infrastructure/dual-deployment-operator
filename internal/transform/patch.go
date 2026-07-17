@@ -12,6 +12,10 @@ import (
 
 	jsonpatch "github.com/evanphx/json-patch/v5"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
+	clientscheme "k8s.io/client-go/kubernetes/scheme"
 
 	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/api/v1alpha1"
 	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/internal/manifest"
@@ -61,11 +65,7 @@ func (p *patch) applyOne(u *unstructured.Unstructured) (*unstructured.Unstructur
 	var result []byte
 	switch {
 	case p.spec.StrategicMerge != nil:
-		// No Go struct schema is available for arbitrary Kubernetes objects, so
-		// this degrades to a JSON merge patch (RFC 7386), which is correct for
-		// the v1 candidate patches (labels, replicas, sidecar containers keyed
-		// by name). Users needing custom-type list-key semantics use jsonPatch.
-		result, err = jsonpatch.MergePatch(orig, p.spec.StrategicMerge.Raw)
+		result, err = strategicMerge(u, orig, p.spec.StrategicMerge.Raw)
 		if err != nil {
 			return nil, err
 		}
@@ -89,4 +89,26 @@ func (p *patch) applyOne(u *unstructured.Unstructured) (*unstructured.Unstructur
 		return nil, err
 	}
 	return res, nil
+}
+
+// strategicMerge applies patch using Kubernetes strategic-merge semantics
+// (list merge keys such as containers[].name) when u's GVK resolves to a
+// built-in typed struct in the client-go scheme. For types with no registered
+// struct (e.g. custom resources), it falls back to an RFC 7386 JSON merge patch.
+func strategicMerge(u *unstructured.Unstructured, orig, patch []byte) ([]byte, error) {
+	if dataStruct, ok := typedStructFor(u.GroupVersionKind()); ok {
+		return strategicpatch.StrategicMergePatch(orig, patch, dataStruct)
+	}
+	return jsonpatch.MergePatch(orig, patch)
+}
+
+func typedStructFor(gvk schema.GroupVersionKind) (runtime.Object, bool) {
+	obj, err := clientscheme.Scheme.New(gvk)
+	if err != nil {
+		return nil, false
+	}
+	if _, isUnstructured := obj.(runtime.Unstructured); isUnstructured {
+		return nil, false
+	}
+	return obj, true
 }

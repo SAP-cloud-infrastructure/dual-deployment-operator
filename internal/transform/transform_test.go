@@ -41,6 +41,16 @@ func TestBuildEmptyEntryErrors(t *testing.T) {
 	}
 }
 
+func TestBuildMultipleFieldsErrors(t *testing.T) {
+	_, err := Build([]v1alpha1.Transformation{{
+		Patch:       &v1alpha1.PatchSpec{Target: v1alpha1.Selector{Kind: "Deployment"}, StrategicMerge: mustJSON(`{}`)},
+		FilterKinds: &v1alpha1.FilterKindsSpec{Kinds: []string{"Service"}},
+	}})
+	if err == nil {
+		t.Fatalf("expected error when multiple transformation types are set")
+	}
+}
+
 func TestApplyDoesNotMutateInput(t *testing.T) {
 	in := []manifest.Manifest{
 		mustManifest(t, "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: d\nspec:\n  replicas: 1", manifest.OriginUpstream),
