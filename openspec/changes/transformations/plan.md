@@ -149,7 +149,7 @@ git add internal/transform/transform.go internal/transform/testhelpers_test.go
 git commit -m "feat(transform): add Transformation interface and Build skeleton"
 ```
 
-- [ ] Task 1 complete
+- [x] Task 1 complete
 
 ---
 
@@ -273,7 +273,7 @@ git add internal/transform/selector.go internal/transform/selector_test.go
 git commit -m "feat(transform): add Match selector (kind/name-glob/origin)"
 ```
 
-- [ ] Task 2 complete
+- [x] Task 2 complete
 
 ---
 
@@ -425,7 +425,7 @@ git add internal/transform/filter_kinds.go internal/transform/filter_kinds_test.
 git commit -m "feat(transform): add filterKinds transformation"
 ```
 
-- [ ] Task 3 complete
+- [x] Task 3 complete
 
 ---
 
@@ -690,7 +690,7 @@ git add internal/transform/rewrite_webhook_url.go internal/transform/rewrite_web
 git commit -m "feat(transform): add rewriteWebhookURL transformation (VWC/MWC/CRD)"
 ```
 
-- [ ] Task 4 complete
+- [x] Task 4 complete
 
 ---
 
@@ -949,7 +949,7 @@ git add internal/transform/patch.go internal/transform/patch_test.go internal/tr
 git commit -m "feat(transform): add patch transformation (strategicMerge XOR jsonPatch)"
 ```
 
-- [ ] Task 5 complete
+- [x] Task 5 complete
 
 ---
 
@@ -1044,7 +1044,7 @@ git add internal/transform/transform_test.go
 git commit -m "test(transform): cover Build ordering, empty-entry error, no-mutation invariant"
 ```
 
-- [ ] Task 6 complete
+- [x] Task 6 complete
 
 ---
 
@@ -1079,7 +1079,7 @@ git add internal/transform/
 git commit -m "chore(transform): apply lint-fix formatting" || echo "nothing to commit"
 ```
 
-- [ ] Task 7 complete
+- [x] Task 7 complete
 
 ---
 
