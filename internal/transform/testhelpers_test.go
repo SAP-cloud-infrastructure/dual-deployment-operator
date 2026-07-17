@@ -39,6 +39,29 @@ func cloneForAssert(in []manifest.Manifest) []manifest.Manifest {
 	return out
 }
 
-func nestedInt64(m manifest.Manifest, fields ...string) (int64, bool, error) {
-	return unstructured.NestedInt64(m.Unstructured.Object, fields...)
+func nestedInt64(t *testing.T, m manifest.Manifest, fields ...string) int64 {
+	t.Helper()
+	v, _, err := unstructured.NestedInt64(m.Unstructured.Object, fields...)
+	if err != nil {
+		t.Fatalf("nestedInt64 %v: %v", fields, err)
+	}
+	return v
+}
+
+func nestedSlice(t *testing.T, obj map[string]any, fields ...string) []any {
+	t.Helper()
+	v, _, err := unstructured.NestedSlice(obj, fields...)
+	if err != nil {
+		t.Fatalf("nestedSlice %v: %v", fields, err)
+	}
+	return v
+}
+
+func nestedMap(t *testing.T, obj map[string]any, fields ...string) (map[string]any, bool) {
+	t.Helper()
+	v, found, err := unstructured.NestedMap(obj, fields...)
+	if err != nil {
+		t.Fatalf("nestedMap %v: %v", fields, err)
+	}
+	return v, found
 }

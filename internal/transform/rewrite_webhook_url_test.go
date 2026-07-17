@@ -8,8 +8,6 @@ package transform
 import (
 	"testing"
 
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-
 	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/api/v1alpha1"
 	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/internal/manifest"
 )
@@ -37,7 +35,7 @@ webhooks:
 	if err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
-	whs, _, _ := unstructured.NestedSlice(got[0].Unstructured.Object, "webhooks")
+	whs := nestedSlice(t, got[0].Unstructured.Object, "webhooks")
 	cc := whs[0].(map[string]any)["clientConfig"].(map[string]any)
 	if cc["url"] != prefix+"/validate" {
 		t.Fatalf("url = %v, want %v", cc["url"], prefix+"/validate")
@@ -73,7 +71,7 @@ spec:
 	if err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
-	cc, _, _ := unstructured.NestedMap(got[0].Unstructured.Object, "spec", "conversion", "webhook", "clientConfig")
+	cc, _ := nestedMap(t, got[0].Unstructured.Object, "spec", "conversion", "webhook", "clientConfig")
 	if cc["url"] != prefix+"/convert" {
 		t.Fatalf("crd url = %v, want %v", cc["url"], prefix+"/convert")
 	}
@@ -96,7 +94,7 @@ spec:
 	if err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
-	if _, found, _ := unstructured.NestedMap(got[0].Unstructured.Object, "spec", "conversion"); found {
+	if _, found := nestedMap(t, got[0].Unstructured.Object, "spec", "conversion"); found {
 		t.Fatalf("plain CRD must be untouched")
 	}
 }
@@ -119,7 +117,7 @@ webhooks:
 	if err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
-	whs, _, _ := unstructured.NestedSlice(got[0].Unstructured.Object, "webhooks")
+	whs := nestedSlice(t, got[0].Unstructured.Object, "webhooks")
 	cc := whs[0].(map[string]any)["clientConfig"].(map[string]any)
 	if cc["url"] != "https://existing:443/x" {
 		t.Fatalf("existing url must be left alone, got %v", cc["url"])

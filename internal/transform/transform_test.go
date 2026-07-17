@@ -6,6 +6,7 @@
 package transform
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/api/v1alpha1"
@@ -50,9 +51,7 @@ func TestApplyDoesNotMutateInput(t *testing.T) {
 	if _, err := p.Apply(in); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
-	r, _, _ := nestedInt64(in[0], "spec", "replicas")
-	rBefore, _, _ := nestedInt64(before[0], "spec", "replicas")
-	if r != rBefore {
-		t.Fatalf("input Unstructured mutated in place: replicas %d != %d", r, rBefore)
+	if !reflect.DeepEqual(in[0].Unstructured.Object, before[0].Unstructured.Object) {
+		t.Fatalf("input Unstructured mutated in place:\n got %v\nwant %v", in[0].Unstructured.Object, before[0].Unstructured.Object)
 	}
 }

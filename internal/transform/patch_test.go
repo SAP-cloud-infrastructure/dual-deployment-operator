@@ -48,7 +48,7 @@ metadata:
 			},
 			input: []manifest.Manifest{dep()},
 			check: func(t *testing.T, out []manifest.Manifest) {
-				r, _, _ := nestedInt64(out[0], "spec", "replicas")
+				r := nestedInt64(t, out[0], "spec", "replicas")
 				if r != 3 {
 					t.Fatalf("replicas = %d, want 3", r)
 				}
@@ -75,7 +75,7 @@ metadata:
 			},
 			input: []manifest.Manifest{dep()},
 			check: func(t *testing.T, out []manifest.Manifest) {
-				r, _, _ := nestedInt64(out[0], "spec", "replicas")
+				r := nestedInt64(t, out[0], "spec", "replicas")
 				if r != 5 {
 					t.Fatalf("replicas = %d, want 5", r)
 				}

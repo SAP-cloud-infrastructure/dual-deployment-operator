@@ -6,6 +6,8 @@
 package transform
 
 import (
+	"fmt"
+
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/api/v1alpha1"
@@ -27,21 +29,25 @@ func (r *rewriteWebhookURL) Apply(manifests []manifest.Manifest) ([]manifest.Man
 	out := make([]manifest.Manifest, len(manifests))
 	for i, m := range manifests {
 		cp := manifest.Manifest{Unstructured: m.Unstructured.DeepCopy(), Origin: m.Origin}
+		var err error
 		switch cp.Unstructured.GetKind() {
 		case "ValidatingWebhookConfiguration", "MutatingWebhookConfiguration":
-			r.rewriteWebhookList(cp.Unstructured)
+			err = r.rewriteWebhookList(cp.Unstructured)
 		case "CustomResourceDefinition":
-			r.rewriteConversion(cp.Unstructured)
+			err = r.rewriteConversion(cp.Unstructured)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("rewriteWebhookURL %s/%s: %w", cp.Unstructured.GetKind(), cp.Unstructured.GetName(), err)
 		}
 		out[i] = cp
 	}
 	return out, nil
 }
 
-func (r *rewriteWebhookURL) rewriteWebhookList(u *unstructured.Unstructured) {
+func (r *rewriteWebhookURL) rewriteWebhookList(u *unstructured.Unstructured) error {
 	whs, found, err := unstructured.NestedSlice(u.Object, "webhooks")
 	if err != nil || !found {
-		return
+		return err
 	}
 	changed := false
 	for i := range whs {
@@ -60,22 +66,27 @@ func (r *rewriteWebhookURL) rewriteWebhookList(u *unstructured.Unstructured) {
 		}
 	}
 	if changed {
-		_ = unstructured.SetNestedSlice(u.Object, whs, "webhooks")
+		return unstructured.SetNestedSlice(u.Object, whs, "webhooks")
 	}
+	return nil
 }
 
-func (r *rewriteWebhookURL) rewriteConversion(u *unstructured.Unstructured) {
-	strategy, _, _ := unstructured.NestedString(u.Object, "spec", "conversion", "strategy")
+func (r *rewriteWebhookURL) rewriteConversion(u *unstructured.Unstructured) error {
+	strategy, _, err := unstructured.NestedString(u.Object, "spec", "conversion", "strategy")
+	if err != nil {
+		return err
+	}
 	if strategy != "Webhook" {
-		return
+		return nil
 	}
 	cc, found, err := unstructured.NestedMap(u.Object, "spec", "conversion", "webhook", "clientConfig")
 	if err != nil || !found {
-		return
+		return err
 	}
 	if r.rewriteClientConfig(cc) {
-		_ = unstructured.SetNestedMap(u.Object, cc, "spec", "conversion", "webhook", "clientConfig")
+		return unstructured.SetNestedMap(u.Object, cc, "spec", "conversion", "webhook", "clientConfig")
 	}
+	return nil
 }
 
 // rewriteClientConfig replaces a service-based clientConfig with url-based,
