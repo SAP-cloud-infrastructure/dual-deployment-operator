@@ -62,10 +62,10 @@ func (h *helmSource) Render(ctx context.Context, mode Mode, namespace string) ([
 
 func (h *helmSource) modeValues(mode Mode) *apiextensionsv1.JSON {
 	switch mode {
-	case ModeHost:
-		return h.spec.HostValues
-	case ModeRemote:
-		return h.spec.RemoteValues
+	case ModeSeed:
+		return h.spec.SeedValues
+	case ModeShoot:
+		return h.spec.ShootValues
 	}
 	return nil
 }

@@ -34,7 +34,7 @@ type Applier interface {
 type SSAApplier struct {
 	Client       client.Client
 	FieldManager string
-	Cluster      string // "host" or "remote", for logging
+	Cluster      string // "seed" or "shoot", for logging
 }
 
 var _ Applier = (*SSAApplier)(nil)

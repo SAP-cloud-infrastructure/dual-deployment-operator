@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company
 // SPDX-License-Identifier: Apache-2.0
 
-// Package clients builds host (in-cluster) and shoot (token+CA-from-Secret) clients.
+// Package clients builds seed (in-cluster) and shoot (token+CA-from-Secret) clients.
 package clients
 
 import (
@@ -16,8 +16,8 @@ import (
 // has not populated token/CA yet (absent or empty). Benign; caller maps it to a wait.
 var ErrShootCredentialsNotReady = errors.New("shoot credentials not yet populated")
 
-// HostClient returns a client for the seed using the manager's REST config.
-func HostClient(cfg *rest.Config, opts client.Options) (client.Client, error) {
+// SeedClient returns a client for the seed using the manager's REST config.
+func SeedClient(cfg *rest.Config, opts client.Options) (client.Client, error) {
 	return client.New(cfg, opts)
 }
 

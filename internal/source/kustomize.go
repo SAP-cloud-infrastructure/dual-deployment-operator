@@ -23,9 +23,9 @@ type kustomizeSource struct {
 }
 
 func (k *kustomizeSource) Render(ctx context.Context, mode Mode, namespace string) ([]manifest.Manifest, error) {
-	subPath := k.spec.HostPath
-	if mode == ModeRemote {
-		subPath = k.spec.RemotePath
+	subPath := k.spec.SeedPath
+	if mode == ModeShoot {
+		subPath = k.spec.ShootPath
 	}
 
 	root, cleanup, err := k.resolver.Resolve(ctx, k.spec.URL, subPath)

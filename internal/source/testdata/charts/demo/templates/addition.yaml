@@ -1,4 +1,4 @@
-{{- if eq .Values.mode "host" }}
+{{- if eq .Values.mode "seed" }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
