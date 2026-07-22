@@ -13,8 +13,8 @@ import (
 
 // DualDeploymentOperatorSpec defines the desired state of DualDeploymentOperator.
 type DualDeploymentOperatorSpec struct {
-	Source           Source              `json:"source"`
-	RemoteKubeconfig RemoteKubeconfigRef `json:"remoteKubeconfig"`
+	Source       Source          `json:"source"`
+	RemoteAccess RemoteAccessRef `json:"remoteAccess"`
 	// RemoteNamespace is the target namespace for the remote (shoot) render and
 	// delivery. Namespaced resources in the remote render that omit an explicit
 	// metadata.namespace are placed here; cluster-scoped resources are unaffected.
@@ -26,7 +26,11 @@ type DualDeploymentOperatorSpec struct {
 	Transformations []Transformation `json:"transformations,omitempty"`
 	// +optional
 	// +kubebuilder:default={crds:Retain}
-	DeletionPolicy DeletionPolicy `json:"deletionPolicy,omitempty"`
+	RetentionPolicy RetentionPolicy `json:"retentionPolicy,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Enum=HostFirst;RemoteFirst
+	// +kubebuilder:default=RemoteFirst
+	ApplyOrder string `json:"applyOrder,omitempty"`
 }
 
 // Source is a discriminated union — exactly one of Helm or Kustomize.
@@ -70,11 +74,15 @@ type KustomizeSource struct {
 	RemotePath string `json:"remotePath"`
 }
 
-type RemoteKubeconfigRef struct {
+type RemoteAccessRef struct {
 	// +kubebuilder:validation:MinLength=1
 	SecretName string `json:"secretName"`
 	// +kubebuilder:validation:MinLength=1
-	Key string `json:"key"`
+	Server string `json:"server"`
+	// +optional
+	TokenKey string `json:"tokenKey,omitempty"`
+	// +optional
+	CAKey string `json:"caKey,omitempty"`
 }
 
 // Transformation is a discriminated union — exactly one field set per entry.
@@ -135,7 +143,7 @@ type Selector struct {
 	Origin string `json:"origin,omitempty"`
 }
 
-type DeletionPolicy struct {
+type RetentionPolicy struct {
 	// +optional
 	// +kubebuilder:validation:Enum=Retain;Delete
 	// +kubebuilder:default=Retain
