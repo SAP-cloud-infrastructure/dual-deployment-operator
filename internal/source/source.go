@@ -55,8 +55,14 @@ type Deps struct {
 func From(spec v1alpha1.Source, deps Deps) (Source, error) {
 	switch {
 	case spec.Helm != nil && spec.Kustomize == nil:
+		if deps.ChartLoader == nil {
+			return nil, errors.New("source: helm source requires a ChartLoader (none configured)")
+		}
 		return &helmSource{spec: spec.Helm, loader: deps.ChartLoader}, nil
 	case spec.Kustomize != nil && spec.Helm == nil:
+		if deps.RootResolver == nil {
+			return nil, errors.New("source: kustomize source requires a RootResolver (none configured)")
+		}
 		return &kustomizeSource{spec: spec.Kustomize, resolver: deps.RootResolver}, nil
 	default:
 		return nil, errors.New("source: exactly one of source.helm or source.kustomize must be set")
