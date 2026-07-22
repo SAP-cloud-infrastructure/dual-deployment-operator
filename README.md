@@ -26,12 +26,12 @@ Goals:
 **Model C, Option 2 delivery, two-render pattern**. Full design in [`docs/design.md`](docs/design.md).
 
 - Operator watches `DualDeploymentOperator` CRs
-- **Renders the source twice per reconcile** — once for host, once for remote — using mode-specific configuration (Helm: `hostValues`/`remoteValues`; kustomize: `hostPath`/`remotePath` selecting overlay directories)
+- **Renders the source twice per reconcile** — once for seed, once for shoot — using mode-specific configuration (Helm: `seedValues`/`shootValues`; kustomize: `seedPath`/`shootPath` selecting overlay directories)
 - Applies 3 per-render transformations to each render independently: `patch` (strategic-merge or JSON Patch DSL), `rewriteWebhookURL` (typed; rewrites webhook and conversion-webhook URLs, also rewrites `.spec.conversion.webhook.clientConfig` on CRDs), `filterKinds` (typed)
 - No cross-stream scope: WebhookConfigurations are applied directly to the shoot with `caBundle` unset; the webhook-injector patches `caBundle` in place via target patch mode ([webhook-injector#14](https://github.com/SAP-cloud-infrastructure/webhook-injector/pull/14)), with disjoint SSA field ownership
 - No split step, no routing rules — each render goes entirely to its target cluster
-- Applies host render's output to the seed cluster (in-cluster client)
-- Applies remote render's output to the shoot cluster (kubeconfig from a Gardener token-requestor Secret)
+- Applies seed render's output to the seed cluster (in-cluster client)
+- Applies shoot render's output to the shoot cluster (kubeconfig from a Gardener token-requestor Secret)
 - Tracks per-resource health, drift-corrects on periodic reconcile
 
 ## Architecture
@@ -40,7 +40,7 @@ The following diagrams reflect the current design (revision 7). Both are editabl
 
 ![dual-deployment-operator reconcile dataflow (two-render, r7)](assets/architecture-dataflow.drawio.svg)
 
-*Reconcile dataflow: the operator renders the source twice (host + remote), applies three per-render transforms, and applies each render directly to its target cluster via server-side apply. The webhook-injector sidecar (target patch mode) patches only `.caBundle` on labeled objects on the shoot — it is not a delivery path for WebhookConfigurations.*
+*Reconcile dataflow: the operator renders the source twice (seed + shoot), applies three per-render transforms, and applies each render directly to its target cluster via server-side apply. The webhook-injector sidecar (target patch mode) patches only `.caBundle` on labeled objects on the shoot — it is not a delivery path for WebhookConfigurations.*
 
 ![dual-deployment-operator per-shoot deployment topology](assets/architecture-topology.drawio.svg)
 
