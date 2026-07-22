@@ -13,23 +13,23 @@ import (
 
 // DualDeploymentOperatorSpec defines the desired state of DualDeploymentOperator.
 type DualDeploymentOperatorSpec struct {
-	Source       Source          `json:"source"`
-	RemoteAccess RemoteAccessRef `json:"remoteAccess"`
-	// RemoteNamespace is the target namespace for the remote (shoot) render and
-	// delivery. Namespaced resources in the remote render that omit an explicit
+	Source      Source         `json:"source"`
+	ShootAccess ShootAccessRef `json:"shootAccess"`
+	// ShootNamespace is the target namespace for the shoot render and
+	// delivery. Namespaced resources in the shoot render that omit an explicit
 	// metadata.namespace are placed here; cluster-scoped resources are unaffected.
-	// The host render/delivery uses the CR's own metadata.namespace.
+	// The seed render/delivery uses the CR's own metadata.namespace.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	RemoteNamespace string `json:"remoteNamespace"`
+	ShootNamespace string `json:"shootNamespace"`
 	// +optional
 	Transformations []Transformation `json:"transformations,omitempty"`
 	// +optional
 	// +kubebuilder:default={crds:Retain}
 	RetentionPolicy RetentionPolicy `json:"retentionPolicy,omitempty"`
 	// +optional
-	// +kubebuilder:validation:Enum=HostFirst;RemoteFirst
-	// +kubebuilder:default=RemoteFirst
+	// +kubebuilder:validation:Enum=SeedFirst;ShootFirst
+	// +kubebuilder:default=ShootFirst
 	ApplyOrder string `json:"applyOrder,omitempty"`
 }
 
@@ -56,11 +56,11 @@ type HelmSource struct {
 	// +optional
 	// +kubebuilder:validation:Schemaless
 	// +kubebuilder:pruning:PreserveUnknownFields
-	HostValues *apiextensionsv1.JSON `json:"hostValues,omitempty"`
+	SeedValues *apiextensionsv1.JSON `json:"seedValues,omitempty"`
 	// +optional
 	// +kubebuilder:validation:Schemaless
 	// +kubebuilder:pruning:PreserveUnknownFields
-	RemoteValues *apiextensionsv1.JSON `json:"remoteValues,omitempty"`
+	ShootValues *apiextensionsv1.JSON `json:"shootValues,omitempty"`
 }
 
 // KustomizeSource references a kustomize root plus its two overlay subpaths.
@@ -69,12 +69,12 @@ type KustomizeSource struct {
 	// +kubebuilder:validation:MinLength=1
 	URL string `json:"url"`
 	// +kubebuilder:validation:MinLength=1
-	HostPath string `json:"hostPath"`
+	SeedPath string `json:"seedPath"`
 	// +kubebuilder:validation:MinLength=1
-	RemotePath string `json:"remotePath"`
+	ShootPath string `json:"shootPath"`
 }
 
-type RemoteAccessRef struct {
+type ShootAccessRef struct {
 	// +kubebuilder:validation:MinLength=1
 	SecretName string `json:"secretName"`
 	// +kubebuilder:validation:MinLength=1
@@ -153,9 +153,9 @@ type RetentionPolicy struct {
 // DualDeploymentOperatorStatus defines the observed state of DualDeploymentOperator.
 type DualDeploymentOperatorStatus struct {
 	// +optional
-	HostResources []ResourceStatus `json:"hostResources,omitempty"`
+	SeedResources []ResourceStatus `json:"seedResources,omitempty"`
 	// +optional
-	RemoteResources []ResourceStatus `json:"remoteResources,omitempty"`
+	ShootResources []ResourceStatus `json:"shootResources,omitempty"`
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 	// +optional
