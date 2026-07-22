@@ -55,7 +55,7 @@ For each of the five operators there is a wrapper Helm chart under `system/<oper
    - Filter unwanted kinds (Service, sometimes ConfigMap/Secret)
    - Rename `Role` → `ClusterRole` (upstream emits namespace-scoped Roles; we deploy to a shared namespace and need cluster-wide grants)
    - Rewrite Validating/MutatingWebhookConfiguration `clientConfig.service` → `.url` (virtual cluster can't route to seed Services)
-   - Label the CRDs+RBAC `ManagedResource` (metal-operator only) with the webhook-injector's `--managed-resource-label` so the injector's `ManagedResourceReconciler` finds it, walks its embedded CRDs, and stamps caBundle into those with a conversion webhook
+   - Label the CRDs+RBAC `ManagedResource` with the webhook-injector's `--managed-resource-label` so the injector's `ManagedResourceReconciler` finds it, walks its embedded CRDs, and stamps caBundle into those with a conversion webhook (relevant only for ipam-capi, the operator whose CRDs carry conversion webhooks)
    - Inject the webhook-injector sidecar as an `initContainer` into upstream's Deployment (metal + ipam-capi)
 4. Commits the transformed YAML into the chart: `managedresources/*.yaml`, `webhooks.yaml`, `templates/controller-manager.yaml`
 5. Delivers remote content via **three separate paths**:
@@ -191,7 +191,7 @@ Option 3 remains a valid future consolidation if the injector becomes a maintena
 **What changed since r6.** Forms A–C and the r5/r6 design were all constrained by two properties of the webhook-injector *as it existed*:
 
 1. It delivered WebhookConfigurations only by reading them from a **source ConfigMap** (`--webhook-config-name`) and could not be scoped to specific shoot objects by label. This is why r5 introduced `packageWebhookConfigsForInjector` (a cross-stream transformation) to produce that ConfigMap — the operator could not simply apply the WebhookConfigs itself and let the injector top up caBundle, because the injector would then *also* deliver them from the ConfigMap, double-writing.
-2. Its only path to stamp `caBundle` into a **CRD conversion webhook** was its seed-side `ManagedResourceReconciler`, keyed on `--managed-resource-label`. Since this design emits no ManagedResources, that path never fired — leaving §9.2 as an open limitation blocking metal-operator's production migration.
+2. Its only path to stamp `caBundle` into a **CRD conversion webhook** was its seed-side `ManagedResourceReconciler`, keyed on `--managed-resource-label`. Since this design emits no ManagedResources, that path never fired — leaving §9.2 as an open limitation blocking ipam-capi's production migration (ipam-capi is the operator with conversion-webhook CRDs; see §3.5.4).
 
 [webhook-injector#14](https://github.com/SAP-cloud-infrastructure/webhook-injector/pull/14) adds an opt-in **target patch mode** that removes both constraints:
 
@@ -253,7 +253,7 @@ The operator and injector write the **same** shoot objects (WebhookConfiguration
 
 Because the two managers own non-overlapping fields on the same objects, SSA prevents either from clobbering the other, and there is no caBundle ping-pong. (Contrast r5/r6, which achieved separation by making the operator not write WebhookConfigs at all; r7 achieves it by field-level ownership instead.)
 
-**CRD conversion-webhook caBundle (resolved in r7)**: the injector's target patch mode stamps `.spec.conversion.webhook.clientConfig.caBundle` directly onto labeled CRDs on the shoot — no `ManagedResource` and no seed-side `ManagedResourceReconciler` required. This closes the r5/r6 open limitation that blocked metal-operator's production migration. See §9.2.
+**CRD conversion-webhook caBundle (resolved in r7)**: the injector's target patch mode stamps `.spec.conversion.webhook.clientConfig.caBundle` directly onto labeled CRDs on the shoot — no `ManagedResource` and no seed-side `ManagedResourceReconciler` required. This closes the r5/r6 open limitation that blocked ipam-capi's production migration (ipam-capi is the operator with conversion-webhook CRDs). See §9.2.
 
 ### 3.2 Custom Resource
 
@@ -299,17 +299,33 @@ spec:
           crd:     {enable: true}
           webhook: {enable: true}
 
-  # Kubeconfig for the shoot cluster.
-  # Mounted from a Gardener token-requestor-managed Secret in this namespace.
-  remoteKubeconfig:
+  # Shoot access: a Gardener token-requestor Secret in this namespace holding
+  # `token` + `bundle.crt`, plus the shoot API server URL. The operator builds
+  # rest.Config{Host: server, BearerToken: <token>, CAData: <bundle.crt>}.
+  remoteAccess:
     secretName: metal-operator-remote-kubeconfig
-    key: kubeconfig
+    server: https://kube-apiserver.shoot--cp--m-eu-de-1.svc.cluster.local:443
+    # tokenKey: token        # optional, default "token"
+    # caKey: bundle.crt      # optional, default "bundle.crt"
 
   # Target namespace for the remote (shoot) render + delivery (required).
   # Namespaced resources in the remote render that omit metadata.namespace are
   # placed here; cluster-scoped resources are unaffected. The host render/delivery
   # uses the CR's own metadata.namespace.
   remoteNamespace: metal-operator
+
+  # Cross-render apply sequence (optional; default: RemoteFirst).
+  # RemoteFirst applies the entire remote render before the host render so the
+  # shoot's CRDs/RBAC/webhooks exist before the host controller starts; HostFirst
+  # is the reverse. Deletion and prune run the REVERSE of this order (e.g. under
+  # RemoteFirst, teardown is host-first so the controller stops before its CRDs
+  # are removed). Under RemoteFirst the host render is gated on the remote render
+  # fully converging (ANY remote failure defers host — the workless shoot's render
+  # is all structural deps host consumes); under HostFirst the remote render always
+  # follows regardless of host failures. Ordering WITHIN a render is a fixed
+  # built-in kind-priority (Namespace -> CRD -> RBAC -> workloads -> webhooks),
+  # not configurable here.
+  applyOrder: RemoteFirst
 
   transformations:
     # Sidecar injection via strategic-merge patch on the upstream Deployment.
@@ -339,25 +355,16 @@ spec:
     - filterKinds:
         kinds: [Service]
 
-    # Label the remote-render WebhookConfigurations (and conversion-webhook CRDs)
-    # so the webhook-injector's target patch mode adopts them on the shoot and
-    # keeps their caBundle in sync. The operator applies them directly (r7);
-    # it omits the caBundle field so the injector owns it. Replaces the r5/r6
-    # cross-stream packageWebhookConfigsForInjector transformation.
+    # Label the remote-render WebhookConfigurations so the webhook-injector's
+    # target patch mode adopts them on the shoot and keeps their caBundle in
+    # sync. The operator applies them directly (r7); it omits the caBundle field
+    # so the injector owns it. Replaces the r5/r6 cross-stream
+    # packageWebhookConfigsForInjector transformation.
+    # metal-operator emits only a ValidatingWebhookConfiguration (no
+    # MutatingWebhookConfiguration, and none of its 17 CRDs use a conversion
+    # webhook), so only the VWC needs the label here.
     - patch:
         target: {kind: ValidatingWebhookConfiguration}
-        strategicMerge:
-          metadata:
-            labels:
-              dual-deployment-operator.cc.sap/webhook-injector: metal-operator
-    - patch:
-        target: {kind: MutatingWebhookConfiguration}
-        strategicMerge:
-          metadata:
-            labels:
-              dual-deployment-operator.cc.sap/webhook-injector: metal-operator
-    - patch:
-        target: {kind: CustomResourceDefinition}
         strategicMerge:
           metadata:
             labels:
@@ -387,9 +394,9 @@ spec:
       url: "https://github.com/sapcc/helm-charts//system/kustomize/ipam-capi-remote/?ref=v1.2.31"
       hostPath: "host"
       remotePath: "remote"
-  remoteKubeconfig:
+  remoteAccess:
     secretName: ipam-capi-remote-kubeconfig
-    key: kubeconfig
+    server: https://kube-apiserver.shoot--cp--m-eu-de-1.svc.cluster.local:443
   transformations:
     - patch:
         target: {kind: Deployment, name: ipam-capi-controller-manager}
@@ -409,12 +416,19 @@ spec:
     - rewriteWebhookURL: {urlPrefix: "https://ipam-capi-remote-webhook-service:443"}
     - filterKinds: {kinds: [Service]}
     # Label webhook objects for the injector's target patch mode (r7).
+    # ipam-capi emits a ValidatingWebhookConfiguration, a MutatingWebhookConfiguration,
+    # AND 4 conversion-webhook CRDs — all need the label so the injector stamps
+    # their caBundle on the shoot.
     - patch:
         target: {kind: ValidatingWebhookConfiguration}
         strategicMerge:
           metadata: {labels: {dual-deployment-operator.cc.sap/webhook-injector: ipam-capi}}
     - patch:
         target: {kind: MutatingWebhookConfiguration}
+        strategicMerge:
+          metadata: {labels: {dual-deployment-operator.cc.sap/webhook-injector: ipam-capi}}
+    - patch:
+        target: {kind: CustomResourceDefinition}
         strategicMerge:
           metadata: {labels: {dual-deployment-operator.cc.sap/webhook-injector: ipam-capi}}
 ```
@@ -434,12 +448,12 @@ spec:
         boot-operator-core:
           rbac: {enable: true}
           crd:  {enable: true}
-  remoteKubeconfig: {secretName, key}
+  remoteAccess: {secretName, server, tokenKey?, caKey?}
   transformations:
     - filterKinds: {kinds: [Service]}
 ```
 
-The CR is the entire configuration surface. Per-cluster differences live in `spec.source.helm.values` (Helm) or are baked into the pinned kustomize source (kustomize; per-cluster overrides via different pinned refs, or via optional future patches — see §9.4). Mode-specific settings (which upstream subchart parts to enable per mode for Helm; which overlay directory for kustomize) live in mode-specific fields under the source discriminator. Shoot kubeconfig comes from Gardener's token-requestor per standard practice (see §3.6).
+The CR is the entire configuration surface. Per-cluster differences live in `spec.source.helm.values` (Helm) or, for kustomize sources, in `patch` transformations on the CR (kustomize has no values map — see §3.3 and §9.4). Either way, the CR itself is templated by the `dual-deployment-operator-remote` Helm chart with per-cluster values overridden from `cc/kube-secrets` (§9.7), so per-cluster parameterization is expressed as chart values regardless of source type. Mode-specific settings (which upstream subchart parts to enable per mode for Helm; which overlay directory for kustomize) live in mode-specific fields under the source discriminator. Shoot kubeconfig comes from Gardener's token-requestor per standard practice (see §3.6).
 
 ### 3.3 Source discriminator
 
@@ -475,7 +489,7 @@ manifestStream = krusty.Build(hostRoot or remoteRoot)
 
 The kustomize source is expected to have `host/` and `remote/` (or the paths configured in CR) subdirectories, each with its own `kustomization.yaml` selecting the appropriate resources for that mode. See §4.2 for the ipam-capi layout.
 
-Kustomize has no Helm-values equivalent; per-cluster overrides are baked into the pinned kustomize source. If a chart needs per-cluster differences (image tags, apiserver URL), it either uses different pinned refs per environment or adopts a future CR-side patch mechanism (§9.4). For today's five candidate charts, ipam-capi's needs can be met with a pinned image tag in its kustomize source per release cycle.
+Kustomize has no Helm-values equivalent, so per-cluster differences for a kustomize source are applied as `patch` transformations on the CR rather than as a values map. The three per-cluster values ipam-capi needs (controller image tag, webhook-injector image, and the `kubernetesServiceHost` apiserver URL) are each expressible as a `patch` (see §9.4 for the verified list). The CR itself is templated by the `dual-deployment-operator-remote` chart with those values overridden per-cluster from `cc/kube-secrets` (§9.7), so a kustomize source needs neither per-environment pinned refs nor a values map for per-cluster config.
 
 **Origin tagging**. Both source types produce a stream of unstructured Kubernetes manifests per render. The operator tags every manifest with `dual-deployment-operator.cc.sap/origin: upstream` if it originated from the upstream subchart (Helm) or upstream reference (kustomize), and expects the chart's own templates to carry `dual-deployment-operator.cc.sap/origin: additions` via `_helpers.tpl`. This tag lets selective transformations distinguish upstream from our additions — used by `patch: target: {origin: upstream}` and, optionally, `filterKinds: source: upstream`. Neither candidate operator relies on the origin distinction for `filterKinds` (they filter all Services regardless of origin); the tag's load-bearing consumer is `patch` targeting.
 
@@ -776,7 +790,6 @@ Rendered manifests:
 | `RoleBinding/leader-election-rolebinding` | upstream | remote |
 | `ServiceAccount/metal-operator-controller-manager` | upstream | remote |
 | `ValidatingWebhookConfiguration/metal-operator-validating-webhook-configuration` | upstream (webhook.enable=true) | remote |
-| `MutatingWebhookConfiguration/metal-operator-mutating-webhook-configuration` | upstream | remote |
 | `Service/metal-operator-webhook-service` | upstream (webhook.enable=true) | dropped |
 | `Namespace/metal-servers` | additions (mode=remote guard) | remote |
 | `ClusterRoleBinding/cc:oidc-ias-admin` | additions | remote |
@@ -786,9 +799,9 @@ Rendered manifests:
 | ... | | |
 
 After transformations:
-- `rewriteWebhookURL` — WebhookConfigurations get URL-based `clientConfig` (service replaced by url); conversion-webhook CRDs likewise get their `.spec.conversion.webhook.clientConfig` rewritten service→url (§3.4.2).
+- `rewriteWebhookURL` — the ValidatingWebhookConfiguration gets URL-based `clientConfig` (service replaced by url). metal-operator has no MutatingWebhookConfiguration and none of its 17 CRDs use a conversion webhook, so the CRD-conversion branch of this transformation is a no-op here (it does apply for ipam-capi, which has 4 conversion-webhook CRDs — §3.4.2).
 - `filterKinds {kinds: [Service]}` — drops the webhook Service.
-- `patch` (label) — stamps the injector's `--target-label` onto the Validating/Mutating WebhookConfigurations (and conversion-webhook CRDs) so the injector adopts them on the shoot and keeps their caBundle current (§3.4.4).
+- `patch` (label) — stamps the injector's `--target-label` onto the ValidatingWebhookConfiguration so the injector adopts it on the shoot and keeps its caBundle current (§3.4.4). metal-operator has no conversion-webhook CRDs to label.
 
 Note: upstream's Role (leader-election) stays a Role — no renaming under direct-apply. Our `metal-token-rotate` Role also stays a Role. Both apply cleanly to the shoot with their original namespace scope.
 
@@ -814,7 +827,11 @@ Two-render sidesteps all these problems. Chart/kustomization owns what goes wher
 Operator holds two Kubernetes clients per CR:
 
 - **Host client**: seed cluster in-cluster access via the operator's ServiceAccount (RBAC scoped to the CR's namespace)
-- **Shoot client**: constructed from a kubeconfig held in a Secret in the CR's namespace. `spec.remoteKubeconfig.secretName` points at this Secret (typically named `<operator>-remote-kubeconfig`, provisioned by Gardener's token-requestor as today, mounted in the existing operator Pod as `/var/run/remote-kubeconfig/kubeconfig`)
+- **Shoot client**: constructed from a Gardener token-requestor Secret in the CR's namespace, **not** a kubeconfig blob. `spec.remoteAccess.secretName` points at this Secret (typically `<operator>-remote-kubeconfig`, provisioned by Gardener's token-requestor as today), which holds a `token` key (bearer token, rotated by Gardener) and a `bundle.crt` key (shoot CA, kept fresh via the Secret's `inject-ca-bundle` annotation). The operator builds `rest.Config{Host: spec.remoteAccess.server, BearerToken: <token>, CAData: <bundle.crt>}` directly (`tokenKey`/`caKey` default to `token`/`bundle.crt`). `spec.remoteAccess.server` is **required** — the operator runs in the seed and cannot infer the shoot apiserver address; the wrapper chart supplies it (the shoot apiserver Service `kube-apiserver.<shoot-cp-ns>.svc.cluster.local:443`, the same value it uses for `KUBERNETES_SERVICE_HOST` today). The shoot client is rebuilt each reconcile, so a rotated token/CA is picked up without restart.
+
+  *Why token+CA, not a kubeconfig:* chart research (metal-operator-remote, boot-operator-remote) confirmed the Gardener token-requestor Secret contains `token` + `bundle.crt`, not a self-contained kubeconfig — and Gardener injects and rotates **both**. Consuming this shape directly matches the Secret every operator's chart already produces (no chart change needed) and is resilient to shoot-CA rotation. (The alternative inline-kubeconfig shape — used only by the `metal-token-rotate` sidecar — bakes a **static** CA via `.Values.remote.ca` and would go stale if the shoot CA rotated, so it is not used here.)
+
+  *Bootstrap read race — token/CA not yet populated:* Gardener declares the token-requestor Secret with empty values (`token: ""`, `bundle.crt: ""`) and its controller fills them asynchronously, so a fresh deploy has a window where the Secret **exists** but the token/CA are absent or empty. The operator distinguishes three states: a **missing** Secret is a misconfiguration → fatal `ShootClientFailed`; a Secret present with token/CA **absent or empty** is a benign not-ready state → the operator skips the remote render this cycle, still applies the host render (best-effort cross-render sequencing), sets `Ready=False` reason `WaitingForShootCredentials`, and requeues; both present **and non-empty** → build the client and apply. The readiness gate is *present and non-empty* (a `token: ""` must not be accepted, or the client would authenticate as nobody). This is a read-time eventual-consistency wait, not a write race — Gardener owns the Secret, the operator only reads it — so a requeue fully resolves it, mirroring the caBundle bootstrap-gap philosophy (§3.8): a normal startup wait is reported as a waiting/progressing condition, never as degraded.
 
 Every resource in the **host render** output → apply to host client (seed).
 Every resource in the **remote render** output → apply to shoot client (shoot).
@@ -844,7 +861,7 @@ For each applied resource, the operator computes a `status: {Healthy | Progressi
 - `Deployment`: `.status.availableReplicas == .spec.replicas` and all Conditions positive → Healthy
 - `StatefulSet`: same
 - `CustomResourceDefinition`: `Established` and `NamesAccepted` conditions → Healthy
-- `ValidatingWebhookConfiguration` / `MutatingWebhookConfiguration`: existence + caBundle set (present, non-empty) → Healthy
+- `ValidatingWebhookConfiguration` / `MutatingWebhookConfiguration`: existence → Healthy. The operator does **not** inspect `caBundle` — it deliberately does not own that field (§3.8); populating it is the webhook-injector's responsibility on its own timeline. Grading our own health on a field we disclaimed would be inconsistent and would flap `Progressing` during the normal bootstrap window for a condition we cannot fix. (A future, non-gating "caBundle stamped" observability signal is noted as a possible enhancement — §9.10.)
 - `Service`, `Ingress`, `ConfigMap`, `Secret`, `Namespace`, `ClusterRole`, `ClusterRoleBinding`, `Role`, `RoleBinding`, `ServiceAccount`: existence → Healthy
 - All others: existence → Healthy (may be refined per type as needed)
 
@@ -864,7 +881,7 @@ Host resources:
 Remote resources:
 - Cannot use ownerReferences (owner CR is in seed, not shoot — cross-cluster ownerRef isn't supported)
 - Operator maintains an inventory in `CR.status.remoteResources` and issues explicit deletes on CR deletion
-- **`keepObjects` semantic for CRDs**: on CR deletion, CRDs on shoot are preserved by default (they may hold user data). Operator only deletes CRDs if `CR.spec.deletionPolicy.crds == "Delete"` (default: `Retain`). Non-CRD remote resources are deleted normally.
+- **`keepObjects` semantic for CRDs**: on CR deletion, CRDs on shoot are preserved by default (they may hold user data). Operator only deletes CRDs if `CR.spec.retentionPolicy.crds == "Delete"` (default: `Retain`). Non-CRD remote resources are deleted normally.
 
 Deletion is finalizer-driven:
 - Operator adds finalizer `dual-deployment-operator.cc.sap/cleanup` on first reconcile
@@ -884,18 +901,75 @@ Reconciliation is triggered by:
 - Applied resource mutation on either cluster (drift trigger)
 - Periodic re-sync (default 10min)
 
+#### 3.6.6 Concurrency safety
+
+The operator does **not** need a Helm-style application-level lock. Helm serializes concurrent operations on the same release with a pessimistic *status-as-lock* (a release in `pending-install/upgrade/rollback` blocks the next op with `errPending`, ultimately enforced by atomic Secret creation of the next revision), and that lock has a well-known failure mode: a crashed process leaves the release stuck `pending-*` with **no automatic recovery**, requiring `helm rollback` or manual Secret deletion. The operator sits closer to the `kubectl`/API-server model — per-object optimistic concurrency plus server-side-apply field ownership, with no cross-object lock — and layers four protections that come mostly for free from controller-runtime:
+
+1. **Per-CR serialization (framework guarantee).** controller-runtime's workqueue dedups by object key and processes each key on at most one worker at a time. So two reconciles of the *same* CR never run concurrently — by construction, no lock required. Distinct CRs may reconcile in parallel safely, because each CR owns a disjoint render (its own resources). The per-shoot topology (one operator instance per shoot-cp namespace) further shrinks the blast radius. This is the guarantee Helm has to hand-build; the operator gets it from the framework.
+2. **Optimistic concurrency on the CR (`resourceVersion`).** Status writes (`Status().Update`) carry the CR's `resourceVersion`; a concurrent change yields HTTP 409 (`the object has been modified; please apply your changes to the latest version`), the reconcile returns the error, and controller-runtime requeues and re-reads fresh. Standard `retry.RetryOnConflict`/requeue semantics.
+3. **SSA field ownership on target objects.** Every apply uses `client.Apply` with `FieldOwner=dual-deployment-operator` + `ForceOwnership` — the authoritative-manager pattern: the operator force-owns its fields (no read-modify-write loop) and coexists with other managers on disjoint fields (e.g. the injector owning `caBundle`, §3.8) via `managedFields`. A field conflict is a separate 409 that force resolves; two CRs targeting the same object would be a config error (overlapping renders), and even then SSA prevents silent corruption.
+4. **Leader election (cluster-wide single active instance).** controller-runtime's per-key serialization is *per process*, so two operator instances (two replicas, or old+new pods during a rollout) could each reconcile the same CR. Leader election (`--leader-elect`, already wired in `cmd/main.go`) guarantees only one manager instance is active. Layers 2–3 are the safety net if leadership ever lapses: a losing writer gets 409 conflicts, not corruption.
+
+**Deployment requirement:** run the operator with leader election enabled (`--leader-elect=true`) so at most one instance reconciles at a time. Unlike Helm, there is **no stuck-pending failure mode** — a crashed or interrupted reconcile simply requeues on the next resync; there is no lock to manually clear.
+
+**Replica count and failover (community-aligned).** The canonical controller HA model is *active-passive*: N replicas, one leader, the rest idle hot standbys — extra replicas buy **failover**, not throughput (the operator does not scale horizontally by adding replicas; all CRs go to the single leader). For this operator's low-load, per-shoot topology, **`replicas: 1` with leader election enabled is the recommended default** — it matches cert-manager (which defaults `replicaCount: 1` and notes "in production set this to 2 or 3… uses leader election to ensure only a single instance active") and is even more conservative than prometheus-operator (single replica, historically no leader election, on the rationale that a 15–30 s operator gap is tolerable when managed workloads keep running — the same holds here: a brief reconcile gap for one shoot is acceptable given the 10-min resync and control-plane, not data-plane, role). `replicas: 2` is an *optional* HA upgrade if a few-minute reschedule gap for a shoot is unacceptable — not a requirement.
+
+**Leader election must stay on even at `replicas: 1`**, because a rolling update transiently runs two pods (`maxSurge`), which would otherwise both reconcile. Set **`LeaderElectionReleaseOnCancel: true`** (currently commented out in `cmd/main.go`) so the outgoing leader releases the lease on graceful shutdown and the new pod takes over near-instantly, instead of the standby waiting the full `LeaseDuration` (~15 s). Note also that leader-elected per-CR serialization is *cluster-wide* only via the lease: the workqueue guarantee (layer 1) is *per process*, so leader election is what extends "one reconcile per CR" across pods — the two are complementary, not redundant.
+
+**Sharding is explicitly out of scope.** Distributing distinct CRs across multiple *active* instances (horizontal scale) would require controller sharding — external consistent-hashing (`timebertt/kubernetes-controller-sharding`) or the Alpha KEP-5866 "Server-side Sharded List and Watch" (Kubernetes v1.36). These are for extreme scale (thousands of clusters / millions of objects) and are irrelevant here: the per-shoot topology already partitions CRs across deployments at a coarser granularity, and each shoot's CR set is tiny.
+
+For comparison, **kustomize** has no concurrency protection at all (it is a stateless client-side generator with no cluster access or state — concurrency is entirely the applier's concern), and **`kubectl`** relies solely on the same per-object optimistic-concurrency + SSA mechanisms the operator uses, with no higher-level lock.
+
+#### 3.6.7 Shoot RBAC bootstrap (install-time prerequisite)
+
+The operator applies CRDs, ClusterRoles, ClusterRoleBindings, Roles, RoleBindings, ServiceAccounts, and WebhookConfigurations to the shoot **as the ServiceAccount its token-requestor Secret is minted for**. That raises a bootstrap problem: to create RBAC on the shoot, the applying ServiceAccount must already hold those permissions — and Kubernetes privilege-escalation prevention forbids an applier from creating a ClusterRole granting powers it does not already hold. The operator therefore **cannot bootstrap its own apply permissions**; something already-privileged must seed them first.
+
+**Two principals, two lifecycle phases.** This mirrors how the *current* model already works (confirmed from the wrapper charts): today gardener-resource-manager (GRM) — which is effectively `cluster-admin` on the shoot — performs the delivery-time apply, while the operator's token-requestor SA (`<operator>-controller-manager`) holds **only runtime domain permissions** (its `*-manager-role` ClusterRole has no `rbac.authorization.k8s.io` rules, so it cannot create RBAC). We keep that separation, but shrink GRM's role to a one-time seed:
+
+- **Install-time bootstrapper (GRM, privileged):** a minimal, static, per-operator `ManagedResource` — applied by GRM — creates just the shoot ServiceAccount plus an **apply-scoped ClusterRole + ClusterRoleBinding** granting that SA create/update/delete on the kinds the operator delivers (CRDs, ClusterRoles/Bindings, Roles/Bindings, ServiceAccounts, Validating/Mutating WebhookConfigurations, and the additions). ~30 hand-authored lines; no generated content; does not drift; not part of any reconcile loop.
+- **Runtime applier (operator, as the now-empowered SA):** applies all the actual content directly via SSA, every reconcile — no GRM, no ManagedResource in this path.
+
+**This does not compromise the "zero GRM / zero ManagedResource" goal.** That goal targets the *runtime delivery path* — the ~30k lines of committed generated YAML, the `make build-` targets, and GRM as the ongoing delivery mechanism. All of that is eliminated: the operator delivers content directly. The bootstrap ManagedResource is *install-time plumbing* in the same category as the token-requestor Secret (also GRM/Gardener-provided) — a one-time RBAC seed, not the runtime delivery the design set out to replace. Runtime = zero GRM; install-time = one minimal GRM-seeded grant.
+
+**Why not alternatives.** Authenticating the operator as a `cluster-admin`-bound SA (e.g. GRM's own) gives the operator a huge blast radius *and* still needs something to seed the privileged binding — the recursion is not escaped. A Gardener-native elevated-access mechanism (`shoots/adminkubeconfig`) is designed for humans/external tools, not in-cluster controllers, and couples the operator to Gardener internals. Granting the SA broad rights with *no* bootstrap step is impossible — that grant is exactly what cannot be self-applied. The minimal bootstrap MR is the smallest privileged seed that resolves the recursion cleanly.
+
+**Failure mode.** If the bootstrap grant is absent, the operator's remote applies of RBAC/CRDs fail with forbidden/privilege-escalation errors, surfaced per-resource as `Degraded` in status (continue-on-error) — never silently. The operator does not attempt to create its own permissions.
+
+**Install RBAC differs by *provisioning*, not by breadth — both appliers are broad.** The bootstrap above concerns the *shoot*. The *host* differs only in how the grant is provisioned, not in how broad it is. The host render is **not** guaranteed namespace-local: the candidate wrapper charts emit cluster-scoped resources on the host side today (metal-operator and ipam-capi each ship a host-side `ClusterRole` + `ClusterRoleBinding` for their webhook-injector SA), and the operator's own `patch`/rename transforms can produce `ClusterRole`s (§rename `Role`→`ClusterRole`). So a "namespaced Role only" host grant would be an invention the real charts violate. We align instead to the reference appliers:
+
+- **gardener-resource-manager** grants its target-cluster applier SA a broad `cluster-admin`-equivalent `ClusterRole` (wildcard `*`/`*`/`*`; [rbac-target.yaml](https://github.com/gardener/gardener/blob/master/charts/gardener/resource-manager/charts/application/templates/rbac-target.yaml)), bootstrapped by a 10-minute `system:masters` client cert, then switched to a shoot-access token. This is exactly our **remote** side.
+- **Flux** ships its appliers (`kustomize-controller`, `helm-controller`) bound to `cluster-admin` and scopes tenants via **per-object ServiceAccount impersonation** (`spec.serviceAccountName` + `--default-service-account`), explicitly *not* by narrowing the applier SA — the Flux docs note a narrowed applier "would prevent it from managing CRDs, namespaces, and coordinating across the cluster."
+
+Both references keep the applier SA broad precisely because a narrowed applier cannot deliver the cluster-scoped kinds (CRDs, ClusterRoles, webhooks) that appear in real renders. We therefore give **both** the host and shoot applier a broad, escalation-capable grant (where the render creates RBAC, the applier must hold the powers it grants). The two grants differ only in:
+
+- **Host (seed):** provisioned by the operator's **own deployment chart**. Scoped no broader than the host render needs (its kinds, `spec.remoteAccess` Secret read, leader-election Lease), but including any cluster-scoped host-render kinds. Owner references GC host resources on CR deletion.
+- **Remote (shoot):** provisioned by a **GRM-seeded bootstrap `ManagedResource`**, resolving the privilege-escalation chicken-and-egg (the SA cannot grant itself RBAC), exactly as GRM bootstraps its own target SA.
+
+The contrast in one line: **both grants are broad applier grants; host is chart-provisioned, remote is GRM-bootstrapped.** The earlier "host = narrow namespaced Role" framing was wrong — the candidate charts put ClusterRoles on the host side.
+
+**Single operator-managed install per seed (host cluster-scoped names are seed-global).** Because the host render can contain cluster-scoped objects (`ClusterRole`/`ClusterRoleBinding`) whose names are **seed-global**, two `DualDeploymentOperator` CRs on one seed emitting the *same-named* cluster-scoped object would collide: they would fight over SSA field ownership of the one shared object, and prune/GC is ambiguous because a cluster-scoped object cannot be owner-referenced by a namespaced CR (deleting CR A could remove a `ClusterRole` CR B still needs). The operator does **not** auto-qualify these names per shoot-cp namespace — the upstream charts use fixed names and their internal `roleRef`/subject references assume them, so rewriting would diverge from upstream. Instead we adopt a **single-install-per-seed constraint**: at most one operator-managed install of a given operator per seed. This matches current production reality — verified on `rt-qa-de-1` and `rt-eu-de-1` (via `u8s`), where the host-side `ClusterRole`+`ClusterRoleBinding` (`metal-operator-webhook-injector`, `ipam-capi-remote-webhook-injector`) carry static seed-global names with a single `{{ .Release.Namespace }}` subject, and each seed's two `shoot--cp--*` namespaces run the `-remote` operators in only the `m-<region>` workload namespace, never two at once. The constraint is an install-time contract (documented, not runtime-validated in v1); a per-name uniquifier transform or an admission guard rejecting a second conflicting install is a possible future enhancement.
+
+**Defensive cluster-scoped conflict guard.** A documented contract still needs enforcement, because the applier uses SSA `ForceOwnership` (needed to reclaim genuinely stale field managers) — which would otherwise let a contract violation silently ping-pong ownership of a same-named cluster-scoped object (last-writer-wins corruption, nothing surfaced). So the applier guards every **cluster-scoped** apply with a GET-before-apply check on the `dual-deployment-operator.cc.sap/owned-by` label (the same CR-identity label stamped for prune safety; its value is a fixed-length hash — first 16 hex of `sha256("<namespace>/<name>")` — not a raw `<namespace>_<name>`, so it stays within the 63-char label-value limit and is injective across the ns/name boundary):
+
+- **Absent, self-owned, or unlabeled** → apply proceeds. An unlabeled pre-existing object (e.g. left by the current Helm chart during migration, owned by no operator-managed CR) is adopted — the plain apply stamps our label. "Conflict" means specifically *another CR's* label, never merely "already exists".
+- **Owned by a *different* CR** → refuse: do NOT apply (no `ForceOwnership` clobber), record the resource `Degraded` with a `Message` naming the conflicting owner, surface a per-resource error (continue-on-error, requeue).
+
+Namespaced objects skip the guard — namespace isolation already prevents cross-CR collision, so the extra GET is spent only where it matters. The guard converts a silent single-install-per-seed violation into a visible, non-destructive failure. `ForceOwnership` alone cannot tell "reclaim my own stale field" from "steal another CR's object"; the label check supplies that distinction without disabling force globally.
+
 ### 3.7 CR deletion
 
 Finalizer-driven cleanup:
 
 1. `deletionTimestamp` set on CR
-2. Operator handler runs cleanup:
+2. Operator handler runs cleanup, in the reverse of `spec.applyOrder`:
+   - Delete remote resources explicitly (iterate `CR.status.remoteResources`, delete via shoot client) — respecting `retentionPolicy.crds` for CRDs
    - Delete host resources via `ownerReferences` cascade (kubelet garbage-collects) or explicit deletion of top-level owner objects
-   - Delete remote resources explicitly (iterate `CR.status.remoteResources`, delete via shoot client) — respecting `deletionPolicy.crds` for CRDs
-3. Finalizer removed
+3. Finalizer removed **only once remote deletion is confirmed complete** (every remote resource deleted or observed NotFound)
 4. CR deletes
 
-CRDs retention (`deletionPolicy.crds: Retain`) is the default because CRDs hold user domain data; removing them cascades to user CRs. Explicit `Delete` is available as an opt-in for teardown scenarios.
+CRDs retention (`retentionPolicy.crds: Retain`) is the default because CRDs hold user domain data; removing them cascades to user CRs. Explicit `Delete` is available as an opt-in for teardown scenarios.
+
+**Unreachable shoot during deletion — block, do not orphan.** If the shoot client cannot be built or reached while deleting, the operator does **not** remove the finalizer and does **not** assume the remote resources are gone. "Unreachable" is indistinguishable from "transiently down" (network blip, apiserver restart, cert/token expiry, wrong `server`) and must not be read as "deleted" — doing so would silently orphan live shoot resources with no finalizer left to drive cleanup. Instead the operator surfaces a `ShootUnreachable` condition and a Kubernetes Event on the CR and requeues, keeping the CR in `Terminating` until either the shoot becomes reachable and cleanup completes, or an operator **manually removes the finalizer**. The accepted trade-off: a CR whose shoot is genuinely gone can stay in `Terminating` until a human clears the finalizer — this is deliberately surfaced (condition + Event) rather than auto-resolved, because the operator cannot reliably distinguish "gone" from "unreachable" and silently guessing wrong leaks resources.
 
 ### 3.8 Coexistence with webhook-injector
 
@@ -917,7 +991,9 @@ The injector is **no longer a delivery mechanism**. It does not read a source Co
 
 Because the two managers own non-overlapping fields, SSA prevents either from clobbering the other: the operator's periodic re-apply omits `caBundle` (so it never reverts the injector's write), and the injector patches only `caBundle` (so it never disturbs the operator's fields). No caBundle ping-pong, no `force` conflicts on shared fields.
 
-**CRD conversion-webhook caBundle — resolved (r7).** The injector's target patch mode stamps caBundle directly onto labeled conversion-webhook CRDs on the shoot. No `ManagedResource`, no seed-side `ManagedResourceReconciler`, no GRM. This closes the r5/r6 open limitation (§9.2) that blocked metal-operator's production migration. The only requirement is that the operator label the conversion-webhook CRDs with `--target-label` (non-conversion CRDs may carry the label too — the injector skips CRDs without a webhook conversion strategy).
+**Why this holds across two independent clients.** Field ownership is **server-side state**: the shoot API server records it in the object's `metadata.managedFields`, stored in etcd alongside the object, keyed by **field-manager name** — not by client, connection, pod, or kubeconfig. The operator (`fieldManager=dual-deployment-operator`, from the seed via the shoot kubeconfig) and the injector (its own manager name, from its sidecar) are two independent clients writing the *same* shoot object; the shoot API server maintains a separate `managedFields` entry for each in that one object and is the sole arbiter that merges them. Multiple independent actors co-owning disjoint fields of one object is the normal, intended SSA case — a single writer is just its degenerate form. The relation therefore survives across the two clients as long as: (a) they use **distinct, stable field-manager names** (so their entries don't collapse into one), (b) each targets the **same object identity** (GVK + namespace/name on the shoot), and (c) the operator **never enters `caBundle` into its own applied field set** (see the leaf-only strip below) — because owned-then-omitted is the *only* SSA rule that would prune the injector's value.
+
+**CRD conversion-webhook caBundle — resolved (r7).** The injector's target patch mode stamps caBundle directly onto labeled conversion-webhook CRDs on the shoot. No `ManagedResource`, no seed-side `ManagedResourceReconciler`, no GRM. This closes the r5/r6 open limitation (§9.2) that blocked ipam-capi's production migration (ipam-capi is the operator with conversion-webhook CRDs — 4 of them; metal-operator has none). The only requirement is that the operator label the conversion-webhook CRDs with `--target-label` (non-conversion CRDs may carry the label too — the injector skips CRDs without a webhook conversion strategy).
 
 **Ordering during initial deploy**:
 1. Operator applies CRDs, RBAC, SA, additions, and the labeled WebhookConfigurations (caBundle unset) to the shoot.
@@ -925,6 +1001,39 @@ Because the two managers own non-overlapping fields, SSA prevents either from cl
 3. Webhook calls succeed once the WebhookConfigurations carry a valid caBundle.
 
 The bootstrap has one fewer hop than r5/r6 (no host-side source ConfigMap to produce and consume); the injector reacts directly to the labeled shoot objects the operator applied.
+
+**Cross-render apply sequence (`spec.applyOrder`).** The operator applies the two renders in the order set by `spec.applyOrder` (`HostFirst` | `RemoteFirst`, default `RemoteFirst`). `RemoteFirst` puts the shoot's CRDs/RBAC/webhooks down before the host controller Deployment starts; deletion and prune run the reverse (host-first teardown so the controller stops before its CRDs are removed). Whether the second render proceeds after first-render failures depends on the ordering: under **`HostFirst`** the remote render always follows regardless of host per-resource failures (best-effort — the clusters' convergence is decoupled). Under **`RemoteFirst`** the host render is **gated on the remote render fully converging** — *any* incomplete remote outcome (partial per-resource failure, complete failure, or credentials-not-ready) stops or defers the host render, because the shoot is a **workless** cluster whose remote render is entirely structural dependencies (CRDs/RBAC/webhooks) the host controller consumes; starting the host against a missing one would crash-loop or silently no-op it. Ordering *within* a render is a fixed built-in kind-priority (Namespace → CRD → RBAC → workloads → webhooks) so the first apply never fails on a missing CRD or Namespace; only the cross-render (host-vs-remote) sequence is consumer-configurable.
+
+**caBundle strip must be leaf-only and unconditional.** The invariant is: **the operator must never appear as a field manager of `caBundle`.** When applying a `Validating`/`MutatingWebhookConfiguration` or a conversion-webhook CRD, the operator removes **only** the `clientConfig.caBundle` leaf (`RemoveNestedField(wh, "clientConfig", "caBundle")`) — never the parent `clientConfig` map (which holds the operator-owned `url`) and never the webhook entry. It does this on **every** apply, including the first.
+
+Note the SSA pruning rule precisely: an applier deletes a field **only if it owned that field in its previous apply *and* omits it now**. Omitting a field the operator has **never** owned is a **no-op** — `ForceOwnership` does not change this (it only lets an applier *take* a field another manager currently owns; it never deletes a never-owned, now-omitted field). So merely omitting `caBundle` is safe *on its own*. The danger is the **owned-then-omitted transition**: the rendered WebhookConfigs/CRDs in `sapcc/helm-charts` frequently *carry* a `caBundle` field, so a conditional strip ("only if present/non-empty") — or any single apply that submitted `caBundle`, even `""` — would enter `caBundle` into the operator's `managedFields`. Once owned, the next apply that omits it (the strip finally running) triggers the prune rule and **deletes the injector's value**, opening a webhook-outage window until the injector re-patches. The unconditional strip prevents ownership from ever being established, so the prune rule can never fire. The discriminating test asserts the operator's `managedFields` entry never lists a `caBundle` path.
+
+The bootstrap gap in step 2 above is startup latency (the webhook was never serving), not an outage. The operator does not report on caBundle in health (§3.6.3): during the gap the WebhookConfig reports **Healthy** from the operator's perspective (it exists and the operator-owned fields are applied), because populating caBundle is the injector's responsibility, not a measure of the operator's own work.
+
+**Pruning resources that leave a render.** Each reconcile applies the current render and then prunes: it diffs the previous applied-set — recorded in `status.hostResources` / `status.remoteResources` by identity key `group/kind/namespace/name` (version-independent, so an API-group version bump updates the same object in place rather than reading as delete+recreate) — against the new render, and deletes resources present before but absent now, by direct `Get`+`Delete`, on that render's own client. Deletion order matches teardown: within a render, orphans are deleted in reverse of the fixed intra-render kind priority; across the two renders, prune processes them in the reverse of `spec.applyOrder` (the same cross-render reversal as CR-deletion). This closes the orphan gap of apply-only reconciliation (e.g. a chart bump that drops a ClusterRole). CRDs are never pruned under the default `retentionPolicy.crds: Retain` (deleting a CRD cascades to all its CRs); only explicit `Delete` allows it. Status is written after apply+prune, so a failed prune leaves the orphan tracked and retried next reconcile.
+
+This is **status-diff** pruning, matching the two closest analogues: gardener-resource-manager indexes `ManagedResource.status.resources` and deletes orphans via `Get`+`Delete` (no `list` RBAC), and Flux kustomize-controller diffs `.status.inventory` (`get`+`delete` only). It deliberately avoids the live-listing model (ArgoCD-style: watch/list every cluster object, attribute by a tracking annotation) because that requires near-cluster-admin `list`/`watch` on the target and its failure mode is over-deletion — unacceptable on a data-bearing shoot. Status-diff's failure mode is leaking (stale object lingers if status is lost), which is the safe direction. A CR-identity label is also stamped on applied objects and verified during the prune `Get` before deletion (skip if it doesn't match) — a free ownership safety check, borrowed from Flux, that guards against deleting a non-owned object without needing any `list` permission.
+
+**CRD updates on a chart bump — effect on existing CR instances.** A chart bump that *modifies* a CRD (rather than dropping it) is not a prune and does not consult `retentionPolicy` — the CRD is still in the render, so it is re-applied via SSA (`FieldOwner=dual-deployment-operator`, `ForceOwnership`), updating the CRD **definition** in place. The operator never migrates, rewrites, or deletes existing CR instances — the Kubernetes API server owns CR data lifecycle; the operator only re-applies the definition. So existing CRs are always **physically preserved** across a CRD update (they are removed only by deleting the CRD itself, via the `Delete` policy cascade). Whether they remain **usable** depends on the schema change being backward-compatible, which is the chart author's contract — the operator neither guarantees nor validates CR-level compatibility.
+
+*Terminology.* A CRD may declare several entries in `spec.versions[]`, each with two independent flags: **`served`** (the API server exposes read/write endpoints at this version — "which doors are open") and **`storage`** (the single version — exactly one must set `storage: true` — in which objects are actually serialized into etcd — "what encoding the data is written in"). Writing a CR at any served version causes the API server to convert it to the storage version and persist *that*. Changing which version is `storage: true` does **not** rewrite existing objects; they stay in their old encoding until each is next written. Kubernetes records every encoding still present on disk in **`status.storedVersions`**. A version is **"in use" (as a storage version)** when it appears in `status.storedVersions` — i.e. objects encoded in it still exist in etcd. Removing an in-use version from `spec.versions` is rejected by the API server, because it would make those stored objects undecodable. The cases:
+
+| CRD update on bump | Existing CR instances | SSA apply result | Operator-reported health |
+|---|---|---|---|
+| Add optional field / printer column / description | Untouched; readable (defaulted if `default:` set) | Succeeds | Healthy |
+| Add a new served/storage version | Preserved; **not** rewritten — stay encoded in the old storage version until next written. Reads at the new version trigger conversion: trivial for `strategy: None`; for `strategy: Webhook` (ipam-capi's 4 CRDs) the API server calls the conversion webhook — reads fail transiently if the injector has not yet stamped `caBundle` (bootstrap gap), then self-heal | Succeeds | Healthy (`crdHealth` checks `Established`; conversion-webhook caBundle must be present or reads fail transiently) |
+| Make a field required / narrow a type / drop an enum value | **Silently non-conformant**: stored CRs are neither migrated nor deleted; they sit in etcd violating the new schema. Later read-modify-write or validating clients may reject them | Succeeds (the API server validates the schema *definition*, not existing stored objects) | Healthy — **this hazard is NOT detected**; `crdHealth` only checks `Established`, which stays `True`. Backward-compatibility of the schema is the chart author's responsibility, not something the operator masks or fixes |
+| Remove / un-serve the storage version while CRs are still stored in it | Safe — the bad update never lands | **Fails**: API server rejects with `cannot remove version … listed in status.storedVersions` | Degraded + the API error in `status`; reconcile requeues (continue-on-error, other resources still apply) |
+
+The one case that could destroy data (dropping an in-use storage version) is blocked by the API server and surfaced as `Degraded`, not silently forced. The one case the operator cannot catch (schema narrowing that invalidates stored CRs) is an inherent Kubernetes CRD-versioning hazard the chart author must avoid via a proper conversion strategy. For conversion-webhook CRDs, the update is applied with `caBundle` stripped (leaf-only, unconditional — see above), so the operator never disturbs the injector's caBundle during an update.
+
+**The tools we replace do no better — and Helm does worse.** This is not a regression introduced by direct-apply; neither Helm nor kustomize protects against a schema-narrowing CRD bump either:
+
+- **Helm, CRDs in `crds/`**: Helm **never upgrades an existing CRD** on `helm upgrade` — it installs CRDs only if absent and otherwise skips them ([`pkg/action/install.go`](https://github.com/helm/helm/blob/main/pkg/action/install.go#L209-L219); [official docs: "There is no support at this time for upgrading or deleting CRDs using Helm … Operators … are encouraged to do this manually and with great care"](https://helm.sh/docs/chart_best_practices/custom_resource_definitions/)). This is arguably *worse* than our operator: the schema change is silently **not applied at all**, so the controller can expect a new schema the cluster never received — a latent "time bomb." Our operator, like `kubectl apply`, actually applies the CRD update via SSA.
+- **Helm, CRDs in `templates/`**: applied like any resource (SSA in Helm v4), with **no CR-level validation, migration, or warning** — identical blindness to ours, plus extra hazards (uninstall cascades delete all CRs; cluster-scoped multi-release conflicts).
+- **Kustomize**: a stateless client-side generator with **no cluster or stored-object awareness** — it cannot validate or migrate stored CRs by construction. Its `openapi` field is only for teaching the strategic-merge engine merge keys/patch strategy for custom resources ([KEP-2206](https://github.com/kubernetes/enhancements/tree/master/keps/sig-cli/2206-openapi-features-in-kustomize)), **not** schema validation. Build-time CR validation, if wanted, is an external CI concern (`kubeconform`/`flux-schema`), never kustomize itself.
+
+In every case the mitigation is the same and lives with the chart author, not the delivery tool: **backward-compatible schema evolution plus a conversion webhook** for breaking version changes. Our operator applies CRD updates (unlike Helm `crds/`) but validates stored CRs no more than any other tool can — because only a conversion webhook, authored upstream, can.
 
 ---
 
@@ -1306,25 +1415,41 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx, req) (ctrl.Result, err
 ### 5.4 Shoot client construction
 
 ```go
-func (r *Reconciler) getShootApplier(ctx context.Context, ref RemoteKubeconfigRef) (Applier, error) {
+func (r *Reconciler) getShootApplier(ctx context.Context, ref RemoteAccessRef) (Applier, error) {
     secret := &corev1.Secret{}
     if err := r.Get(ctx, types.NamespacedName{Namespace: r.cr.Namespace, Name: ref.SecretName}, secret); err != nil {
-        return nil, fmt.Errorf("shoot kubeconfig secret not found: %w", err)
+        return nil, fmt.Errorf("shoot access secret not found: %w", err)
     }
-    kubeconfigBytes := secret.Data[ref.Key]
-    config, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigBytes)
-    if err != nil {
-        return nil, err
+    tokenKey, caKey := ref.TokenKey, ref.CAKey
+    if tokenKey == "" {
+        tokenKey = "token"
+    }
+    if caKey == "" {
+        caKey = "bundle.crt"
+    }
+    token, ok := secret.Data[tokenKey]
+    if !ok {
+        return nil, fmt.Errorf("token key %q not found in secret %s", tokenKey, ref.SecretName)
+    }
+    caData, ok := secret.Data[caKey]
+    if !ok {
+        return nil, fmt.Errorf("ca key %q not found in secret %s", caKey, ref.SecretName)
+    }
+    // Build rest.Config directly from the token-requestor Secret — no kubeconfig blob.
+    config := &rest.Config{
+        Host:            ref.Server,
+        BearerToken:     string(token),
+        TLSClientConfig: rest.TLSClientConfig{CAData: caData},
     }
     client, err := client.New(config, client.Options{})
     if err != nil {
         return nil, err
     }
-    return &SSAApplier{Client: client, FieldManager: "dual-deployment-operator"}, nil
+    return &SSAApplier{Client: client, FieldManager: "dual-deployment-operator", Cluster: "remote"}, nil
 }
 ```
 
-The kubeconfig Secret is provisioned by Gardener's token-requestor (existing mechanism). Token rotation updates the Secret contents; operator picks up new tokens on next reconcile (or via a Secret informer trigger).
+The token-requestor Secret (`token` + `bundle.crt`) is provisioned by Gardener's token-requestor (existing mechanism); Gardener injects and rotates both the token and the CA bundle. The operator rebuilds the shoot client each reconcile, so a rotated token/CA is picked up on the next reconcile. `ref.Server` is required — the operator runs in the seed and cannot infer the shoot apiserver address; it is supplied per CR (§3.6).
 
 ### 5.5 Cleanup on deletion
 
@@ -1338,9 +1463,9 @@ func (r *Reconciler) reconcileDelete(ctx, cr) (ctrl.Result, error) {
         _ = hostApplier.Delete(ctx, m.AsManifest())
     }
 
-    // Remote: explicit delete for each, respecting deletionPolicy for CRDs
+    // Remote: explicit delete for each, respecting retentionPolicy for CRDs
     for _, m := range cr.Status.RemoteResources {
-        if m.Kind == "CustomResourceDefinition" && cr.Spec.DeletionPolicy.CRDs == "Retain" {
+        if m.Kind == "CustomResourceDefinition" && cr.Spec.RetentionPolicy.CRDs == "Retain" {
             continue
         }
         _ = shootApplier.Delete(ctx, m.AsManifest())
@@ -1364,7 +1489,7 @@ No dependency on Gardener CRDs (no more ManagedResource emission). Operator is G
 
 **Per-shoot**. One `dual-deployment-operator` Deployment per shoot-cp namespace, watching CRs in its own namespace only.
 
-Deployed via a per-shoot Flux HelmRelease as part of the shoot's control-plane bootstrap (alongside the existing operator deployments). RBAC is namespace-scoped:
+Deployed as part of the shoot's control-plane bootstrap (alongside the existing operator deployments) via the two charts in §9.7 — `dual-deployment-operator` (controller + CRD) then `dual-deployment-operator-remote` (CR instances), through the same per-shoot delivery (Concourse `helm-chart-pipeline` with `cc/kube-secrets` values; Flux HelmRelease where applicable) used for other seed-shoot workloads. RBAC is namespace-scoped:
 
 - Watch: `DualDeploymentOperator` in namespace
 - Read: Secret with kubeconfig in namespace
@@ -1407,8 +1532,9 @@ Eight phases:
 - Implement dual-cluster SSA + drift + health + deletion
 - Write unit + integration tests
 - Write equivalence tests for metal-operator
+- Publish the operator container image to **GHCR** from CI (a `sapcc/go-makefile-maker`-generated GitHub Actions workflow, `GITHUB_TOKEN` auth — the same way `webhook-injector` does it); keppel mirrors ghcr to `ccloud-ghcr-io-mirror`, and chart 1 references the keppel-mirrored path. Generate chart 1 (controller + CRD) referencing that image — see implementation.md Phases 9 and 9.5. The image + chart 1 + chart 2 ship as one release unit; the image publish must exist before any live deploy (Phase 4).
 
-**Success criterion**: Equivalence test passes for metal-operator against a QA shoot's expected output; drift + health + deletion tests pass; two-render pipeline produces disjoint host/remote manifest sets.
+**Success criterion**: Equivalence test passes for metal-operator against a QA shoot's expected output; drift + health + deletion tests pass; two-render pipeline produces disjoint host/remote manifest sets; the operator image builds and publishes from CI and chart 1 runs it with green probes.
 
 ### Phase 2: Restructure metal-operator-remote (~1 week)
 
@@ -1528,7 +1654,7 @@ Before Phase 4 rollout, on a QA shoot:
 Per-shoot rollback:
 
 1. Delete `DualDeploymentOperator` CR
-2. Operator handles cleanup (respecting deletionPolicy for CRDs — default Retain, so shoot CRDs preserved)
+2. Operator handles cleanup (respecting retentionPolicy for CRDs — default Retain, so shoot CRDs preserved)
 3. Redeploy old HelmRelease with today's wrapper chart
 4. State converges within one Flux + injector reconcile cycle
 
@@ -1557,7 +1683,7 @@ To be resolved before Phase 7.
 
 A CRD carrying a conversion webhook (`.spec.conversion.strategy == "Webhook"`) has two seed-local references that must be handled for the virtual (shoot) cluster, both at the path `.spec.conversion.webhook.clientConfig`: the `.service` (which the shoot cannot route to) and the `.caBundle` (which must track the current cert). Both were unhandled in r5/r6.
 
-*caBundle — original problem (r5/r6):* the webhook-injector's only path for stamping caBundle into `.spec.conversion.webhook.clientConfig.caBundle` was its `ManagedResourceReconciler`, which selects Gardener `ManagedResource` objects on the seed by `--managed-resource-label` and stamps caBundle into their embedded CRDs. This design produces **no** `ManagedResource` objects (GRM elimination is a core goal, §2.2.1), so that path never fired — leaving conversion-webhook CRD caBundle (metal-operator) unmanaged, and blocking metal-operator's production migration.
+*caBundle — original problem (r5/r6):* the webhook-injector's only path for stamping caBundle into `.spec.conversion.webhook.clientConfig.caBundle` was its `ManagedResourceReconciler`, which selects Gardener `ManagedResource` objects on the seed by `--managed-resource-label` and stamps caBundle into their embedded CRDs. This design produces **no** `ManagedResource` objects (GRM elimination is a core goal, §2.2.1), so that path never fired — leaving conversion-webhook CRD caBundle (ipam-capi, which has 4 conversion-webhook CRDs) unmanaged, and blocking ipam-capi's production migration.
 
 *caBundle — resolution:* the injector's new **target patch mode** (`--target-label`) stamps caBundle directly onto labeled conversion-webhook CRDs **on the shoot**, with no `ManagedResource` involved (it uses `MergeFrom` on `.spec.conversion.webhook.clientConfig`, patches only `caBundle`, and skips CRDs that don't use webhook conversion). The operator labels its conversion-webhook CRDs with the same `--target-label` it uses for WebhookConfigurations (§3.4.4). This is candidate resolution "B" from the r6 draft, realized upstream — but keyed on the shoot CRD object's label rather than a ConfigMap, and without any operator-side cross-stream transformation.
 
@@ -1578,17 +1704,29 @@ Options:
 
 Deferred to Phase 1.
 
-### 9.4 Kustomize source parameterization for ipam-capi
+### 9.4 Kustomize source parameterization for ipam-capi — RESOLVED (config lives in the CR, templated by the deployment chart)
 
-`spec.source.kustomize` has `url` + `hostPath` + `remotePath`, but no equivalent of Helm's `values` map (kustomize has no Helm-values equivalent — see §3.3). Per-cluster parameterization for kustomize sources must come from elsewhere.
+`spec.source.kustomize` has `url` + `hostPath` + `remotePath`, but no equivalent of Helm's `values` map (kustomize has no Helm-values equivalent — see §3.3). The question was where ipam-capi's per-cluster parameterization comes from under the new design.
 
-Open question for ipam-capi's specific needs: today's `make build-ipam-capi-remote` sets `.controllerManager.manager.image.tag=$(PROVIDER_IPAM_VERSION)` on the generated Helm chart's values. Under the new design (two-render + direct kustomize), this variability must come from somewhere:
+**Verified reality (from `cc/kube-secrets` + the live `rt-qa-de-1` deployment).** Today's `make build-ipam-capi-remote` output is deployed by a Concourse `helm-chart-pipeline` that layers per-cluster Helm values from `cc/kube-secrets` (`values/helm/runtime/…/ipam-capi-remote.yaml`). The **entire** per-cluster surface for ipam-capi is three non-secret values:
 
-- **Option A**: image tag is baked into the kustomize source's `images:` transformer at a pinned ref; different environments use different refs of the kustomize source (via CR's `spec.source.kustomize.url?ref=...`)
-- **Option B**: operator gains a `setImageTag` transformation type (currently listed as a candidate future transformation in §3.4.5); CR carries the tag override
-- **Option C**: add CR-side `spec.source.kustomize.images` and/or `spec.source.kustomize.patches` — kustomize-native overrides that the operator applies to both renders before krusty build
+- `controllerManager.manager.image.tag` — e.g. `v1.0.3` (note: overrides the kustomize base's own `?ref=v1.1.0` pin; the secrets-repo value wins today)
+- `webhookInjector.repository` + `.tag` — the sidecar image
+- `controllerManager.manager.env.kubernetesServiceHost` — the shoot apiserver URL, the only genuinely per-cluster value (e.g. `api.m-qa-de-1.cp.external.rt-qa-de-1.soil-garden.qa-de-1.cloud.sap`)
 
-Deferred to Phase 7. Preference is A if upstream release cadence aligns with kustomize ref bumps, otherwise C (kustomize-native, additive schema).
+The shoot kubeconfig is **not** in these values (it comes from the Gardener token-requestor Secret, per §3.6). No ipam-capi value is Vault-sourced.
+
+**Resolution: per-cluster config is absorbed into the `DualDeploymentOperator` CR, and the CR is itself templated by a Helm deployment chart whose values are overridden per-cluster from `cc/kube-secrets` — the exact delivery model used today.** This moves the parameterization up one layer (the CR-templating chart is Helm, which *does* have values), so the "kustomize has no values map" gap never bites: kustomize only renders the *structure*; the three per-cluster values are applied to the CR by Helm templating and reach the render as CR-side overrides.
+
+How the three values reach the kustomize render (all via the existing transformation menu — no new operator capability strictly required):
+
+- **apiserver host env** → a `patch` (strategic-merge on the manager container's `env`), value templated from the chart.
+- **image tag** → a `patch` (jsonPatch `replace` on the container image), or the deferred `setImageTag` transformation (§3.4.5) if a cleaner typed form is wanted.
+- **injector image** → the sidecar-injection `patch` already planned for ipam-capi.
+
+The previously-listed options A/B/C are subsumed: the values live in the CR (committed in `cc/kube-secrets` as chart values), applied as `patch` transforms (≈ option B/C via the existing `patch`), not baked into per-environment kustomize refs (option A, rejected — it would require a new pinned ref per cluster for a value that legitimately varies per cluster). See §9.7 for the chart structure that templates the CR.
+
+`setImageTag` remains an *optional* future convenience (a typed alias for the image-tag `patch`), not a prerequisite.
 
 ### 9.5 CRD versioning strategy
 
@@ -1604,15 +1742,31 @@ Beyond spec/status changes and periodic re-sync (10min), watch:
 
 Confirm scope during Phase 1.
 
-### 9.7 Operator's own deployment
+### 9.7 Operator's own deployment and CR delivery — RESOLVED (two charts, two repos)
 
-Operator is a Deployment in shoot-cp namespace. Deployed by:
-- Same Flux mechanism as other seed-shoot workloads (per-shoot HelmRelease)
-- No self-management in v1 (avoid chicken-and-egg during upgrades)
+Operator is a Deployment in the shoot-cp namespace. No self-management in v1 (avoid chicken-and-egg during upgrades).
+
+**Chart structure: two charts in two repos, mirroring how the fleet already ships upstream operators (e.g. `ironcore-dev/metal-operator` publishes its own chart to `oci://ghcr.io/ironcore-dev/charts`, and `sapcc/helm-charts`'s `metal-operator-remote` wraps it).**
+
+1. **`dual-deployment-operator`** (the *controller* / **upstream chart**, lives in **this repo** at `chart/`): the operator Deployment, its ServiceAccount, seed-side RBAC, leader-election Role, NetworkPolicy, and the `DualDeploymentOperator` **CRD definition** in the chart's `crds/` directory (Helm installs `crds/` once, before templates, and does not template or upgrade it — the sanctioned home for a CRD). Generated and maintained via the kubebuilder helm plugin, written to the repo-root `chart/` directory via the plugin's `--output-dir` flag (`kubebuilder edit --plugins=helm/v2-alpha --output-dir=.`), versioned with the operator image, and published as an OCI chart (e.g. `oci://keppel.global.cloud.sap/ccloud-helm/dual-deployment-operator`) alongside the operator image — exactly how the upstream operators publish their charts. This repo owns it; it is the operator's self-contained deployment artifact.
+
+2. **`dual-deployment-operator-remote`** (the *wrapper* / CR-instance chart, lives in **`sapcc/helm-charts`** — replaces today's per-operator `<operator>-remote` wrapper charts): declares chart 1 as a Helm **`dependency`** (subchart, pinned by version, pulled from the OCI repo above) so installing the wrapper brings the controller + CRD with it, and its own `templates/` contains one **`DualDeploymentOperator` CR instance** per managed operator (`ipam-capi-remote`, `metal-operator-remote`, …), fully templated from `.Values`. Also carries the per-shoot glue that is a `sapcc`/Gardener concern, not an upstream concern: the `remote-access` token-requestor Secret and the `shoot-rbac-bootstrap` ManagedResource. Per-cluster config (the three ipam-capi values in §9.4, plus each operator's `source`, `transformations`, `remoteNamespace`, `remoteAccess`) is overridden per-cluster from `cc/kube-secrets` (`values/helm/…/dual-deployment-operator-remote.yaml`) via the existing Concourse `helm-chart-pipeline` — the exact GitOps delivery model used today, unchanged.
+
+This is the **upstream-chart + wrapper-chart** pattern the fleet already uses for all five operators: the operator repo owns a self-contained, publishable chart (like `metal-operator`'s), and `sapcc/helm-charts` owns a thin wrapper (like `metal-operator-remote`) that depends on it, adds the sapcc/Gardener-specific resources, and carries the CR instances whose values `cc/kube-secrets` overrides per cluster.
+
+**Why two charts in two repos, not one combined chart:**
+- **Ownership boundary matches the fleet.** Upstream deployment concerns (controller, RBAC, CRD) belong to the operator repo and are reusable by anyone; sapcc/Gardener specifics (token-requestor Secret, shoot RBAC bootstrap, per-cluster CR instances) belong to `sapcc/helm-charts` + `cc/kube-secrets`. This is the same split as `metal-operator` (upstream) vs `metal-operator-remote` (wrapper).
+- **Lifecycle separation.** The controller chart revs with the operator image (pinned as a dependency version in the wrapper); the CR-instance/operand config revs with per-cluster values in `cc/kube-secrets`, independently.
+- **Ordering.** The wrapper's dependency on chart 1 installs the controller + CRD (via `crds/`) before its own `templates/` render the CR instances, so a CR is never applied before its CRD/controller exist.
+- **Community best practice.** Helm puts the CRD *definition* in `crds/` (chart 1) and CR *instances* in `templates/` (chart 2), the sanctioned "separate charts / dependency" arrangement for independent CRD-vs-resource lifecycle.
+
+A single combined chart (crds/ + deployment + templated CR in one chart in one repo) is simpler for a one-off install but is rejected for the fleet: it collapses the upstream/wrapper ownership boundary and couples operand-config revs to controller-chart revs.
+
+Both charts are deployed via the same per-shoot mechanism as other seed-shoot workloads (Concourse `helm-chart-pipeline` with `cc/kube-secrets` values; Flux HelmRelease where applicable). Deployment order per shoot: `dual-deployment-operator` (controller + CRD) first, then `dual-deployment-operator-remote` (CR instances).
 
 ### 9.8 Deletion policy default for CRDs
 
-CRDs on shoot are retained by default (`spec.deletionPolicy.crds: Retain`) to avoid catastrophic data loss on CR delete. Confirm this default is right, or make explicit configuration required.
+CRDs on shoot are retained by default (`spec.retentionPolicy.crds: Retain`) to avoid catastrophic data loss on CR delete. Confirm this default is right, or make explicit configuration required.
 
 ### 9.9 Validating admission webhook for `patch` content
 
@@ -1642,6 +1796,14 @@ A validating admission webhook would parse the patch content against the target 
 - Cert management: cert-manager or a self-signed cert rotated by the operator itself
 
 Track in v2 planning issue.
+
+### 9.10 Non-gating caBundle observability (short-term improvement)
+
+v1 deliberately excludes `caBundle` from per-resource health (§3.6.3): the operator does not own that field (§3.8), so grading its own health on it would be inconsistent and would flap `Progressing` during the normal bootstrap window for a condition the operator cannot fix. WebhookConfigurations report `Healthy` on existence.
+
+The gap this leaves: if the webhook-injector is broken or absent, `caBundle` is never stamped, webhooks silently fail TLS, and nothing in the operator's status reflects it — the operator reports `Healthy` while the webhook is effectively dead.
+
+**Proposed improvement (not v1):** surface caBundle-stamped state as an **informational, non-gating** signal — e.g. a separate CR condition such as `WebhooksCABundleStamped`, or a per-resource status message — that does **not** pull the aggregate `Ready` condition down. This keeps visibility into a stuck webhook without the operator grading a field it explicitly disclaimed. Deferred because it adds status machinery and the injector already exposes its own cert/caBundle observability; revisit if operational experience shows the silent-stuck-webhook case is a real support burden.
 
 ---
 

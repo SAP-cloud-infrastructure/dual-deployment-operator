@@ -74,3 +74,24 @@ func TestHealthStateConstants(t *testing.T) {
 		}
 	}
 }
+
+func TestSpecFieldsRoundTrip(t *testing.T) {
+	s := DualDeploymentOperatorSpec{
+		RemoteAccess:    RemoteAccessRef{SecretName: "kc", Server: "https://api.example:443"},
+		RemoteNamespace: "shoot--x--y",
+		RetentionPolicy: RetentionPolicy{CRDs: "Retain"},
+		ApplyOrder:      "HostFirst",
+	}
+	if s.RetentionPolicy.CRDs != "Retain" {
+		t.Errorf("RetentionPolicy.CRDs = %q, want Retain", s.RetentionPolicy.CRDs)
+	}
+	if s.RemoteAccess.Server != "https://api.example:443" {
+		t.Errorf("RemoteAccess.Server = %q", s.RemoteAccess.Server)
+	}
+	if s.RemoteNamespace != "shoot--x--y" {
+		t.Errorf("RemoteNamespace = %q, want shoot--x--y", s.RemoteNamespace)
+	}
+	if s.ApplyOrder != "HostFirst" {
+		t.Errorf("ApplyOrder = %q, want HostFirst", s.ApplyOrder)
+	}
+}

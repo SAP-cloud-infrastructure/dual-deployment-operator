@@ -27,6 +27,8 @@ import (
 
 	dualdeploymentoperatorv1alpha1 "github.com/SAP-cloud-infrastructure/dual-deployment-operator/api/v1alpha1"
 	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/internal/controller"
+	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/internal/deliver"
+	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/internal/source"
 	webhookv1alpha1 "github.com/SAP-cloud-infrastructure/dual-deployment-operator/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
@@ -180,9 +182,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	recorder := mgr.GetEventRecorderFor("dual-deployment-operator") //nolint:staticcheck,nolintlint // Keep record.EventRecorder until events.EventRecorder migration (tracked as a future-phase item).
 	if err := (&controller.DualDeploymentOperatorReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: recorder,
+		HostApplier: &deliver.SSAApplier{
+			Client:       mgr.GetClient(),
+			FieldManager: controller.FieldManagerName,
+			Cluster:      "host",
+		},
+		// TODO(production-loaders): wire real OCI/HTTP ChartLoader + RootResolver; internal/source ships only test fakes, so live source rendering fails until then.
+		SourceDeps: source.Deps{},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "dualdeploymentoperator")
 		os.Exit(1)

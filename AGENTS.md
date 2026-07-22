@@ -12,6 +12,8 @@ internal/webhook/*             Validation/defaulting (if present)
 internal/manifest/*            Multi-doc YAML parser + origin tagging
 internal/source/*              Helm and kustomize renderers (two-render per reconcile)
 internal/transform/*           Manifest transformations (patch, rewriteWebhookURL, filterKinds)
+internal/deliver/*             Dual-cluster SSA applier (ForceOwnership, per-kind health, owned-by-guarded prune)
+internal/clients/*             Host (in-cluster) and shoot (token+CA from Gardener Secret) client factories
 config/crd/bases/*             Generated CRDs (DO NOT EDIT)
 config/rbac/role.yaml          Generated RBAC (DO NOT EDIT)
 config/samples/*               Example CRs (edit these)
@@ -276,6 +278,8 @@ kubectl apply -f https://raw.githubusercontent.com/<org>/<repo>/<tag>/dist/insta
 kubebuilder edit --plugins=helm/v2-alpha                      # Generates dist/chart/ (default)
 kubebuilder edit --plugins=helm/v2-alpha --output-dir=charts  # Generates charts/chart/
 ```
+
+> **This project uses `--output-dir=.` to place the chart at repo-root `chart/`** (per the design decision in `docs/design.md` §9.7): `kubebuilder edit --plugins=helm/v2-alpha --output-dir=.`
 
 **For development:**
 ```bash

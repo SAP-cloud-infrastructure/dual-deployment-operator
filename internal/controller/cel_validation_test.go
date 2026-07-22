@@ -34,13 +34,13 @@ var _ = Describe("CRD CEL validation", func() {
 	validHelm := func() ddov1alpha1.Source {
 		return ddov1alpha1.Source{Helm: &ddov1alpha1.HelmSource{Repo: "oci://x", Name: "y", Version: "1.0.0"}}
 	}
-	kc := func() ddov1alpha1.RemoteKubeconfigRef {
-		return ddov1alpha1.RemoteKubeconfigRef{SecretName: "kc", Key: "kubeconfig"}
+	ra := func() ddov1alpha1.RemoteAccessRef {
+		return ddov1alpha1.RemoteAccessRef{SecretName: "kc", Server: "https://api.example:6443"}
 	}
 
 	Context("source discriminator", func() {
 		It("rejects when neither source variant is set", func() {
-			err := applyCR("cel-src-neither", ddov1alpha1.DualDeploymentOperatorSpec{Source: ddov1alpha1.Source{}, RemoteKubeconfig: kc()})
+			err := applyCR("cel-src-neither", ddov1alpha1.DualDeploymentOperatorSpec{Source: ddov1alpha1.Source{}, RemoteAccess: ra()})
 			Expect(err).To(HaveOccurred(), "expected rejection when neither source variant set")
 			Expect(err.Error()).To(ContainSubstring("exactly one of source.helm or source.kustomize must be set"))
 		})
@@ -51,21 +51,21 @@ var _ = Describe("CRD CEL validation", func() {
 					Helm:      &ddov1alpha1.HelmSource{Repo: "oci://x", Name: "y", Version: "1.0.0"},
 					Kustomize: &ddov1alpha1.KustomizeSource{URL: "https://g//p?ref=v1", HostPath: "host", RemotePath: "remote"},
 				},
-				RemoteKubeconfig: kc(),
+				RemoteAccess: ra(),
 			})
 			Expect(err).To(HaveOccurred(), "expected rejection when both source variants set")
 			Expect(err.Error()).To(ContainSubstring("exactly one of source.helm or source.kustomize must be set"))
 		})
 
 		It("accepts a valid helm source", func() {
-			err := applyCR("cel-helm-ok", ddov1alpha1.DualDeploymentOperatorSpec{Source: validHelm(), RemoteKubeconfig: kc()})
+			err := applyCR("cel-helm-ok", ddov1alpha1.DualDeploymentOperatorSpec{Source: validHelm(), RemoteAccess: ra()})
 			Expect(err).ToNot(HaveOccurred(), "expected acceptance for valid helm source")
 		})
 
 		It("accepts a valid kustomize source", func() {
 			err := applyCR("cel-kust-ok", ddov1alpha1.DualDeploymentOperatorSpec{
-				Source:           ddov1alpha1.Source{Kustomize: &ddov1alpha1.KustomizeSource{URL: "https://g//p?ref=v1", HostPath: "host", RemotePath: "remote"}},
-				RemoteKubeconfig: kc(),
+				Source:       ddov1alpha1.Source{Kustomize: &ddov1alpha1.KustomizeSource{URL: "https://g//p?ref=v1", HostPath: "host", RemotePath: "remote"}},
+				RemoteAccess: ra(),
 			})
 			Expect(err).ToNot(HaveOccurred(), "expected acceptance for valid kustomize source")
 		})
@@ -74,8 +74,8 @@ var _ = Describe("CRD CEL validation", func() {
 	Context("kustomize source constraints", func() {
 		It("rejects a kustomize url without a pinned ref", func() {
 			err := applyCR("cel-kust-noref", ddov1alpha1.DualDeploymentOperatorSpec{
-				Source:           ddov1alpha1.Source{Kustomize: &ddov1alpha1.KustomizeSource{URL: "https://g//p", HostPath: "host", RemotePath: "remote"}},
-				RemoteKubeconfig: kc(),
+				Source:       ddov1alpha1.Source{Kustomize: &ddov1alpha1.KustomizeSource{URL: "https://g//p", HostPath: "host", RemotePath: "remote"}},
+				RemoteAccess: ra(),
 			})
 			Expect(err).To(HaveOccurred(), "expected rejection when kustomize url lacks ?ref=")
 			Expect(err.Error()).To(ContainSubstring("kustomize url must include a pinned ref= query parameter"))
@@ -83,8 +83,8 @@ var _ = Describe("CRD CEL validation", func() {
 
 		It("rejects a kustomize source missing hostPath", func() {
 			err := applyCR("cel-kust-nohost", ddov1alpha1.DualDeploymentOperatorSpec{
-				Source:           ddov1alpha1.Source{Kustomize: &ddov1alpha1.KustomizeSource{URL: "https://g//p?ref=v1", RemotePath: "remote"}},
-				RemoteKubeconfig: kc(),
+				Source:       ddov1alpha1.Source{Kustomize: &ddov1alpha1.KustomizeSource{URL: "https://g//p?ref=v1", RemotePath: "remote"}},
+				RemoteAccess: ra(),
 			})
 			Expect(err).To(HaveOccurred(), "expected rejection when hostPath missing")
 		})
@@ -98,8 +98,8 @@ var _ = Describe("CRD CEL validation", func() {
 					"source": map[string]any{
 						"kustomize": map[string]any{"url": "https://g//p?ref=v1", "remotePath": "remote"},
 					},
-					"remoteKubeconfig": map[string]any{"secretName": "kc", "key": "kubeconfig"},
-					"remoteNamespace":  "remote-ns",
+					"remoteAccess":    map[string]any{"secretName": "kc", "server": "https://api.example:6443"},
+					"remoteNamespace": "remote-ns",
 				},
 			}}
 			err := k8sClient.Create(ctx, cr)
@@ -110,7 +110,7 @@ var _ = Describe("CRD CEL validation", func() {
 	Context("transformation union", func() {
 		It("rejects an empty transformation entry", func() {
 			err := applyCR("cel-tf-empty", ddov1alpha1.DualDeploymentOperatorSpec{
-				Source: validHelm(), RemoteKubeconfig: kc(),
+				Source: validHelm(), RemoteAccess: ra(),
 				Transformations: []ddov1alpha1.Transformation{{}},
 			})
 			Expect(err).To(HaveOccurred(), "expected rejection for empty transformation entry")
@@ -119,7 +119,7 @@ var _ = Describe("CRD CEL validation", func() {
 
 		It("rejects a transformation entry with two fields set", func() {
 			err := applyCR("cel-tf-two", ddov1alpha1.DualDeploymentOperatorSpec{
-				Source: validHelm(), RemoteKubeconfig: kc(),
+				Source: validHelm(), RemoteAccess: ra(),
 				Transformations: []ddov1alpha1.Transformation{{
 					FilterKinds:       &ddov1alpha1.FilterKindsSpec{Kinds: []string{"Service"}},
 					RewriteWebhookURL: &ddov1alpha1.RewriteWebhookURLSpec{URLPrefix: "https://x:443"},
@@ -134,7 +134,7 @@ var _ = Describe("CRD CEL validation", func() {
 		It("rejects a patch with both strategicMerge and jsonPatch set", func() {
 			raw := apiextensionsv1.JSON{Raw: []byte(`{"metadata":{"labels":{"a":"b"}}}`)}
 			err := applyCR("cel-patch-both", ddov1alpha1.DualDeploymentOperatorSpec{
-				Source: validHelm(), RemoteKubeconfig: kc(),
+				Source: validHelm(), RemoteAccess: ra(),
 				Transformations: []ddov1alpha1.Transformation{{
 					Patch: &ddov1alpha1.PatchSpec{
 						Target:         ddov1alpha1.Selector{Kind: "Deployment"},
@@ -150,7 +150,7 @@ var _ = Describe("CRD CEL validation", func() {
 		It("accepts a strategicMerge-only patch", func() {
 			raw := apiextensionsv1.JSON{Raw: []byte(`{"metadata":{"labels":{"a":"b"}}}`)}
 			err := applyCR("cel-patch-sm-ok", ddov1alpha1.DualDeploymentOperatorSpec{
-				Source: validHelm(), RemoteKubeconfig: kc(),
+				Source: validHelm(), RemoteAccess: ra(),
 				Transformations: []ddov1alpha1.Transformation{{
 					Patch: &ddov1alpha1.PatchSpec{Target: ddov1alpha1.Selector{Kind: "Deployment"}, StrategicMerge: &raw},
 				}},
@@ -160,7 +160,7 @@ var _ = Describe("CRD CEL validation", func() {
 
 		It("rejects a JSON Patch with an invalid op", func() {
 			err := applyCR("cel-jsonpatch-badop", ddov1alpha1.DualDeploymentOperatorSpec{
-				Source: validHelm(), RemoteKubeconfig: kc(),
+				Source: validHelm(), RemoteAccess: ra(),
 				Transformations: []ddov1alpha1.Transformation{{
 					Patch: &ddov1alpha1.PatchSpec{
 						Target:    ddov1alpha1.Selector{Kind: "Deployment"},
@@ -174,21 +174,30 @@ var _ = Describe("CRD CEL validation", func() {
 	})
 
 	Context("defaulting", func() {
-		It("defaults deletionPolicy.crds to Retain", func() {
-			name := "cel-delpol-default"
-			Expect(applyCR(name, ddov1alpha1.DualDeploymentOperatorSpec{Source: validHelm(), RemoteKubeconfig: kc()})).To(Succeed())
+		It("defaults retentionPolicy.crds to Retain", func() {
+			name := "cel-retpol-default"
+			Expect(applyCR(name, ddov1alpha1.DualDeploymentOperatorSpec{Source: validHelm(), RemoteAccess: ra()})).To(Succeed())
 
 			var got ddov1alpha1.DualDeploymentOperator
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: "default"}, &got)).To(Succeed())
-			Expect(got.Spec.DeletionPolicy.CRDs).To(Equal("Retain"), "expected DeletionPolicy.CRDs to default to Retain")
+			Expect(got.Spec.RetentionPolicy.CRDs).To(Equal("Retain"), "expected RetentionPolicy.CRDs to default to Retain")
+		})
+
+		It("defaults applyOrder to RemoteFirst", func() {
+			name := "cel-applyorder-default"
+			Expect(applyCR(name, ddov1alpha1.DualDeploymentOperatorSpec{Source: validHelm(), RemoteAccess: ra()})).To(Succeed())
+
+			var got ddov1alpha1.DualDeploymentOperator
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: "default"}, &got)).To(Succeed())
+			Expect(got.Spec.ApplyOrder).To(Equal("RemoteFirst"), "expected ApplyOrder to default to RemoteFirst")
 		})
 	})
 
 	Context("remoteNamespace", func() {
 		newCR := func(name, remoteNamespace string) *unstructured.Unstructured {
 			spec := map[string]any{
-				"source":           map[string]any{"helm": map[string]any{"repo": "oci://x", "name": "y", "version": "1.0.0"}},
-				"remoteKubeconfig": map[string]any{"secretName": "kc", "key": "kubeconfig"},
+				"source":       map[string]any{"helm": map[string]any{"repo": "oci://x", "name": "y", "version": "1.0.0"}},
+				"remoteAccess": map[string]any{"secretName": "kc", "server": "https://api.example:6443"},
 			}
 			if remoteNamespace != "\x00" {
 				spec["remoteNamespace"] = remoteNamespace
