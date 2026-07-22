@@ -17,7 +17,7 @@ import (
 // OriginAnnotation is the metadata annotation a chart/kustomization author sets
 // on resources their own team wrote. Its presence with value "additions"
 // classifies a manifest as OriginAdditions; absence defaults to the caller's
-// fallback (upstream). It never influences host-vs-remote routing.
+// fallback (upstream). It never influences seed-vs-shoot routing.
 const OriginAnnotation = "dual-deployment-operator.cc.sap/origin"
 
 // Origin classifies who authored a manifest: the upstream chart/kustomization
@@ -33,7 +33,7 @@ const (
 
 // Manifest is a single rendered Kubernetes object plus its origin classification.
 // It carries no target/destination field: destination is implicit from which
-// render (host or remote) produced it.
+// render (seed or shoot) produced it.
 type Manifest struct {
 	Unstructured *unstructured.Unstructured
 	Origin       Origin
