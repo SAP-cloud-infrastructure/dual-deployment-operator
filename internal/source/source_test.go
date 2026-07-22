@@ -36,7 +36,7 @@ func TestFromHelmRequiresChartLoader(t *testing.T) {
 }
 
 func TestFromSelectsKustomize(t *testing.T) {
-	spec := v1alpha1.Source{Kustomize: &v1alpha1.KustomizeSource{URL: "u?ref=x", SeedPath: "host", ShootPath: "remote"}}
+	spec := v1alpha1.Source{Kustomize: &v1alpha1.KustomizeSource{URL: "u?ref=x", SeedPath: "seed", ShootPath: "shoot"}}
 	s, err := From(spec, Deps{RootResolver: fakeRootResolver{}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -47,7 +47,7 @@ func TestFromSelectsKustomize(t *testing.T) {
 }
 
 func TestFromKustomizeRequiresRootResolver(t *testing.T) {
-	spec := v1alpha1.Source{Kustomize: &v1alpha1.KustomizeSource{URL: "u?ref=x", SeedPath: "host", ShootPath: "remote"}}
+	spec := v1alpha1.Source{Kustomize: &v1alpha1.KustomizeSource{URL: "u?ref=x", SeedPath: "seed", ShootPath: "shoot"}}
 	if _, err := From(spec, Deps{}); err == nil {
 		t.Error("From should reject a kustomize source with no RootResolver configured")
 	}

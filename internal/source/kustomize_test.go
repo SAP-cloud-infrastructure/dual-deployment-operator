@@ -16,7 +16,7 @@ import (
 func newKustomize(t *testing.T) Source {
 	t.Helper()
 	s, err := From(v1alpha1.Source{Kustomize: &v1alpha1.KustomizeSource{
-		URL: "ignored?ref=x", SeedPath: "host", ShootPath: "remote",
+		URL: "ignored?ref=x", SeedPath: "seed", ShootPath: "shoot",
 	}}, Deps{RootResolver: fakeRootResolver{baseDir: "testdata/kustomize"}})
 	if err != nil {
 		t.Fatalf("From: %v", err)

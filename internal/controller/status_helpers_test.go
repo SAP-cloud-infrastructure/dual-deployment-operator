@@ -125,50 +125,50 @@ func TestReconcileInvalidSourceWritesNotReady(t *testing.T) {
 func TestComputeConditions(t *testing.T) {
 	cases := []struct {
 		name       string
-		host       []ddov1alpha1.ResourceStatus
-		remote     []ddov1alpha1.ResourceStatus
+		seed       []ddov1alpha1.ResourceStatus
+		shoot      []ddov1alpha1.ResourceStatus
 		wantStatus metav1.ConditionStatus
 		wantReason string
 	}{
 		{
 			name:       "all healthy is Ready",
-			host:       []ddov1alpha1.ResourceStatus{rs(ddov1alpha1.HealthHealthy)},
-			remote:     []ddov1alpha1.ResourceStatus{rs(ddov1alpha1.HealthHealthy)},
+			seed:       []ddov1alpha1.ResourceStatus{rs(ddov1alpha1.HealthHealthy)},
+			shoot:      []ddov1alpha1.ResourceStatus{rs(ddov1alpha1.HealthHealthy)},
 			wantStatus: metav1.ConditionTrue,
 			wantReason: "ReconcileSuccess",
 		},
 		{
 			name:       "empty is Ready",
-			host:       nil,
-			remote:     nil,
+			seed:       nil,
+			shoot:      nil,
 			wantStatus: metav1.ConditionTrue,
 			wantReason: "ReconcileSuccess",
 		},
 		{
-			name:       "degraded on host wins over progressing",
-			host:       []ddov1alpha1.ResourceStatus{rs(ddov1alpha1.HealthDegraded)},
-			remote:     []ddov1alpha1.ResourceStatus{rs(ddov1alpha1.HealthProgressing)},
+			name:       "degraded on seed wins over progressing",
+			seed:       []ddov1alpha1.ResourceStatus{rs(ddov1alpha1.HealthDegraded)},
+			shoot:      []ddov1alpha1.ResourceStatus{rs(ddov1alpha1.HealthProgressing)},
 			wantStatus: metav1.ConditionFalse,
 			wantReason: "ResourcesDegraded",
 		},
 		{
-			name:       "degraded on remote is not Ready",
-			host:       []ddov1alpha1.ResourceStatus{rs(ddov1alpha1.HealthHealthy)},
-			remote:     []ddov1alpha1.ResourceStatus{rs(ddov1alpha1.HealthDegraded)},
+			name:       "degraded on shoot is not Ready",
+			seed:       []ddov1alpha1.ResourceStatus{rs(ddov1alpha1.HealthHealthy)},
+			shoot:      []ddov1alpha1.ResourceStatus{rs(ddov1alpha1.HealthDegraded)},
 			wantStatus: metav1.ConditionFalse,
 			wantReason: "ResourcesDegraded",
 		},
 		{
 			name:       "progressing without degraded reports Progressing",
-			host:       []ddov1alpha1.ResourceStatus{rs(ddov1alpha1.HealthHealthy)},
-			remote:     []ddov1alpha1.ResourceStatus{rs(ddov1alpha1.HealthProgressing)},
+			seed:       []ddov1alpha1.ResourceStatus{rs(ddov1alpha1.HealthHealthy)},
+			shoot:      []ddov1alpha1.ResourceStatus{rs(ddov1alpha1.HealthProgressing)},
 			wantStatus: metav1.ConditionFalse,
 			wantReason: "Progressing",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			conds := computeConditions(tc.host, tc.remote)
+			conds := computeConditions(tc.seed, tc.shoot)
 			if len(conds) != 1 {
 				t.Fatalf("computeConditions returned %d conditions, want 1", len(conds))
 			}

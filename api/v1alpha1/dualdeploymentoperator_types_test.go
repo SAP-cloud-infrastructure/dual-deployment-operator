@@ -30,19 +30,19 @@ func TestHelmSourceRoundTrip(t *testing.T) {
 }
 
 func TestKustomizeSourceRoundTrip(t *testing.T) {
-	in := Source{Kustomize: &KustomizeSource{URL: "https://github.com/x/y//p?ref=v1", SeedPath: "host", ShootPath: "remote"}}
+	in := Source{Kustomize: &KustomizeSource{URL: "https://github.com/x/y//p?ref=v1", SeedPath: "seed", ShootPath: "shoot"}}
 	b, err := json.Marshal(in)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if got := string(b); got != `{"kustomize":{"url":"https://github.com/x/y//p?ref=v1","seedPath":"host","shootPath":"remote"}}` {
+	if got := string(b); got != `{"kustomize":{"url":"https://github.com/x/y//p?ref=v1","seedPath":"seed","shootPath":"shoot"}}` {
 		t.Fatalf("unexpected JSON: %s", got)
 	}
 	var out Source
 	if err := json.Unmarshal(b, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if out.Kustomize == nil || out.Kustomize.SeedPath != "host" {
+	if out.Kustomize == nil || out.Kustomize.SeedPath != "seed" {
 		t.Fatalf("round-trip mismatch: %+v", out)
 	}
 }
