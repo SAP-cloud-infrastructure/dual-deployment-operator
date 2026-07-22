@@ -137,8 +137,8 @@ Not pushed at time of writing — user has not requested push.
 
 Operator repo builds independently of chart restructures. Rough ordering across repos:
 
-1. **Operator repo (this repo)**: Phases 0-7 from `implementation.md`. Culminates in equivalence tests passing against today's chart output for metal-operator.
-2. **Operator deployment chart** (in `sapcc/helm-charts` under `system/dual-deployment-operator/`): Phase 8 from implementation.md.
+1. **Operator repo (this repo)**: Phases 0-9 from `implementation.md` (through Phase 8 equivalence tests, plus Phase 9 **chart 1** — the `dual-deployment-operator` controller+CRD upstream chart, generated via the kubebuilder helm plugin and published as an OCI chart). Culminates in equivalence tests passing against today's chart output for metal-operator.
+2. **Operator wrapper chart** (in `sapcc/helm-charts`): Phase 9 **chart 2** — `system/dual-deployment-operator-remote/`, which depends on chart 1 (pulled from the OCI repo), templates the `DualDeploymentOperator` CR instances, and carries the `remote-access` Secret + `shoot-rbac-bootstrap` ManagedResource. Per-cluster values from `cc/kube-secrets`. Replaces the per-operator `<operator>-remote` wrapper charts.
 3. **webhook-injector**: verify or add SSA field-manager discipline.
 4. **Chart restructures** (in `sapcc/helm-charts`): per `design.md` §4. Done per-operator, first metal-operator (Phase 2 in design's migration plan), then boot/argora/khalkeon, then ipam-capi.
 5. **Per-shoot rollout**: deploy operator + CR to one QA shoot first (Phase 4 of design), then production seeds (Phase 5-7).

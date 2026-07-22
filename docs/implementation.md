@@ -93,9 +93,19 @@ Define in `api/v1alpha1/dualdeploymentoperator_types.go`:
 ```go
 type DualDeploymentOperatorSpec struct {
     Source            Source                    `json:"source"`
-    RemoteKubeconfig  RemoteKubeconfigRef       `json:"remoteKubeconfig"`
+    RemoteAccess      RemoteAccessRef           `json:"remoteAccess"`
+    // RemoteNamespace is the target namespace for the remote (shoot) render and
+    // delivery. Namespaced resources in the remote render that omit an explicit
+    // metadata.namespace are placed here; cluster-scoped resources are unaffected.
+    // The host render/delivery uses the CR's own metadata.namespace.
+    RemoteNamespace   string                    `json:"remoteNamespace"`
     Transformations   []Transformation          `json:"transformations,omitempty"`
-    DeletionPolicy    DeletionPolicy            `json:"deletionPolicy,omitempty"`
+    RetentionPolicy   RetentionPolicy           `json:"retentionPolicy,omitempty"`
+    // ApplyOrder controls which cluster's render is applied first each reconcile.
+    // Deletion and prune run the reverse order. Default: RemoteFirst.
+    // +kubebuilder:validation:Enum=HostFirst;RemoteFirst
+    // +kubebuilder:default=RemoteFirst
+    ApplyOrder        string                    `json:"applyOrder,omitempty"`
 }
 
 // Source is a discriminated union — exactly one of Helm, Kustomize.
@@ -129,9 +139,14 @@ type KustomizeSource struct {
     RemotePath string `json:"remotePath"`
 }
 
-type RemoteKubeconfigRef struct {
+type RemoteAccessRef struct {
+    // SecretName names a Gardener token-requestor Secret (token + bundle.crt) in the CR's namespace.
     SecretName string `json:"secretName"`
-    Key        string `json:"key"`
+    // Server is the shoot API server URL (required; the operator runs in the seed and cannot infer it).
+    Server     string `json:"server"`
+    // TokenKey / CAKey default to Gardener's conventions when empty.
+    TokenKey   string `json:"tokenKey,omitempty"`  // default "token"
+    CAKey      string `json:"caKey,omitempty"`      // default "bundle.crt"
 }
 
 // Transformation is a discriminated union — exactly one field set.
@@ -203,7 +218,7 @@ type Selector struct {
     Origin string `json:"origin,omitempty"`    // "upstream" | "additions"
 }
 
-type DeletionPolicy struct {
+type RetentionPolicy struct {
     CRDs string `json:"crds,omitempty"` // "Retain" (default) | "Delete"
 }
 ```
@@ -242,7 +257,7 @@ const (
 Use CRD OpenAPI validation via kubebuilder annotations:
 
 - `+kubebuilder:validation:MinLength=1` on all string identifiers
-- `+kubebuilder:validation:Enum=Retain;Delete` on `DeletionPolicy.CRDs`
+- `+kubebuilder:validation:Enum=Retain;Delete` on `RetentionPolicy.CRDs`
 - `+kubebuilder:validation:Enum=add;remove;replace;move;copy;test` on `JSONPatchOp.Op`
 - `+kubebuilder:pruning:PreserveUnknownFields` on `PatchSpec.StrategicMerge` and `JSONPatchOp.Value` (arbitrary content allowed inside the object)
 
@@ -376,7 +391,7 @@ func (spec *v1alpha1.HelmSource) modeValues(mode Mode) *apiextensionsv1.JSON {
 ```
 
 **Key concerns**:
-- OCI registry auth for private repos (`keppel.eu-de-1.cloud.sap`) — reuse existing pull secrets
+- OCI registry access — charts are served **anonymously** from `keppel.global.cloud.sap/ccloud-helm/...` (verified); no credentials needed for the current operators. See Phase 7 for the (optional, off-by-default) auth seam.
 - Chart caching to avoid re-pulling on every reconcile AND every render (LRU cache keyed by repo+name+version; both renders in one reconcile share the cached chart)
 - Values merging — mode-specific values override common values, per Helm precedence
 - Post-render origin tagging: manifests carrying `dual-deployment-operator.cc.sap/origin: additions` (set by chart's `_helpers.tpl`) keep that origin; all others get `origin: upstream`
@@ -758,14 +773,31 @@ type SSAApplier struct {
 
 ### Implementation
 
+> **Why strip before apply.** The `dual-deployment-operator.cc.sap/origin` annotation
+> (see [`internal/manifest`](../internal/manifest/manifest.go)) is a chart/kustomization
+> **authorship** signal, consumed once at parse time (`originOf`) to set `Manifest.Origin`
+> and used only in-memory by `patch`/`filterKinds` transformations. It is **not** a
+> routing/destination signal (destination is implicit from which render produced the
+> resource) and has no meaning inside the target cluster. Because the operator applies
+> with server-side apply, any annotation it writes becomes operator-**owned** and sticks
+> across reconciles — so it must be stripped before `Patch`, otherwise every managed
+> workload carries a dangling internal annotation forever. `StripInternalAnnotations` must
+> also drop `metadata.annotations` to `nil` if it becomes empty after removal, to avoid
+> emitting an empty `annotations: {}` on the object.
+
 ```go
-func (a *SSAApplier) Apply(ctx context.Context, m manifest.Manifest) (ResourceStatus, error) {
-    // Strip routing annotations before applying
+func (a *SSAApplier) Apply(ctx context.Context, m manifest.Manifest, ownedBy string) (ResourceStatus, error) {
+    // Strip internal (origin) annotations before applying — they are parse-time
+    // authorship signals, not something that should live in the target cluster.
     m.StripInternalAnnotations()
 
-    err := a.Client.Patch(ctx, m.Unstructured, client.Apply,
-        client.FieldOwner(a.FieldManager),
-        client.ForceOwnership)
+    // Stamp the CR-identity ownership label (key dual-deployment-operator.cc.sap/owned-by).
+    // ownedBy is a fixed-length hash from manifest.OwnedByValue(cr.Namespace, cr.Name) —
+    // NOT a raw "<ns>_<name>" (that can exceed the 63-char label-value limit and is
+    // non-injective). Passed as an ARGUMENT, not a struct field, so the applier stays
+    // stateless and is safely shared across concurrent reconciles. Reused by prune
+    // safety AND the cluster-scoped conflict guard.
+    m.SetOwnedByLabel(ownedBy)
 
     status := ResourceStatus{
         Kind:       m.GetKind(),
@@ -774,6 +806,25 @@ func (a *SSAApplier) Apply(ctx context.Context, m manifest.Manifest) (ResourceSt
         Name:       m.GetName(),
         LastApplied: &metav1.Time{Time: time.Now()},
     }
+
+    // Defensive cluster-scoped conflict guard. ForceOwnership would silently seize a
+    // same-named cluster-scoped object from another CR (single-install-per-seed
+    // violation → last-writer-wins corruption). For cluster-scoped kinds only, GET
+    // first and refuse if the live object is owned by a DIFFERENT CR. Absent,
+    // self-owned, or unlabeled → safe to proceed (unlabeled = adopt). Namespaced
+    // objects skip this — namespace isolation already prevents collision.
+    if manifest.IsClusterScoped(m.GetKind()) {
+        if owner, conflict := a.foreignOwner(ctx, m, ownedBy); conflict {
+            status.Health = HealthDegraded
+            status.Message = fmt.Sprintf("cluster-scoped %s %q already owned by a different CR %q; refusing to overwrite (single-install-per-seed)",
+                m.GetKind(), m.GetName(), owner)
+            return status, fmt.Errorf("%s", status.Message)
+        }
+    }
+
+    err := a.Client.Patch(ctx, m.Unstructured, client.Apply,
+        client.FieldOwner(a.FieldManager),
+        client.ForceOwnership)
     if err != nil {
         status.Health = HealthDegraded
         status.Message = err.Error()
@@ -785,7 +836,21 @@ func (a *SSAApplier) Apply(ctx context.Context, m manifest.Manifest) (ResourceSt
     status.Health = computeHealth(current)
     return status, nil
 }
+
+// foreignOwner GETs the live cluster-scoped object and reports whether it carries an
+// owned-by label naming a CR OTHER than ownedBy. NotFound / no label / our own label =>
+// not a conflict (nil object or unlabeled is safe to adopt).
+func (a *SSAApplier) foreignOwner(ctx context.Context, m manifest.Manifest, ownedBy string) (string, bool) {
+    live, err := a.get(ctx, m)
+    if err != nil || live == nil {
+        return "", false // absent (or unreadable) → let the apply proceed/report
+    }
+    owner := live.GetLabels()["dual-deployment-operator.cc.sap/owned-by"]
+    return owner, owner != "" && owner != ownedBy
+}
 ```
+
+> **`SSAApplier` stays stateless** — it holds only `Client`, `FieldManager`, and `Cluster`; the per-CR ownership value is passed as the `ownedBy` argument to `Apply`, not stored on the struct, so one host/shoot applier instance is safely reused across concurrent reconciles of different CRs. The reconciler derives `ownedBy := manifest.OwnedByValue(cr.Namespace, cr.Name)` once per reconcile and threads it through every `Apply` call. `manifest.IsClusterScoped(kind)` already exists (used by `ApplyNamespace`); reuse it here. The guard costs one extra GET **only** for cluster-scoped kinds.
 
 ### Health computation
 
@@ -798,8 +863,10 @@ func computeHealth(u *unstructured.Unstructured) HealthState {
         return statefulSetHealth(u)
     case "CustomResourceDefinition":
         return crdHealth(u)
-    case "ValidatingWebhookConfiguration", "MutatingWebhookConfiguration":
-        return webhookConfigHealth(u)
+    // ValidatingWebhookConfiguration / MutatingWebhookConfiguration are intentionally
+    // NOT special-cased: the operator does not own caBundle (§3.8), so it must not grade
+    // health on it. They fall through to the default (exists => Healthy). The injector owns
+    // caBundle population and its own observability.
     default:
         return HealthHealthy  // exists = healthy for other kinds
     }
@@ -813,24 +880,9 @@ func deploymentHealth(u *unstructured.Unstructured) HealthState {
     }
     return HealthProgressing
 }
-
-func webhookConfigHealth(u *unstructured.Unstructured) HealthState {
-    webhooks, found, _ := unstructured.NestedSlice(u.Object, "webhooks")
-    if !found || len(webhooks) == 0 {
-        return HealthDegraded
-    }
-    // Check all webhooks have non-empty caBundle
-    for _, wh := range webhooks {
-        whMap := wh.(map[string]interface{})
-        cc, _, _ := unstructured.NestedMap(whMap, "clientConfig")
-        caBundle, _, _ := unstructured.NestedString(cc, "caBundle")
-        if caBundle == "" {
-            return HealthProgressing  // waiting for webhook-injector to patch
-        }
-    }
-    return HealthHealthy
-}
 ```
+
+> **No `webhookConfigHealth`.** The operator does not compute health from a WebhookConfiguration's `caBundle` — it does not own that field (§3.8), so grading health on it would be inconsistent and would flap `Progressing` during the normal bootstrap window for a condition the operator cannot fix. WebhookConfigs (and conversion-webhook CRDs, whose health is `crdHealth`/`Established` only) report `Healthy` on existence. Populating and observing caBundle is the webhook-injector's responsibility. (A future, non-gating "caBundle stamped" signal is a possible enhancement — see design.md Open Questions.)
 
 ### SSA field-manager coexistence with webhook-injector (r7)
 
@@ -846,6 +898,8 @@ func (a *SSAApplier) prepareForApply(m manifest.Manifest) {
     }
 }
 ```
+
+**The strip must be leaf-only and unconditional.** `stripCABundleFromWebhooks` removes **only** the `clientConfig.caBundle` leaf on each `webhooks[]` entry (`unstructured.RemoveNestedField(wh, "clientConfig", "caBundle")`); `stripCABundleFromCRDConversion` removes only `spec.conversion.webhook.clientConfig.caBundle`. Neither ever removes the parent `clientConfig` map (which holds the operator-owned `url`) nor the webhook entry itself. The strip runs on **every** apply, including the first — never conditionally "only if present". Rationale: if the operator applied `caBundle` even once (even `""`), SSA would record `dual-deployment-operator` as its field manager; a later apply omitting it under `ForceOwnership` would then **delete** the injector's caBundle, opening a webhook-outage window until the injector re-patched. A discriminating unit test asserts the operator's `managedFields` entry never contains a `caBundle` path.
 
 Because the operator applies with `caBundle` stripped, SSA does not record `dual-deployment-operator` as the field manager for `caBundle`; the injector's per-webhook strategic-merge patch (and `MergeFrom` on CRD conversion) sets it and keeps it. The operator's periodic re-apply omits `caBundle`, so it never reverts the injector's write; the injector patches only `caBundle`, so it never disturbs operator-owned fields. No caBundle ping-pong, no SSA `force` conflicts on shared fields.
 
@@ -903,57 +957,199 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
         if err != nil { return r.errStatus(ctx, cr, "RemoteTransformFailed", err) }
     }
 
-    // 5. Get clients
+    // 5. Get clients. shootPhase captures the remote availability outcome:
+    //    ready | credsNotReady | clientFailed. Only `ready` means the remote
+    //    render can be attempted.
     hostApplier := r.HostApplier   // preconstructed at startup
     shootApplier, err := r.buildShootApplier(ctx, cr)
-    if err != nil {
-        return r.errStatus(ctx, cr, "ShootClientFailed", err)
+    var shootPhase string
+    switch {
+    case err == nil:
+        shootPhase = "ready"
+    case errors.Is(err, errShootCredentialsNotReady):
+        shootPhase = "credsNotReady" // benign bootstrap wait (Gardener not done)
+    default:
+        shootPhase = "clientFailed"  // missing Secret / bad server / unreachable
     }
 
-    // 6. Apply each render to its target cluster. WebhookConfigurations and
-    //    conversion-webhook CRDs are applied with caBundle stripped (the
-    //    webhook-injector owns that field via its target patch mode).
-    hostStatuses := r.applyAll(ctx, hostApplier, hostManifests)
-    remoteStatuses := r.applyAll(ctx, shootApplier, remoteManifests)
+    // 6. Sort each render by the fixed intra-render kind-priority
+    //    (Namespace -> CRD -> RBAC -> workloads -> webhooks) so the first apply
+    //    never fails on a missing CRD or Namespace.
+    hostManifests = deliver.SortForApply(hostManifests)
+    remoteManifests = deliver.SortForApply(remoteManifests)
 
-    // 7. Update status
+    // 7. Apply per spec.applyOrder, respecting remote-failure severity.
+    //    RemoteFirst gates the host render on remote availability (host depends on
+    //    the remote coming up first); HostFirst never gates host on the remote.
+    //    Three remote outcomes:
+    //      - complete failure (client unbuildable, or 0 of N remote applied)
+    //          RemoteFirst  -> STOP before host; Ready=False RemoteApplyFailed
+    //          HostFirst    -> apply host first; flag RemoteApplyFailed (non-blocking)
+    //      - credentials not ready (benign bootstrap wait)
+    //          RemoteFirst  -> DEFER host too; Ready=False WaitingForShootCredentials
+    //          HostFirst    -> apply host first; flag WaitingForShootCredentials
+    //      - ready -> apply remote, then gate host per applyOrder. Under RemoteFirst
+    //          ANY remote failure (partial ResourcesDegraded or complete
+    //          RemoteApplyFailed) stops before host — the workless shoot's render is
+    //          all structural deps host consumes. Under HostFirst host applies first.
+    //    WebhookConfigs/conversion CRDs are applied with caBundle stripped.
+    remoteFirst := cr.Spec.ApplyOrder != "HostFirst"
+    var hostStatuses, remoteStatuses []v1alpha1.ResourceStatus
+    remoteStatuses = cr.Status.RemoteResources // preserve prior remote status by default
+
+    // Derive the ownership value once; thread it through every apply (the appliers
+    // are stateless/shared, so ownedBy is an argument, never a struct field).
+    ownedBy := manifest.OwnedByValue(cr.Namespace, cr.Name)
+
+    applyHost := func() { hostStatuses = r.applyAll(ctx, hostApplier, hostManifests, ownedBy) }
+
+    switch shootPhase {
+    case "credsNotReady":
+        if !remoteFirst {
+            applyHost() // HostFirst: host does not wait on remote
+        }
+        // RemoteFirst: defer host until credentials populate.
+        r.setCondition(cr, metav1.ConditionFalse, "WaitingForShootCredentials",
+            "shoot token/CA not yet populated by Gardener; remote render deferred")
+        return r.finishNotReady(ctx, cr, hostStatuses, remoteStatuses, 30*time.Second)
+
+    case "clientFailed":
+        if !remoteFirst {
+            applyHost() // HostFirst: host proceeds; remote failure only flagged
+        }
+        // RemoteFirst: stop before host — host must not start without the remote.
+        r.setCondition(cr, metav1.ConditionFalse, "RemoteApplyFailed",
+            fmt.Sprintf("remote render could not be applied: %v", err))
+        return r.finishNotReady(ctx, cr, hostStatuses, remoteStatuses, 0) // requeue w/ backoff via returned err
+    }
+
+    // shootPhase == "ready": apply the remote render, then gate host per applyOrder.
+    if remoteFirst {
+        remoteStatuses = r.applyAll(ctx, shootApplier, remoteManifests, ownedBy)
+        // Under RemoteFirst the shoot is a workless cluster: every remote resource
+        // (CRDs/RBAC/webhooks) is a structural dependency the host consumes. So ANY
+        // remote failure — partial or complete — gates the host render this cycle;
+        // starting host against a missing CRD/RBAC/webhook would crash-loop it.
+        if anyFailed(remoteStatuses) {
+            reason := "ResourcesDegraded" // partial: some applied, some failed
+            msg := "some remote resources failed to apply; host render deferred until remote converges"
+            if allFailed(remoteStatuses) {
+                reason = "RemoteApplyFailed" // complete: 0 of N applied
+                msg = "every resource in the remote render failed to apply"
+            }
+            r.setCondition(cr, metav1.ConditionFalse, reason, msg)
+            return r.finishNotReady(ctx, cr, hostStatuses, remoteStatuses, 0)
+        }
+        applyHost() // full remote success → proceed to host
+    } else {
+        applyHost()
+        remoteStatuses = r.applyAll(ctx, shootApplier, remoteManifests, ownedBy)
+    }
+
+    // 8. Prune orphans (only for renders that were actually applied this cycle).
+    //    Identity key is version-independent (group/kind/namespace/name). Within a
+    //    render, delete in reverse of the fixed intra-render kind priority; across
+    //    renders, prune in the reverse of spec.applyOrder. CRDs skipped under
+    //    retentionPolicy.crds: Retain.
+    if remoteFirst { // reverse of RemoteFirst apply = prune host first, then remote
+        r.prune(ctx, hostApplier, cr.Status.HostResources, hostManifests, cr)
+        r.prune(ctx, shootApplier, cr.Status.RemoteResources, remoteManifests, cr)
+    } else {
+        r.prune(ctx, shootApplier, cr.Status.RemoteResources, remoteManifests, cr)
+        r.prune(ctx, hostApplier, cr.Status.HostResources, hostManifests, cr)
+    }
+
+    // 9. Update status. Recorded applied-set = the render just applied.
     cr.Status.HostResources = hostStatuses
     cr.Status.RemoteResources = remoteStatuses
     cr.Status.Conditions = computeConditions(hostStatuses, remoteStatuses)
     cr.Status.LastReconcile = &metav1.Time{Time: time.Now()}
-
     if err := r.Status().Update(ctx, cr); err != nil {
         return ctrl.Result{}, err
     }
 
-    // Requeue for periodic drift correction
+    // Requeue for periodic drift correction.
     return ctrl.Result{RequeueAfter: 10 * time.Minute}, nil
 }
+
+// finishNotReady writes status (host/remote statuses + the already-set condition)
+// and requeues. A backoff of 0 means "return an error so controller-runtime
+// requeues with exponential backoff" (used for RemoteApplyFailed); a non-zero
+// backoff is a fixed RequeueAfter (used for WaitingForShootCredentials).
+func (r *DualDeploymentOperatorReconciler) finishNotReady(ctx context.Context, cr *v1alpha1.DualDeploymentOperator,
+    host, remote []v1alpha1.ResourceStatus, backoff time.Duration) (ctrl.Result, error) {
+    cr.Status.HostResources = host
+    cr.Status.RemoteResources = remote
+    cr.Status.LastReconcile = &metav1.Time{Time: time.Now()}
+    if e := r.Status().Update(ctx, cr); e != nil {
+        return ctrl.Result{}, e
+    }
+    if backoff == 0 {
+        return ctrl.Result{}, fmt.Errorf("remote render unavailable; requeuing")
+    }
+    return ctrl.Result{RequeueAfter: backoff}, nil
+}
 ```
+
+Helpers used above:
+- `r.setCondition(cr, status, reason, message)` — sets the `Ready` condition via `meta.SetStatusCondition` (does not write; the caller's status update persists it).
+- `anyFailed(statuses)` — reports whether **any** `ResourceStatus` in the slice has `Health=Degraded` — the partial-or-complete remote-failure test used under `RemoteFirst` to gate the host render (the workless shoot's render is entirely structural deps host consumes, so any failure gates host).
+- `allFailed(statuses)` — reports whether **every** `ResourceStatus` in the slice has `Health=Degraded` (i.e. zero of N applied) — distinguishes the "complete remote failure" (`RemoteApplyFailed`) case from partial (`ResourcesDegraded`) when choosing the condition reason.
+- `r.errStatus`, `r.applyAll`, `r.prune`, `computeConditions` — as defined elsewhere in this phase.
 
 **Key differences from a single-render architecture**:
 - Source is rendered twice with mode-specific parameters.
 - No `split` step — each render's output is a coherent set for its target cluster.
 - Transformations apply to each render independently. `filterKinds {kinds: [Service]}` runs on both, dropping Services from whichever render emits them.
 - Only `origin` matters for transformation targeting; there is no `target` on manifests.
+- Cross-render apply order follows `spec.applyOrder` (default `RemoteFirst`); deletion and prune run the reverse. Ordering *within* a render is the fixed built-in kind-priority, not consumer-configurable.
+- Each reconcile prunes orphans (resources that left the render) via applied-set tracking against `status.*Resources`.
 
 ### Shoot client construction
 
 ```go
+// errShootCredentialsNotReady signals that the shoot-access Secret exists but
+// Gardener's token-requestor has not yet populated token/CA (absent or empty).
+// This is a benign bootstrap state, NOT a fatal error: the caller maps it to a
+// WaitingForShootCredentials condition, skips the remote render this cycle, and
+// requeues. Distinct from a missing Secret (a misconfiguration → fatal).
+var errShootCredentialsNotReady = errors.New("shoot credentials not yet populated")
+
 func (r *DualDeploymentOperatorReconciler) buildShootApplier(ctx context.Context, cr *v1alpha1.DualDeploymentOperator) (deliver.Applier, error) {
+    ref := cr.Spec.RemoteAccess
+
     secret := &corev1.Secret{}
-    if err := r.Get(ctx, types.NamespacedName{Namespace: cr.Namespace, Name: cr.Spec.RemoteKubeconfig.SecretName}, secret); err != nil {
-        return nil, fmt.Errorf("failed to get shoot kubeconfig secret: %w", err)
+    if err := r.Get(ctx, types.NamespacedName{Namespace: cr.Namespace, Name: ref.SecretName}, secret); err != nil {
+        // Missing Secret is a misconfiguration (wrong secretName / RBAC gap) → fatal.
+        return nil, fmt.Errorf("failed to get shoot access secret: %w", err)
     }
 
-    kubeconfigBytes, ok := secret.Data[cr.Spec.RemoteKubeconfig.Key]
-    if !ok {
-        return nil, fmt.Errorf("key %q not found in secret", cr.Spec.RemoteKubeconfig.Key)
+    tokenKey, caKey := ref.TokenKey, ref.CAKey
+    if tokenKey == "" {
+        tokenKey = "token"
+    }
+    if caKey == "" {
+        caKey = "bundle.crt"
     }
 
-    config, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigBytes)
-    if err != nil {
-        return nil, err
+    // Readiness gate: token AND CA must be present AND non-empty. Gardener seeds
+    // the Secret with token:"" / bundle.crt:"" and fills them asynchronously, so a
+    // present-but-empty value means "not ready yet", never a usable credential
+    // (an empty token would authenticate as nobody). Treat as not-ready, not fatal.
+    token := secret.Data[tokenKey]
+    caData := secret.Data[caKey]
+    if len(token) == 0 || len(caData) == 0 {
+        return nil, errShootCredentialsNotReady
+    }
+
+    // Build rest.Config directly from the Gardener token-requestor Secret —
+    // token + CA bundle, no kubeconfig blob. spec.remoteAccess.server is required.
+    config := &rest.Config{
+        Host:        ref.Server,
+        BearerToken: string(token),
+        TLSClientConfig: rest.TLSClientConfig{
+            CAData: caData,
+        },
     }
 
     shootClient, err := client.New(config, client.Options{})
@@ -973,33 +1169,209 @@ func (r *DualDeploymentOperatorReconciler) buildShootApplier(ctx context.Context
 
 ```go
 func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, cr *v1alpha1.DualDeploymentOperator) (ctrl.Result, error) {
+    // Teardown runs the REVERSE of spec.applyOrder. Under the default
+    // RemoteFirst, deletion is host-first so the controller stops before its
+    // CRDs are removed; under HostFirst, deletion is remote-first.
     shootApplier, err := r.buildShootApplier(ctx, cr)
     if err != nil {
-        // Shoot may be unreachable during shoot deletion — log and continue with host cleanup
-        r.Log.Info("shoot unreachable during deletion, proceeding with host cleanup only", "error", err)
+        // Shoot unreachable: do NOT remove the finalizer and do NOT assume the
+        // remote resources are gone. "Unreachable" is indistinguishable from
+        // "transiently down" and must not be read as "deleted" — removing the
+        // finalizer here would silently orphan live shoot resources. Surface it
+        // and requeue; the CR stays in Terminating until the shoot returns (then
+        // cleanup completes) or an operator manually removes the finalizer.
+        r.Recorder.Event(cr, corev1.EventTypeWarning, "ShootUnreachable",
+            "Shoot API server unreachable during deletion; retaining finalizer and retrying")
+        meta.SetStatusCondition(&cr.Status.Conditions, metav1.Condition{
+            Type: "Ready", Status: metav1.ConditionFalse, Reason: "ShootUnreachable",
+            Message: fmt.Sprintf("shoot unreachable during deletion: %v", err),
+        })
+        _ = r.Status().Update(ctx, cr)
+        return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
     }
 
-    // Delete remote resources
-    if shootApplier != nil {
-        for _, rs := range cr.Status.RemoteResources {
-            if rs.Kind == "CustomResourceDefinition" && cr.Spec.DeletionPolicy.CRDs == "Retain" {
-                continue
-            }
-            _ = shootApplier.Delete(ctx, rs.AsManifest())
+    // Remote cleanup (reverse-delete order), respecting retentionPolicy for CRDs.
+    orphans := deliver.SortStatusForDelete(cr.Status.RemoteResources)
+    var errs []error
+    for _, rs := range orphans {
+        if rs.Kind == "CustomResourceDefinition" && cr.Spec.RetentionPolicy.CRDs == "Retain" {
+            continue
+        }
+        if e := shootApplier.Delete(ctx, rs.AsManifest()); e != nil {
+            errs = append(errs, e) // Delete ignores NotFound, so these are real failures
         }
     }
 
-    // Delete host resources via ownerReferences cascade (kubelet GC)
-    // Explicit delete not strictly necessary; ownerReferences handle it
+    // Host resources are removed via ownerReferences cascade (kubelet GC);
+    // explicit host deletion is not strictly necessary.
+
+    if err := kerrors.NewAggregate(errs); err != nil {
+        // Reachable shoot but some deletes failed: keep the finalizer so orphans
+        // are not leaked; requeue and retry.
+        return ctrl.Result{}, err
+    }
 
     controllerutil.RemoveFinalizer(cr, FinalizerName)
     return ctrl.Result{}, r.Update(ctx, cr)
 }
 ```
 
+**Finalizer safety**: the finalizer is removed **only** when remote cleanup is confirmed complete (every delete succeeded or returned NotFound). Two failure modes both keep the finalizer and requeue rather than leak:
+
+- **Reachable shoot, some deletes failed** → keep finalizer, requeue, retry.
+- **Unreachable shoot** → keep finalizer, set a `ShootUnreachable` condition + Event, requeue. The operator does **not** treat "unreachable" as "gone", because that guess — when the shoot is only transiently down — would silently orphan live resources with no finalizer left to clean them. The accepted cost is that a CR whose shoot is genuinely gone stays in `Terminating` until an operator manually removes the finalizer; this is surfaced (condition + Event), not auto-resolved.
+
 ---
 
-## Phase 7: Equivalence tests (~1 week)
+## Phase 7: Production source loaders (~3-4 days)
+
+Phase 2 built the Helm and kustomize renderers against the injected `ChartLoader` / `RootResolver` seams ([`internal/source/source.go`](../internal/source/source.go)) but shipped **only test fakes** (a `ChartLoader` that loads a chart from a local directory; a `RootResolver` that resolves to a local overlay directory). Phase 6 wired the reconciler with a **mocked source**. Neither pulls a real chart or fetches a real overlay, so `cmd/main.go` still carries a `TODO(production-loaders)` and live rendering fails until this phase lands.
+
+This phase implements the two production fetchers so the operator renders real sources end-to-end. It is a prerequisite for Phase 8 (equivalence tests compare the operator's render of the **real** chart against today's chart output) and Phase 9 (a live in-cluster run).
+
+> **Online testing is accepted from this phase on.** Phase 2's offline-only constraint (fakes, no network) applied to the renderer logic. The production loaders cannot be meaningfully verified without real I/O, so their tests **may** hit the network: pull real (small) charts and fetch real pinned git overlays. Gate anything slow or credential-dependent behind an env var (e.g. `DDO_ONLINE_TESTS=1`) or a build tag so `make test` on a laptop without registry/git credentials still passes, while CI runs the online tier.
+
+### Production `ChartLoader` (Helm — OCI + HTTP)
+
+```go
+package source
+
+// helmLoader is the production ChartLoader. It pulls from OCI (oci://) and
+// classic HTTP Helm repositories and caches pulled charts by (repo, name, version).
+// keppel.global.cloud.sap serves the operators' charts anonymously (verified), so
+// the default path needs no credentials; the optional creds resolver exists only
+// for a future private repo that requires auth.
+type helmLoader struct {
+    settings *cli.EnvSettings
+    cache    *chartCache        // LRU keyed by repo+name+version
+    creds    RegistryCredentials // OPTIONAL — nil/no-op for anonymous keppel; only for a future authed repo
+}
+
+func (l *helmLoader) Load(ctx context.Context, repo, name, version string) (*chart.Chart, error) {
+    key := repo + "|" + name + "|" + version
+    if c, ok := l.cache.get(key); ok {
+        return c, nil
+    }
+
+    // OCI vs HTTP dispatch on the repo scheme.
+    var chartPath string
+    switch {
+    case strings.HasPrefix(repo, "oci://"):
+        // Anonymous by default; registry client only logs in if creds resolve a
+        // non-empty auth for this host (future authed repo).
+        regClient, err := l.newRegistryClient(ctx, repo)
+        if err != nil { return nil, err }
+        pull := action.NewPullWithOpts(action.WithConfig(l.actionConfig(regClient)))
+        pull.Settings = l.settings
+        pull.Version = version
+        pull.DestDir = tmpDir
+        // ref = oci://<repo>/<name> ; pull writes <name>-<version>.tgz to DestDir
+        // ...
+    default: // classic HTTP repo index
+        pull := action.NewPullWithOpts(action.WithConfig(l.actionConfig(nil)))
+        pull.RepoURL = repo
+        pull.Username, pull.Password = l.creds.BasicAuth(repo) // empty for anonymous
+        pull.Version = version
+        pull.DestDir = tmpDir
+        // ...
+    }
+
+    ch, err := loader.Load(chartPath)
+    if err != nil { return nil, err }
+    l.cache.put(key, ch)
+    return ch, nil
+}
+```
+
+**Authentication (keppel) — VERIFIED ANONYMOUS, no credentials needed for v1.** The operators' charts live in keppel at `oci://keppel.global.cloud.sap/ccloud-helm/<operator>-remote` (e.g. `ccloud-helm/metal-operator-remote`). Confirmed against the live registry from a laptop with **no auth configured**:
+
+- keppel's token endpoint (`/keppel/v1/auth`) issues an **anonymous** bearer token for `repository:ccloud-helm/<repo>:pull` — the token payload carries `"kea":{"anon":true}`.
+- With that token, `GET /v2/ccloud-helm/metal-operator-remote/tags/list` returns the real tag list and the manifest reports the Helm media types (`application/vnd.cncf.helm.config.v1+json` + `.../chart.content.v1.tar+gzip`).
+- A plain `helm pull oci://keppel.global.cloud.sap/ccloud-helm/metal-operator-remote --version 0.6.2` with no login succeeds and writes `metal-operator-remote-0.6.2.tgz`.
+
+So the production `ChartLoader` needs **no credential material** for the current five operators. The `RegistryCredentials` resolver is retained as an **optional, off-by-default** seam: it returns empty auth for keppel (anonymous), and only supplies real auth if a future source points at a private repo that challenges. Never assume auth is required; never log a token; never write auth into the cache key.
+
+> **Correction to an earlier draft of this doc.** A previous version claimed the loader would "reuse the operator's in-cluster imagePullSecret" for `keppel.eu-de-1.cloud.sap`. That was wrong on three counts, verified against `rt-qa-de-1` (`shoot--cp--m-qa-de-1`): (1) no `imagePullSecrets` are set on the `-remote` operator Deployments or their ServiceAccounts, and no `dockerconfigjson`/`dockercfg` Secret exists in that namespace — image pulls authenticate at the **node/kubelet** level, which is not reachable in-process for a Helm chart pull anyway; (2) the registry host is `keppel.global.cloud.sap` (mirror/chart paths like `ccloud-ghcr-io-mirror/...` and `ccloud-helm/...`), not `keppel.eu-de-1.cloud.sap`; (3) chart pulls are anonymous, so no secret is needed at all. The imagePullSecret-reuse path is removed.
+
+Use `helm.sh/helm/v3/pkg/registry` (`registry.NewClient`; call `registryClient.Login` **only** when creds resolve non-empty) for OCI, and `action.Pull`'s `Username`/`Password`/`CertFile` fields for HTTP.
+
+**Caching.** LRU keyed by `repo|name|version`, shared across both renders of a reconcile (host + remote pull the same chart once) and across reconciles until evicted. Charts are immutable at a pinned version, so cache-by-version is safe; a version bump is a new key. Bound the cache (size + optional TTL) so long-lived operators don't grow unbounded.
+
+### Production `RootResolver` (kustomize — git, pinned ref)
+
+```go
+package source
+
+// gitResolver is the production RootResolver. It fetches a ?ref=-pinned remote
+// (git) kustomize root into a temp dir and returns the path to the mode subpath.
+type gitResolver struct {
+    creds GitCredentials // resolves auth per git host (token / ssh / basic)
+}
+
+func (r *gitResolver) Resolve(ctx context.Context, url, subPath string) (string, func(), error) {
+    // url is validated at admission to contain a pinned ?ref=<sha|tag> (KustomizeSource CEL rule).
+    // Fetch the repo at that ref into a temp dir; return <tmp>/<subPath> + a cleanup func.
+    dir, err := os.MkdirTemp("", "ddo-kustomize-")
+    if err != nil { return "", nil, err }
+    cleanup := func() { _ = os.RemoveAll(dir) }
+
+    if err := r.fetch(ctx, url, dir); err != nil { // clone --depth 1, checkout ref
+        cleanup()
+        return "", nil, err
+    }
+    return filepath.Join(dir, subPath), cleanup, nil
+}
+```
+
+**Authentication — VERIFIED ANONYMOUS, no credentials needed for v1.** The ipam-capi kustomize source and every remote base it pulls are **public**. Verified anonymously (no git auth configured):
+
+- **Root source**: `github.com/sapcc/helm-charts//system/kustomize/ipam-capi-remote/...` — public (`git ls-remote` and the GitHub contents API both succeed unauthenticated).
+- **Transitive remote bases** — this is the important part: the kustomization does **not** vendor upstream manifests, it references them by URL, so the resolver/krusty must fetch these too:
+  - `github.com/kubernetes-sigs/cluster-api-ipam-provider-in-cluster//config/{manager,webhook,crd,rbac}?ref=v1.1.0` — public (all HTTP 200 at the pinned tag).
+  - `raw.githubusercontent.com/kubernetes-sigs/cluster-api/v1.13.4/config/crd/bases/*.yaml` — public (HTTP 200).
+
+So the production `RootResolver` needs **no credential material** for the current five operators. Retain a `GitCredentials` resolver only as an **optional, off-by-default** seam for a hypothetical future source on a private host:
+
+1. **Anonymous** — public repos (the current, verified path; no credentials).
+2. **Token from a mounted Secret** (future) — a PAT / GitHub App token, injected into the clone URL or an `Authorization` header.
+3. **SSH deploy key** (future) — for hosts that prefer SSH.
+
+Do not assume auth is required; the resolver returns empty auth for public github. Never log a token.
+
+> **The real open item for kustomize is egress, not auth.** Because the kustomization fetches transitive bases from `github.com` and `raw.githubusercontent.com` at build time, the operator Pod (running in the seed) must have **egress to github.com** — not just to `sapcc/helm-charts` but to the upstream `kubernetes-sigs` repos the source references. This is `design.md` §9 open question 1 (seed→kustomize-source egress), and it is a **network-reachability** prerequisite, distinct from credentials. Verify seed egress to github.com/raw.githubusercontent.com before the ipam-capi migration; if blocked, the resolver would need an in-landscape git mirror (which could reintroduce an auth question against that mirror).
+
+**krusty fetches transitive bases itself — the resolver only supplies the ROOT.** The renderer already (Phase 2) calls `krusty.MakeKustomizer(...).Run(fSys, root)` with `LoadRestrictionsNone`. Critically, the ipam-capi kustomization references upstream manifests by **remote URL** (not vendored): its `manager/`, `webhook/`, `managedresources/` kustomizations pull `github.com/kubernetes-sigs/cluster-api-ipam-provider-in-cluster//config/*?ref=v1.1.0` and `raw.githubusercontent.com/kubernetes-sigs/cluster-api/.../*.yaml`. **krusty resolves those remote bases during the build** — the `RootResolver` does NOT need to (and should not try to) pre-fetch them; it only needs to make the pinned **root** available as a local path. So the seam stays: resolver fetches the root, krusty (in the renderer) fetches the transitive remote bases. `LoadRestrictionsNone` is what permits krusty to follow those remote references. The interface seam from Phase 2 is unchanged.
+
+**Library choice.** For the **root** fetch, prefer a pure-Go fetcher (`go-git` or `hashicorp/go-getter` with the git detector) over shelling to `git`, so the operator image needs no `git` binary and any future credentials never touch a subprocess argv. It MUST honor the pinned `?ref=` (checkout of the exact sha/tag) and MUST fail closed if the ref cannot be resolved (never silently build `HEAD`). Note that krusty's own remote-base fetching (for the transitive `kubernetes-sigs` URLs above) is internal to `krusty.Run` and uses its own getter — the operator does not control that transport, which is another reason **seed→github.com egress** (not auth) is the gating concern; see the egress note above.
+
+### Wiring
+
+Replace the `TODO(production-loaders)` in [`cmd/main.go`](../cmd/main.go): construct `helmLoader` and `gitResolver` and pass them via `source.Deps{ChartLoader: ..., RootResolver: ...}` to the reconciler. Both default to **anonymous** (no credential wiring needed for the current five operators); pass a non-nil `RegistryCredentials`/`GitCredentials` resolver only if/when a source targets a repo that challenges. The reconciler's `source.From(cr.Spec.Source, deps)` call (Phase 6) is unchanged.
+
+### Tests (online tier)
+
+- **Helm OCI pull, anonymous (primary)** — `Load` a real small chart from `oci://keppel.global.cloud.sap/ccloud-helm/<op>-remote` at a pinned version with **no credentials** and assert the returned `*chart.Chart` parses. This is the real path for all five operators. Runs under `DDO_ONLINE_TESTS=1` (hits keppel).
+- **Helm OCI pull, authenticated (optional/future)** — push a tiny fixture chart to a throwaway OCI registry with a credential, then `Load` it with creds and assert. Exercises the creds seam even though no current operator needs it.
+- **Auth failure** — a repo that challenges with wrong/absent credential returns a clear, non-leaking error (assert the error does NOT contain the token).
+- **kustomize git resolve** — fetch a pinned-ref overlay from the real public source (`https://github.com/sapcc/helm-charts//system/kustomize/ipam-capi-remote/?ref=<tag>`) and assert the resolved path builds the expected overlay; assert a bad `?ref=` fails closed. A private-repo + token variant covers the creds seam.
+- **Cache** — two `Load` calls for the same `repo|name|version` pull once (assert one network hit); a different version pulls again.
+- **Offline still green** — `make test` without `DDO_ONLINE_TESTS` skips the network tests; the existing Phase 2 fake-based renderer tests continue to pass unchanged.
+
+**Success criterion**: the operator pulls a real (small) chart **anonymously** from `oci://keppel.global.cloud.sap/ccloud-helm/...` and fetches a real pinned-ref kustomize overlay from the public `github.com/sapcc/helm-charts` source, rendering both to manifests; the optional credential seam is exercised by a self-hosted authed-registry test but is off by default; the cache pulls once per version; `make test` stays green offline while the online tier passes in CI.
+
+### Follow-up: migrate `GetEventRecorderFor` → `GetEventRecorder`
+
+While wiring the production loaders in [`cmd/main.go`](../cmd/main.go), also migrate the event recorder off the deprecated manager method. `mgr.GetEventRecorderFor(...)` is deprecated (staticcheck `SA1019`: old events API) and currently carries a `//nolint:staticcheck` in `cmd/main.go`. The non-deprecated `mgr.GetEventRecorder()` returns a differently-typed `events.EventRecorder` (method `Eventf`), not the `record.EventRecorder` (method `Event`) the reconciler field expects, so this is a field-type + call-site change, not a drop-in rename. Scope:
+
+- Change the reconciler's `Recorder` field type (or introduce an adapter) to the events API recorder, updating every `Recorder.Event(...)` call site accordingly.
+- Update the controller unit tests' fake recorder to the events-API equivalent.
+- Remove the `//nolint:staticcheck` from the `recorder :=` line in `cmd/main.go` and confirm lint is clean without it.
+
+**Success criterion**: `cmd/main.go` no longer calls `GetEventRecorderFor` and carries no `//nolint:staticcheck` for it; `golangci-lint run` is clean; events are still emitted on reconcile (verified by the controller suite).
+
+---
+
+## Phase 8: Equivalence tests (~1 week)
 
 Fixtures directory:
 
@@ -1051,36 +1423,119 @@ Load bearing test. Failure means the operator produces different output than tod
 
 ---
 
-## Phase 8: Deployment chart (~2 days)
+## Phase 9: Deployment charts (~2 days)
 
-The operator itself needs a chart to deploy per-shoot. In `sapcc/helm-charts`:
+The operator ships as **two charts in two repos** (design.md §9.7), following the fleet's upstream-chart + wrapper-chart pattern (`ironcore-dev/metal-operator` publishes its own chart; `sapcc/helm-charts`'s `metal-operator-remote` wraps it):
+
+**Chart 1 — `dual-deployment-operator` (the upstream controller chart, lives in THIS repo):**
+
+Generated/maintained via the kubebuilder helm plugin, written to the repo-root `chart/` directory via the plugin's `--output-dir` flag (`kubebuilder edit --plugins=helm/v2-alpha --output-dir=.`), published as an OCI chart (e.g. `oci://keppel.global.cloud.sap/ccloud-helm/dual-deployment-operator`) versioned with the operator image.
 
 ```
-system/dual-deployment-operator/
+chart/                                 # in THIS repo (dual-deployment-operator), repo root
 ├── Chart.yaml
 ├── values.yaml
+├── crds/
+│   └── dualdeploymentoperator.yaml   # CRD definition (installed once, not templated)
 └── templates/
-    ├── deployment.yaml
+    ├── deployment.yaml            # --leader-elect=true
     ├── serviceaccount.yaml
-    ├── clusterrole.yaml         # via subject-access-reviewer for CR watches
-    ├── role.yaml                # in-namespace resource applies
-    ├── rolebinding.yaml
+    ├── clusterrole.yaml           # broad host applier grant + CR watch (see below)
+    ├── clusterrolebinding.yaml
+    ├── leader-election-role.yaml  # Lease in own namespace (leader election)
     └── networkpolicy.yaml
 ```
 
-Deployed via a per-shoot Flux HelmRelease alongside the operators it manages.
+> **`chart/` is generated from `config/*`, not hand-written.** The kubebuilder kustomize scaffold under `config/` (CRD in `config/crd/`, RBAC in `config/rbac/`, manager in `config/manager/`, etc. — present since Phase 0, used by `make deploy`/`make run`/envtest) is the **source**; the helm plugin reads it and emits `chart/`. Do not author `chart/` by hand — run the plugin and re-run it (`--force`, same `--output-dir=.`) after changing markers/manifests, then commit the regenerated chart. `config/*` and `chart/` are complementary (dev/CI kustomize vs. published Helm chart), not competing.
 
-RBAC scope:
-- Watch `DualDeploymentOperator` CRs in own namespace
-- Get/List Secrets in own namespace (for shoot kubeconfig)
-- Apply arbitrary resources in own namespace (host resources — Deployment, Service, etc.)
-- Apply arbitrary resources in shoot (remote — via kubeconfig, so RBAC is enforced by shoot)
+**Chart 2 — `system/dual-deployment-operator-remote` (the wrapper + CR instances, lives in `sapcc/helm-charts`, replaces the per-operator `<operator>-remote` wrapper charts):**
 
-The operator's cluster-side RBAC in seed should be minimal — only what it needs to apply to its own namespace + read Secrets.
+```
+system/dual-deployment-operator-remote/          # in sapcc/helm-charts
+├── Chart.yaml                    # dependencies: [{name: dual-deployment-operator, repo: oci://…/ccloud-helm, version: <pinned>}]
+├── values.yaml                   # defaults for source/transformations per managed operator
+└── templates/
+    ├── cr.yaml                   # one DualDeploymentOperator CR per managed operator, templated from .Values
+    ├── remote-access.yaml        # Gardener token-requestor Secret (token + bundle.crt) — sapcc/Gardener glue
+    └── shoot-rbac-bootstrap.yaml # minimal ManagedResource: shoot SA + apply-scoped ClusterRole/Binding — sapcc/Gardener glue
+```
+
+Chart 2 declares chart 1 as a Helm **`dependency`** (pinned by version, pulled from the OCI repo), so installing the wrapper brings the controller + CRD with it. `cr.yaml` templates each managed operator's CR (`ipam-capi-remote`, `metal-operator-remote`, …) with per-cluster values overridden from `cc/kube-secrets` (`values/helm/…/dual-deployment-operator-remote.yaml`) via the existing Concourse `helm-chart-pipeline` — the same GitOps delivery used today. Per-cluster config (e.g. ipam-capi's image tag + `kubernetesServiceHost`, design.md §9.4) enters the CR as `spec.source.helm.values` (Helm sources) or `patch` transforms (kustomize sources) templated from chart values. The shoot kubeconfig stays out of the CR (it is the `remote-access` token-requestor Secret).
+
+The sapcc/Gardener-specific resources (`remote-access` Secret, `shoot-rbac-bootstrap` ManagedResource) live in chart 2, not chart 1 — chart 1 stays a clean, reusable upstream artifact (controller + RBAC + CRD only), exactly like `metal-operator`'s own chart carries no `-remote` glue.
+
+Because chart 2 depends on chart 1, the controller + CRD (via chart 1's `crds/`) install before chart 2's `templates/` render the CR instances — a CR is never applied before its CRD/controller exist.
+
+**Seed-side (host) RBAC scope** (the operator's own ServiceAccount on the seed, provisioned by **chart 1**) — a **broad applier grant provisioned by the controller chart**, not a namespace-only Role. The host render is **not** namespace-local: the candidate wrapper charts emit host-side `ClusterRole`/`ClusterRoleBinding` (metal-operator, ipam-capi both do), and the operator's own `patch`/rename transforms can produce `ClusterRole`s. So the host applier must be able to create cluster-scoped host-render kinds too, and — where the host render creates RBAC — must itself hold those powers (privilege-escalation prevention). This aligns to gardener-resource-manager (broad `cluster-admin`-equivalent target ClusterRole) and Flux (appliers bound to `cluster-admin`, tenants scoped via per-object SA impersonation, never by narrowing the applier). The grant covers:
+- Watch `DualDeploymentOperator` CRs (cluster-wide read of the CR type)
+- Get/List Secrets (for the shoot token-requestor Secret referenced by `spec.remoteAccess`)
+- Create/update/delete/get/list/watch the host-render kinds — **namespaced and cluster-scoped** (Deployment, Service, Ingress, NetworkPolicy, ConfigMap, ServiceAccount, Role/RoleBinding, ClusterRole/ClusterRoleBinding, …); set ownerReferences to the CR so host resources GC on CR deletion. Where the host render creates RBAC, this grant holds the powers it confers.
+- Create/get/update Leases in own namespace (leader election)
+
+Scope the grant no broader than the host render needs, but do not force it namespace-only — the candidate charts prove cluster-scoped host resources exist.
+
+**RBAC differs by *provisioning*, not breadth — both appliers are broad:**
+- **Host (seed):** broad applier grant (above), provisioned by **this deployment chart**.
+- **Remote (shoot):** a broad cluster-scoped `ClusterRole` (CRDs, ClusterRoles/Bindings, Roles/Bindings, ServiceAccounts, Validating/Mutating WebhookConfigurations, + additions) carrying the privilege-escalation set, seeded by the `shoot-rbac-bootstrap.yaml` ManagedResource (GRM-applied) — resolving the SA-can't-grant-itself-RBAC chicken-and-egg. See the shoot RBAC bootstrap section below and design.md §3.6.7.
+
+**Single-install-per-seed constraint (host cluster-scoped names are seed-global).** The host render can contain cluster-scoped objects (`ClusterRole`/`ClusterRoleBinding`) whose names are **seed-global** — the operator applies them under their rendered upstream names and does **not** per-namespace-qualify them (upstream `roleRef`/subject references assume the fixed names). So at most **one** operator-managed install of a given operator may run per seed: two CRs on one seed emitting the same-named cluster-scoped object would fight over SSA field ownership and have ambiguous prune/GC (a cluster-scoped object cannot be owner-referenced by a namespaced CR). This matches current production — on `rt-qa-de-1`/`rt-eu-de-1` the `-remote` operators run in only the `m-<region>` workload shoot-cp namespace, and the host-side ClusterRole/Binding carry static seed-global names with a single `{{ .Release.Namespace }}` subject. It is an install-time contract (documented, not runtime-validated in v1); a per-name uniquifier or admission guard is a possible future enhancement. See design.md §3.6.7.
+
+**Leader election (required).** Run with `--leader-elect=true` so at most one instance is active cluster-wide — required even at `replicas: 1` because a rolling update transiently runs two pods. Set `LeaderElectionReleaseOnCancel: true` so the outgoing leader releases the lease on graceful shutdown (near-instant failover instead of a ~15 s `LeaseDuration` wait). `replicas: 1` is the recommended default for this low-load per-shoot operator (matches cert-manager's default; `replicas: 2` is an optional HA upgrade — active-passive failover, not horizontal scale). See design.md §3.6.6.
+
+**`cmd/main.go` production readiness (verify, don't build).** The kubebuilder scaffold already wires the manager's metrics server (`Metrics.BindAddress`, `--metrics-bind-address`, default `:8443` bound behind auth), the health-probe server (`HealthProbeBindAddress`, `--health-probe-bind-address` `:8081`), the `healthz`/`readyz` checks (`mgr.AddHealthzCheck`/`AddReadyzCheck`, `healthz.Ping`), and leader election. This phase's job is to **confirm they stay wired and are surfaced in chart 1**, not to add them:
+- Uncomment `LeaderElectionReleaseOnCancel: true` in `cmd/main.go` (design.md §3.6.6).
+- Ensure chart 1's `deployment.yaml` sets the container's `livenessProbe` (`GET /healthz` on the probe port) and `readinessProbe` (`GET /readyz`), passes `--leader-elect=true` and `--health-probe-bind-address`/`--metrics-bind-address`, and exposes the metrics port (the kubebuilder helm plugin scaffolds these from `config/`; verify they survived and point at the right ports).
+- Chart 1 already includes the metrics `ServiceMonitor`/`metrics-reader` scaffolding via `config/prometheus/` + `config/rbac/`; keep or drop per whether the seed scrapes it, but do not silently lose the probes. A Deployment without probes is the gap this note closes.
+
+**Shoot RBAC bootstrap (install-time prerequisite — the operator cannot self-bootstrap).** The operator applies CRDs/RBAC/ServiceAccounts/WebhookConfigurations to the shoot **as the ServiceAccount its `spec.remoteAccess` token-requestor Secret is minted for**. That SA cannot create those resources unless it already holds the rights, and Kubernetes privilege-escalation prevention forbids an applier from creating a ClusterRole granting powers it does not already hold. Therefore a **minimal, static** Gardener `ManagedResource` — applied by the privileged gardener-resource-manager (GRM, effectively cluster-admin on the shoot) — must seed, before the operator runs:
+- the shoot ServiceAccount the operator authenticates as, and
+- a ClusterRole + ClusterRoleBinding granting that SA create/update/delete on the kinds the operator delivers (`customresourcedefinitions`, `clusterroles`, `clusterrolebindings`, `roles`, `rolebindings`, `serviceaccounts`, `validatingwebhookconfigurations`, `mutatingwebhookconfigurations`, plus the operator's additions).
+
+This does **not** reintroduce GRM into the runtime delivery path (the operator still delivers all content directly via SSA — no ManagedResource for content); the bootstrap MR is one-time install plumbing, the same category as the token-requestor Secret. Without it, the operator's remote applies fail with forbidden/privilege-escalation errors, surfaced per-resource as `Degraded` (continue-on-error). See design.md §3.6.7.
+
+Example bootstrap ManagedResource (per operator, ~30 lines, static):
+
+```yaml
+# Applied by GRM (privileged). Seeds ONLY the SA + apply-scoped RBAC on the shoot.
+apiVersion: resources.gardener.cloud/v1alpha1
+kind: ManagedResource
+metadata:
+  name: <operator>-shoot-rbac-bootstrap
+spec:
+  secretRefs:
+    - name: <operator>-shoot-rbac-bootstrap
+---
+# ...Secret with objects.yaml containing: ServiceAccount <operator>-controller-manager,
+# ClusterRole (create/update/delete on CRDs/RBAC/SAs/webhookconfigs), ClusterRoleBinding.
+```
+
+> **This bootstrap MR is a per-operator Phase 9 deliverable, not just documentation.** `chart/shoot-rbac-bootstrap.yaml` (chart 2) must be authored **once per managed operator** — the SA name and the exact apply-scoped kinds differ per operator (e.g. ipam-capi needs conversion-webhook CRD verbs; boot/argora/khalkeon need no webhook verbs). Templated from chart-2 values so `cc/kube-secrets` can vary the SA name/namespace per cluster. Without the correct per-operator MR, that operator's first remote reconcile fails `forbidden`/privilege-escalation on every RBAC/CRD apply (surfaced per-resource as `Degraded`), so the operator is non-functional for that operator until it exists. Treat "author + verify the bootstrap MR" as a required step when onboarding each operator, alongside its CR template.
 
 ---
 
-## Phase 9 (v1 scaffolding only): Validating admission webhook
+## Phase 9.5: Operator image build + publish (~1 day)
+
+Chart 1 deploys a container image (`manager.image.repository` + `tag`), but nothing in the plan builds or publishes it — the same runtime-prerequisite gap as the production loaders. This phase closes it. The pieces are mostly scaffolded; the work is adding the publish workflow.
+
+**Publish to GHCR; keppel mirrors it — do NOT push to keppel directly.** Verified against the sibling repo [`SAP-cloud-infrastructure/webhook-injector`](https://github.com/SAP-cloud-infrastructure/webhook-injector): its CI publishes the image to **`ghcr.io/<org>/<repo>`** via a GitHub Actions workflow (`.github/workflows/container-registry-ghcr.yaml`, auto-generated by [`sapcc/go-makefile-maker`](https://github.com/sapcc/go-makefile-maker)), authenticating with the built-in `GITHUB_TOKEN` (`packages: write`). Keppel then **mirrors** ghcr.io — confirmed on the live cluster, where the running images resolve to `keppel.global.cloud.sap/ccloud-ghcr-io-mirror/<org>/<repo>:...` (the `ccloud-ghcr-io-mirror` account is a keppel replica of ghcr.io). So the operator publishes to ghcr like every other SAP-cloud-infrastructure operator; workloads pull the keppel-mirrored path. No direct keppel push credential is needed.
+
+**Already present:**
+- `Dockerfile` (multi-stage: build the manager binary, ship a distroless runtime image) — Phase 0 layout.
+- `make docker-build docker-push IMG=<ref>` and `make build-installer IMG=<ref>` targets in the `Makefile` (default `IMG ?= controller:latest`).
+
+**Steps:**
+- Add the GHCR publish workflow the same way the fleet does — via `sapcc/go-makefile-maker` (add a `githubWorkflow.pushContainerToGhcr` stanza to `Makefile.maker.yaml` and regenerate), producing `.github/workflows/container-registry-ghcr.yaml`. It builds and pushes `ghcr.io/${{ github.repository }}` on push to the default branch (and on tags), tagged `type=sha,format=long` + semver + `latest`, authenticating with `GITHUB_TOKEN` (`packages: write`) — no external registry secret.
+- Image ref for deployment is the **keppel-mirrored** path: `keppel.global.cloud.sap/ccloud-ghcr-io-mirror/<org>/dual-deployment-operator:<tag>` (verify the exact mirror account with the team). Chart 1's `values.yaml` (`manager.image.repository`/`tag`) references that mirrored path so workloads pull via keppel; the operator never pushes to keppel.
+- The published image tag (git sha / semver) is what chart 1's `values.yaml` pins, and what chart 2's dependency version tracks — so an operator release = new image tag + chart 1 version bump.
+- No laptop builds — the drift lesson from today's `make build-` targets. CI (GitHub Actions) owns the publish, exactly as webhook-injector does.
+
+**Ordering:** this must land before Phase 4/5 (any live deploy) — chart 1 has no image to run until it does. It has no dependency on Phases 7–9, so it can be done any time after Phase 0; listed here next to the chart work because they ship together (image + chart 1 + chart 2 are one release unit).
+
+**Success criterion**: the GHCR workflow publishes a pullable image on merge (visible at `ghcr.io/<org>/dual-deployment-operator` and, once mirrored, at the keppel `ccloud-ghcr-io-mirror` path); chart 1's `values.yaml` references the keppel-mirrored repo; a `helm install` of chart 1 with the published tag starts a running manager Pod (probes green).
+
+---
+
+## Phase 10 (v1 scaffolding only): Validating admission webhook
 
 Kubebuilder scaffold created but not wired in v1. Structural validation is provided by CRD schema + CEL rules (§Validation above). Content-level validation of `patch` bodies is deferred to a v2 webhook.
 
@@ -1177,9 +1632,11 @@ make test-integration
 | 4 | (skipped — no split step) |
 | 5 | Applier applies a resource via SSA and returns Healthy status; can also delete; strips caBundle from WebhookConfigurations and conversion-webhook CRDs before apply (so the injector owns caBundle) |
 | 6 | Reconciler successfully processes a CR end-to-end with mocked source; applies the ordered transformation list to both renders; produces host/remote manifest sets where the remote set includes WebhookConfigurations (caBundle stripped, injector-labeled); status populated |
-| 7 | Equivalence test passes for at least metal-operator vs. today's chart output (host render matches host-side output; remote render matches remote-side output) |
-| 8 | Operator chart installs successfully in a QA shoot-cp namespace |
-| 9 | Webhook scaffold builds; no-op ValidateCreate/ValidateUpdate methods pass tests; ValidatingWebhookConfiguration NOT deployed in v1 (deferred to v2) |
+| 7 | Operator pulls a real (small) chart **anonymously** from `oci://keppel.global.cloud.sap/ccloud-helm/...` and fetches a real pinned-ref kustomize overlay from the public `github.com/sapcc/helm-charts` source, rendering both to manifests; the optional credential seam is exercised by a self-hosted authed test but off by default; cache pulls once per version; `make test` stays green offline while the online tier passes in CI |
+| 8 | Equivalence test passes for at least metal-operator vs. today's chart output (host render matches host-side output; remote render matches remote-side output) |
+| 9 | Chart 1 (`dual-deployment-operator`, this repo, via kubebuilder helm plugin) builds/publishes with CRD in `crds/`; chart 2 (`dual-deployment-operator-remote`, `sapcc/helm-charts`) depends on it and installs in a QA shoot-cp namespace — controller + CRD come up first (dependency), then the CR instances (templated from `cc/kube-secrets` values); the operator reconciles the applied CRs. `cmd/main.go` probes/metrics/leader-election confirmed wired and reflected in chart 1's `deployment.yaml`; the per-operator `shoot-rbac-bootstrap` MR is authored in chart 2 |
+| 9.5 | GHCR publish workflow (via `sapcc/go-makefile-maker`) publishes the operator image to `ghcr.io/<org>/dual-deployment-operator` on merge/tag with `GITHUB_TOKEN` (no keppel push secret); keppel mirrors it to `ccloud-ghcr-io-mirror`; chart 1's `values.yaml` references the keppel-mirrored path; `helm install` of chart 1 with the published tag starts a running manager Pod with green probes |
+| 10 | Webhook scaffold builds; no-op ValidateCreate/ValidateUpdate methods pass tests; ValidatingWebhookConfiguration NOT deployed in v1 (deferred to v2) |
 
 Each phase should merge to `main` with tests before moving to the next.
 
@@ -1189,8 +1646,9 @@ Each phase should merge to `main` with tests before moving to the next.
 
 These changes happen in `sapcc/helm-charts`, not in this operator repo, but they gate the operator's usefulness:
 
+- Create `system/dual-deployment-operator-remote/` (chart 2, §9.7 / Phase 9): declares chart 1 (`dual-deployment-operator`, published from this repo) as a Helm `dependency`, templates one `DualDeploymentOperator` CR per managed operator, and carries the `remote-access` Secret + `shoot-rbac-bootstrap` ManagedResource. Replaces the per-operator `<operator>-remote` wrapper charts. Per-cluster values overridden from `cc/kube-secrets`.
 - Restructure `system/metal-operator-remote/` (and other wrapper charts) per `design.md` §4.1: split templates into `templates/host/` and `templates/remote/`, invert upstream enable values, add annotation helpers, delete pre-rendered files
 - Restructure `system/kustomize/ipam-capi-remote/` per §4.2: top-level kustomization, additions/ subdir, pin refs
 - Verify webhook-injector uses distinct SSA field manager (small injector code change if not)
 
-Do the operator work first; chart restructures follow once the operator is validated against today's chart output in equivalence tests.
+Do the operator work first (Phases 0-8, plus chart 1 in this repo at Phase 9); chart 2 and the source restructures in `sapcc/helm-charts` follow once the operator is validated against today's chart output in equivalence tests.

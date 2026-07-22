@@ -199,7 +199,7 @@ r5 confirmed the typed-only stance after considering and rejecting DSL alternati
 r5/r6 lived under two "the injector cannot be modified" constraints:
 
 1. **Delivery was ConfigMap-only.** The injector delivered WebhookConfigurations by reading a source ConfigMap (`--webhook-config-name`) and could not be scoped to specific shoot objects by label. That is *why* r5 invented the `packageWebhookConfigsForInjector` cross-stream transformation: the operator could not simply apply the WebhookConfigs to the shoot itself and let the injector top up caBundle, because the injector would *also* deliver them from the ConfigMap — a double-write. So the operator packaged them into the ConfigMap and deliberately kept them out of its own apply set.
-2. **CRD conversion-webhook caBundle was MR-only.** The injector's only path to stamp caBundle into a CRD conversion webhook was its seed-side `ManagedResourceReconciler`, keyed on `--managed-resource-label`. Since this design emits no ManagedResources, that path never fired — leaving §9.2 an open limitation blocking metal-operator's production migration.
+2. **CRD conversion-webhook caBundle was MR-only.** The injector's only path to stamp caBundle into a CRD conversion webhook was its seed-side `ManagedResourceReconciler`, keyed on `--managed-resource-label`. Since this design emits no ManagedResources, that path never fired — leaving §9.2 an open limitation blocking ipam-capi's production migration (ipam-capi is the operator with conversion-webhook CRDs).
 
 PR #14 removes both:
 
@@ -344,7 +344,7 @@ Under r7, the operator and injector write the **same** WebhookConfiguration / co
 
 Because the two managers own non-overlapping fields, SSA prevents clobbering: the operator's periodic re-apply omits `caBundle` (never reverts the injector's write), and the injector patches only `caBundle` (never disturbs operator-owned fields). No caBundle ping-pong. The operator labels its webhook objects with the injector's `--target-label` (via `patch`, §3.4.4 in design.md) so the injector adopts them.
 
-**CRD conversion-webhook caBundle — resolved (r7).** The injector's target patch mode stamps caBundle directly onto labeled conversion-webhook CRDs on the shoot — no `ManagedResource`, no seed-side `ManagedResourceReconciler`, no GRM. This closes the r5/r6 open limitation (§9.2) that blocked metal-operator's production migration. The operator only needs to label those CRDs; the injector skips CRDs without a webhook conversion strategy.
+**CRD conversion-webhook caBundle — resolved (r7).** The injector's target patch mode stamps caBundle directly onto labeled conversion-webhook CRDs on the shoot — no `ManagedResource`, no seed-side `ManagedResourceReconciler`, no GRM. This closes the r5/r6 open limitation (§9.2) that blocked ipam-capi's production migration (ipam-capi is the operator with conversion-webhook CRDs — 4 of them; metal-operator has none). The operator only needs to label those CRDs; the injector skips CRDs without a webhook conversion strategy.
 
 **Bootstrap ordering (r7)**: operator applies CRDs/RBAC/SA/additions **and** the labeled WebhookConfigs (caBundle unset) to the shoot; injector generates certs (if absent) and patches caBundle onto the labeled shoot objects. Webhook calls succeed once caBundle is present. One hop fewer than r5/r6 — no host-side source ConfigMap to produce and consume.
 
@@ -415,14 +415,14 @@ Not every operator needs every transformation. Menu is opt-in per CR:
 
 | Operator | Transformations |
 |---|---|
-| metal-operator | `patch` (sidecar), `rewriteWebhookURL`, `patch` (label CRDs + WebhookConfigs for injector), `filterKinds` (Service) |
-| ipam-capi | `patch` (sidecar), `rewriteWebhookURL`, `patch` (label WebhookConfigs for injector), `filterKinds` (Service) |
+| metal-operator | `patch` (sidecar), `rewriteWebhookURL`, `patch` (label WebhookConfigs for injector), `filterKinds` (Service) |
+| ipam-capi | `patch` (sidecar), `rewriteWebhookURL`, `patch` (label WebhookConfigs + conversion-webhook CRDs for injector), `filterKinds` (Service) |
 | boot-operator | `filterKinds` (Service) |
 | argora-operator | `filterKinds` (Service, ConfigMap, Secret) |
 | khalkeon | `filterKinds` (Service) |
 
 Notes:
-- metal-operator labels both its conversion-webhook CRDs and its WebhookConfigurations with the injector's `--target-label`; ipam-capi labels only its WebhookConfigurations (its CRDs have no conversion webhook, and the injector skips non-webhook CRDs anyway).
+- ipam-capi labels its conversion-webhook CRDs (4 of them) and its Validating/Mutating WebhookConfigurations with the injector's `--target-label`; metal-operator labels only its ValidatingWebhookConfiguration (it has no MutatingWebhookConfiguration, and none of its 17 CRDs use a conversion webhook, so there is nothing else for the injector to adopt).
 - Only metal-operator and ipam-capi interact with the injector (they have webhooks) — under r7 that interaction is a `patch` adding a label, not a `packageWebhookConfigsForInjector` cross-stream transformation.
 - The 3 simpler operators (boot, argora, khalkeon) use just ONE transformation each — a `filterKinds`. They run without the injector.
 - No `renameKind` in any CR (r6+) — direct-apply preserves Roles as Roles. No `packageWebhookConfigsForInjector` in any CR (r7+) — the operator applies WebhookConfigs directly.
@@ -435,7 +435,7 @@ Full list in `design.md` §9. Highlights:
 
 1. **Egress from seeds to kustomize sources** (ipam-capi migration blocker). Assumed feasible for design purposes. Verify infra before Phase 7.
 
-2. **CRD conversion-webhook caBundle management — RESOLVED (r7)**. Was: the injector's only CRD caBundle-stamping path selected seed-side `ManagedResource` objects, which this design doesn't produce, so conversion-webhook CRD caBundle (metal-operator) was unmanaged and blocked production migration. Now closed by the injector's target patch mode ([webhook-injector#14](https://github.com/SAP-cloud-infrastructure/webhook-injector/pull/14)): it stamps caBundle directly onto labeled conversion-webhook CRDs on the shoot, no ManagedResource. The operator just labels the CRDs. See `design.md` §9.2.
+2. **CRD conversion-webhook caBundle management — RESOLVED (r7)**. Was: the injector's only CRD caBundle-stamping path selected seed-side `ManagedResource` objects, which this design doesn't produce, so conversion-webhook CRD caBundle (ipam-capi, which has 4 conversion-webhook CRDs) was unmanaged and blocked production migration. Now closed by the injector's target patch mode ([webhook-injector#14](https://github.com/SAP-cloud-infrastructure/webhook-injector/pull/14)): it stamps caBundle directly onto labeled conversion-webhook CRDs on the shoot, no ManagedResource. The operator just labels the CRDs. See `design.md` §9.2.
 
 3. **Per-CR transformation config duplication**. `injectInitContainer.container` is ~30 lines. If duplicated across N shoots per operator, consider ConfigMap-referenced spec. Deferred to Phase 1.
 
