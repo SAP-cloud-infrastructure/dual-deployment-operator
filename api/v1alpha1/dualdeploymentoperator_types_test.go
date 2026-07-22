@@ -30,19 +30,19 @@ func TestHelmSourceRoundTrip(t *testing.T) {
 }
 
 func TestKustomizeSourceRoundTrip(t *testing.T) {
-	in := Source{Kustomize: &KustomizeSource{URL: "https://github.com/x/y//p?ref=v1", HostPath: "host", RemotePath: "remote"}}
+	in := Source{Kustomize: &KustomizeSource{URL: "https://github.com/x/y//p?ref=v1", SeedPath: "host", ShootPath: "remote"}}
 	b, err := json.Marshal(in)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if got := string(b); got != `{"kustomize":{"url":"https://github.com/x/y//p?ref=v1","hostPath":"host","remotePath":"remote"}}` {
+	if got := string(b); got != `{"kustomize":{"url":"https://github.com/x/y//p?ref=v1","seedPath":"host","shootPath":"remote"}}` {
 		t.Fatalf("unexpected JSON: %s", got)
 	}
 	var out Source
 	if err := json.Unmarshal(b, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if out.Kustomize == nil || out.Kustomize.HostPath != "host" {
+	if out.Kustomize == nil || out.Kustomize.SeedPath != "host" {
 		t.Fatalf("round-trip mismatch: %+v", out)
 	}
 }
@@ -77,21 +77,21 @@ func TestHealthStateConstants(t *testing.T) {
 
 func TestSpecFieldsRoundTrip(t *testing.T) {
 	s := DualDeploymentOperatorSpec{
-		RemoteAccess:    RemoteAccessRef{SecretName: "kc", Server: "https://api.example:443"},
-		RemoteNamespace: "shoot--x--y",
+		ShootAccess:    ShootAccessRef{SecretName: "kc", Server: "https://api.example:443"},
+		ShootNamespace: "shoot--x--y",
 		RetentionPolicy: RetentionPolicy{CRDs: "Retain"},
-		ApplyOrder:      "HostFirst",
+		ApplyOrder:      "SeedFirst",
 	}
 	if s.RetentionPolicy.CRDs != "Retain" {
 		t.Errorf("RetentionPolicy.CRDs = %q, want Retain", s.RetentionPolicy.CRDs)
 	}
-	if s.RemoteAccess.Server != "https://api.example:443" {
-		t.Errorf("RemoteAccess.Server = %q", s.RemoteAccess.Server)
+	if s.ShootAccess.Server != "https://api.example:443" {
+		t.Errorf("ShootAccess.Server = %q", s.ShootAccess.Server)
 	}
-	if s.RemoteNamespace != "shoot--x--y" {
-		t.Errorf("RemoteNamespace = %q, want shoot--x--y", s.RemoteNamespace)
+	if s.ShootNamespace != "shoot--x--y" {
+		t.Errorf("ShootNamespace = %q, want shoot--x--y", s.ShootNamespace)
 	}
-	if s.ApplyOrder != "HostFirst" {
-		t.Errorf("ApplyOrder = %q, want HostFirst", s.ApplyOrder)
+	if s.ApplyOrder != "SeedFirst" {
+		t.Errorf("ApplyOrder = %q, want SeedFirst", s.ApplyOrder)
 	}
 }

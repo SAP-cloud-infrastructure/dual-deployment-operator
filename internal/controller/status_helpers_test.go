@@ -94,8 +94,8 @@ func TestReconcileInvalidSourceWritesNotReady(t *testing.T) {
 			Source: ddov1alpha1.Source{
 				Helm: &ddov1alpha1.HelmSource{Repo: "oci://unused", Name: "demo", Version: "0.1.0"},
 			},
-			RemoteAccess:    ddov1alpha1.RemoteAccessRef{SecretName: "s", Server: "https://x"},
-			RemoteNamespace: "kube-system",
+			ShootAccess:    ddov1alpha1.ShootAccessRef{SecretName: "s", Server: "https://x"},
+			ShootNamespace: "kube-system",
 		},
 	}
 	r := newTestReconciler(cr)

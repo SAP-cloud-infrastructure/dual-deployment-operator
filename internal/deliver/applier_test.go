@@ -1,5 +1,4 @@
 // SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company
-//
 // SPDX-License-Identifier: Apache-2.0
 
 package deliver
@@ -32,7 +31,7 @@ func clusterRole(name, ownedBy string) *unstructured.Unstructured {
 
 func TestApplyStampsOwnedByAndReturnsStatus(t *testing.T) {
 	c := fake.NewClientBuilder().Build()
-	a := &SSAApplier{Client: c, FieldManager: "dual-deployment-operator", Cluster: "host"}
+	a := &SSAApplier{Client: c, FieldManager: "dual-deployment-operator", Cluster: "seed"}
 	m := manifest.Manifest{Unstructured: clusterRole("cr", "")}
 	st, err := a.Apply(context.Background(), m, "owner-a")
 	if err != nil {
@@ -46,7 +45,7 @@ func TestApplyStampsOwnedByAndReturnsStatus(t *testing.T) {
 func TestApplyRefusesForeignOwnedClusterScoped(t *testing.T) {
 	existing := clusterRole("cr", "owner-b") // owned by a DIFFERENT CR
 	c := fake.NewClientBuilder().WithObjects(existing).Build()
-	a := &SSAApplier{Client: c, FieldManager: "dual-deployment-operator", Cluster: "host"}
+	a := &SSAApplier{Client: c, FieldManager: "dual-deployment-operator", Cluster: "seed"}
 	m := manifest.Manifest{Unstructured: clusterRole("cr", "")}
 	st, err := a.Apply(context.Background(), m, "owner-a")
 	if err == nil {
@@ -59,7 +58,7 @@ func TestApplyRefusesForeignOwnedClusterScoped(t *testing.T) {
 
 func TestDeleteIgnoresNotFound(t *testing.T) {
 	c := fake.NewClientBuilder().Build()
-	a := &SSAApplier{Client: c, FieldManager: "dual-deployment-operator", Cluster: "host"}
+	a := &SSAApplier{Client: c, FieldManager: "dual-deployment-operator", Cluster: "seed"}
 	if err := a.Delete(context.Background(), manifest.Manifest{Unstructured: clusterRole("gone", "")}, "owner-a"); err != nil {
 		t.Errorf("Delete of absent object = %v, want nil", err)
 	}
@@ -68,7 +67,7 @@ func TestDeleteIgnoresNotFound(t *testing.T) {
 func TestDeleteSkipsForeignOwned(t *testing.T) {
 	existing := clusterRole("cr", "owner-b") // owned by a DIFFERENT CR
 	c := fake.NewClientBuilder().WithObjects(existing).Build()
-	a := &SSAApplier{Client: c, FieldManager: "dual-deployment-operator", Cluster: "host"}
+	a := &SSAApplier{Client: c, FieldManager: "dual-deployment-operator", Cluster: "seed"}
 	m := manifest.Manifest{Unstructured: clusterRole("cr", "")}
 	if err := a.Delete(context.Background(), m, "owner-a"); err != nil {
 		t.Fatalf("Delete = %v, want nil (foreign-owned skip is not an error)", err)
@@ -81,7 +80,7 @@ func TestDeleteSkipsForeignOwned(t *testing.T) {
 func TestDeleteRemovesOwned(t *testing.T) {
 	existing := clusterRole("cr", "owner-a")
 	c := fake.NewClientBuilder().WithObjects(existing).Build()
-	a := &SSAApplier{Client: c, FieldManager: "dual-deployment-operator", Cluster: "host"}
+	a := &SSAApplier{Client: c, FieldManager: "dual-deployment-operator", Cluster: "seed"}
 	m := manifest.Manifest{Unstructured: clusterRole("cr", "")}
 	if err := a.Delete(context.Background(), m, "owner-a"); err != nil {
 		t.Fatalf("Delete = %v, want nil", err)
@@ -94,7 +93,7 @@ func TestDeleteRemovesOwned(t *testing.T) {
 func TestDeleteSkipsUnlabeled(t *testing.T) {
 	existing := clusterRole("cr", "") // no owned-by label
 	c := fake.NewClientBuilder().WithObjects(existing).Build()
-	a := &SSAApplier{Client: c, FieldManager: "dual-deployment-operator", Cluster: "host"}
+	a := &SSAApplier{Client: c, FieldManager: "dual-deployment-operator", Cluster: "seed"}
 	m := manifest.Manifest{Unstructured: clusterRole("cr", "")}
 	if err := a.Delete(context.Background(), m, "owner-a"); err != nil {
 		t.Fatalf("Delete = %v, want nil (unlabeled skip is not an error)", err)
@@ -106,7 +105,7 @@ func TestDeleteSkipsUnlabeled(t *testing.T) {
 
 func TestGetReturnsNotFoundError(t *testing.T) {
 	c := fake.NewClientBuilder().Build()
-	a := &SSAApplier{Client: c, FieldManager: "dual-deployment-operator", Cluster: "host"}
+	a := &SSAApplier{Client: c, FieldManager: "dual-deployment-operator", Cluster: "seed"}
 	_, err := a.Get(context.Background(), manifest.Manifest{Unstructured: clusterRole("absent", "")})
 	if err == nil {
 		t.Fatal("Get of absent object should return error")
@@ -116,7 +115,7 @@ func TestGetReturnsNotFoundError(t *testing.T) {
 func TestGetReturnsLiveObject(t *testing.T) {
 	existing := clusterRole("cr", "owner-a")
 	c := fake.NewClientBuilder().WithObjects(existing).Build()
-	a := &SSAApplier{Client: c, FieldManager: "dual-deployment-operator", Cluster: "host"}
+	a := &SSAApplier{Client: c, FieldManager: "dual-deployment-operator", Cluster: "seed"}
 	live, err := a.Get(context.Background(), manifest.Manifest{Unstructured: clusterRole("cr", "")})
 	if err != nil {
 		t.Fatalf("Get = %v, want nil err", err)
