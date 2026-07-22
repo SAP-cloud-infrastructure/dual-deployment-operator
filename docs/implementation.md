@@ -93,12 +93,12 @@ Define in `api/v1alpha1/dualdeploymentoperator_types.go`:
 ```go
 type DualDeploymentOperatorSpec struct {
     Source            Source                    `json:"source"`
-    RemoteAccess      ShootAccessRef           `json:"shootAccess"`
-    // RemoteNamespace is the target namespace for the remote (shoot) render and
+    ShootAccess      ShootAccessRef           `json:"shootAccess"`
+    // ShootNamespace is the target namespace for the remote (shoot) render and
     // delivery. Namespaced resources in the shoot render that omit an explicit
     // metadata.namespace are placed here; cluster-scoped resources are unaffected.
     // The seed render/delivery uses the CR's own metadata.namespace.
-    RemoteNamespace   string                    `json:"shootNamespace"`
+    ShootNamespace   string                    `json:"shootNamespace"`
     Transformations   []Transformation          `json:"transformations,omitempty"`
     RetentionPolicy   RetentionPolicy           `json:"retentionPolicy,omitempty"`
     // ApplyOrder controls which cluster's render is applied first each reconcile.
@@ -122,10 +122,10 @@ type HelmSource struct {
     Values       *apiextensionsv1.JSON `json:"values,omitempty"`
     // Values applied ONLY to the seed render (typically enables the host-side
     // parts of the upstream subchart).
-    HostValues   *apiextensionsv1.JSON `json:"seedValues,omitempty"`
+    SeedValues   *apiextensionsv1.JSON `json:"seedValues,omitempty"`
     // Values applied ONLY to the shoot render (typically enables the remote-side
     // parts of the upstream subchart).
-    RemoteValues *apiextensionsv1.JSON `json:"shootValues,omitempty"`
+    ShootValues *apiextensionsv1.JSON `json:"shootValues,omitempty"`
 }
 
 // KustomizeSource references a kustomize root plus its two overlay subpaths.
@@ -134,9 +134,9 @@ type KustomizeSource struct {
     // +kubebuilder:validation:MinLength=1
     URL        string `json:"url"`
     // +kubebuilder:validation:MinLength=1
-    HostPath   string `json:"seedPath"`
+    SeedPath   string `json:"seedPath"`
     // +kubebuilder:validation:MinLength=1
-    RemotePath string `json:"shootPath"`
+    ShootPath string `json:"shootPath"`
 }
 
 type ShootAccessRef struct {
@@ -227,8 +227,8 @@ type RetentionPolicy struct {
 
 ```go
 type DualDeploymentOperatorStatus struct {
-    HostResources   []ResourceStatus   `json:"seedResources,omitempty"`
-    RemoteResources []ResourceStatus   `json:"shootResources,omitempty"`
+    SeedResources   []ResourceStatus   `json:"seedResources,omitempty"`
+    ShootResources []ResourceStatus   `json:"shootResources,omitempty"`
     Conditions      []metav1.Condition `json:"conditions,omitempty"`
     LastReconcile   *metav1.Time       `json:"lastReconcile,omitempty"`
 }
@@ -354,12 +354,12 @@ func (h *Helm) Render(ctx context.Context, mode Mode, namespace string) ([]manif
     // 4. Merge values in precedence order:
     //    chart.values.yaml (chart defaults)
     //      < spec.Values                     (common per-cluster)
-    //      < spec.HostValues or spec.RemoteValues (mode-specific)
+    //      < spec.SeedValues or spec.ShootValues (mode-specific)
     //      < {mode: "host"|"remote"}         (operator-injected)
     values := mergeValues(
         chart.Values,          // chart defaults (already loaded)
         parseValues(h.spec.Values),
-        parseValues(h.spec.modeValues(mode)),  // returns HostValues or RemoteValues
+        parseValues(h.spec.modeValues(mode)),  // returns SeedValues or ShootValues
         map[string]any{"mode": string(mode)},
     )
 
@@ -383,8 +383,8 @@ func (h *Helm) Render(ctx context.Context, mode Mode, namespace string) ([]manif
 
 func (spec *v1alpha1.HelmSource) modeValues(mode Mode) *apiextensionsv1.JSON {
     switch mode {
-    case ModeSeed:   return spec.HostValues
-    case ModeShoot: return spec.RemoteValues
+    case ModeSeed:   return spec.SeedValues
+    case ModeShoot: return spec.ShootValues
     }
     return nil
 }
@@ -410,10 +410,10 @@ func (k *Kustomize) Render(ctx context.Context, mode Mode, namespace string) ([]
     var subPath string
     switch mode {
     case ModeSeed:
-        subPath = k.spec.HostPath
+        subPath = k.spec.SeedPath
         if subPath == "" { subPath = "host" }
     case ModeShoot:
-        subPath = k.spec.RemotePath
+        subPath = k.spec.ShootPath
         if subPath == "" { subPath = "remote" }
     }
 
@@ -937,10 +937,10 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 
     // 2. Render TWICE — one per mode. Host uses the CR's own namespace;
     //    remote uses spec.shootNamespace.
-    hostManifests, err := src.Render(ctx, source.ModeSeed, cr.Namespace)
+    seedManifests, err := src.Render(ctx, source.ModeSeed, cr.Namespace)
     if err != nil { return r.errStatus(ctx, cr, "SeedRenderFailed", err) }
 
-    remoteManifests, err := src.Render(ctx, source.ModeShoot, cr.Spec.RemoteNamespace)
+    shootManifests, err := src.Render(ctx, source.ModeShoot, cr.Spec.ShootNamespace)
     if err != nil { return r.errStatus(ctx, cr, "ShootRenderFailed", err) }
 
     // 3. Build the ordered transformation list (single per-render scope, r7).
@@ -951,16 +951,16 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
     //    declaration order. Each transformation naturally affects only
     //    resources present in the render it runs on. (No cross-stream phase.)
     for _, t := range transforms {
-        hostManifests, err = t.Apply(hostManifests)
+        seedManifests, err = t.Apply(seedManifests)
         if err != nil { return r.errStatus(ctx, cr, "SeedTransformFailed", err) }
-        remoteManifests, err = t.Apply(remoteManifests)
+        shootManifests, err = t.Apply(shootManifests)
         if err != nil { return r.errStatus(ctx, cr, "ShootTransformFailed", err) }
     }
 
     // 5. Get clients. shootPhase captures the remote availability outcome:
     //    ready | credsNotReady | clientFailed. Only `ready` means the remote
     //    render can be attempted.
-    hostApplier := r.SeedApplier   // preconstructed at startup
+    seedApplier := r.SeedApplier   // preconstructed at startup
     shootApplier, err := r.buildShootApplier(ctx, cr)
     var shootPhase string
     switch {
@@ -975,8 +975,8 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
     // 6. Sort each render by the fixed intra-render kind-priority
     //    (Namespace -> CRD -> RBAC -> workloads -> webhooks) so the first apply
     //    never fails on a missing CRD or Namespace.
-    hostManifests = deliver.SortForApply(hostManifests)
-    remoteManifests = deliver.SortForApply(remoteManifests)
+    seedManifests = deliver.SortForApply(seedManifests)
+    shootManifests = deliver.SortForApply(shootManifests)
 
     // 7. Apply per spec.applyOrder, respecting remote-failure severity.
     //    ShootFirst gates the seed render on remote availability (host depends on
@@ -993,57 +993,57 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
     //          ShootApplyFailed) stops before host — the workless shoot's render is
     //          all structural deps host consumes. Under SeedFirst host applies first.
     //    WebhookConfigs/conversion CRDs are applied with caBundle stripped.
-    remoteFirst := cr.Spec.ApplyOrder != "SeedFirst"
-    var hostStatuses, remoteStatuses []v1alpha1.ResourceStatus
-    remoteStatuses = cr.Status.RemoteResources // preserve prior remote status by default
+    shootFirst := cr.Spec.ApplyOrder != "SeedFirst"
+    var seedStatuses, shootStatuses []v1alpha1.ResourceStatus
+    shootStatuses = cr.Status.ShootResources // preserve prior remote status by default
 
     // Derive the ownership value once; thread it through every apply (the appliers
     // are stateless/shared, so ownedBy is an argument, never a struct field).
     ownedBy := manifest.OwnedByValue(cr.Namespace, cr.Name)
 
-    applyHost := func() { hostStatuses = r.applyAll(ctx, hostApplier, hostManifests, ownedBy) }
+    applyHost := func() { seedStatuses = r.applyAll(ctx, seedApplier, seedManifests, ownedBy) }
 
     switch shootPhase {
     case "credsNotReady":
-        if !remoteFirst {
+        if !shootFirst {
             applyHost() // SeedFirst: host does not wait on remote
         }
         // ShootFirst: defer host until credentials populate.
         r.setCondition(cr, metav1.ConditionFalse, "WaitingForShootCredentials",
             "shoot token/CA not yet populated by Gardener; shoot render deferred")
-        return r.finishNotReady(ctx, cr, hostStatuses, remoteStatuses, 30*time.Second)
+        return r.finishNotReady(ctx, cr, seedStatuses, shootStatuses, 30*time.Second)
 
     case "clientFailed":
-        if !remoteFirst {
+        if !shootFirst {
             applyHost() // SeedFirst: host proceeds; remote failure only flagged
         }
         // ShootFirst: stop before host — host must not start without the remote.
         r.setCondition(cr, metav1.ConditionFalse, "ShootApplyFailed",
             fmt.Sprintf("shoot render could not be applied: %v", err))
-        return r.finishNotReady(ctx, cr, hostStatuses, remoteStatuses, 0) // requeue w/ backoff via returned err
+        return r.finishNotReady(ctx, cr, seedStatuses, shootStatuses, 0) // requeue w/ backoff via returned err
     }
 
     // shootPhase == "ready": apply the shoot render, then gate host per applyOrder.
-    if remoteFirst {
-        remoteStatuses = r.applyAll(ctx, shootApplier, remoteManifests, ownedBy)
+    if shootFirst {
+        shootStatuses = r.applyAll(ctx, shootApplier, shootManifests, ownedBy)
         // Under ShootFirst the shoot is a workless cluster: every remote resource
         // (CRDs/RBAC/webhooks) is a structural dependency the host consumes. So ANY
         // remote failure — partial or complete — gates the seed render this cycle;
         // starting host against a missing CRD/RBAC/webhook would crash-loop it.
-        if anyFailed(remoteStatuses) {
+        if anyFailed(shootStatuses) {
             reason := "ResourcesDegraded" // partial: some applied, some failed
             msg := "some shoot resources failed to apply; seed render deferred until remote converges"
-            if allFailed(remoteStatuses) {
+            if allFailed(shootStatuses) {
                 reason = "ShootApplyFailed" // complete: 0 of N applied
                 msg = "every resource in the shoot render failed to apply"
             }
             r.setCondition(cr, metav1.ConditionFalse, reason, msg)
-            return r.finishNotReady(ctx, cr, hostStatuses, remoteStatuses, 0)
+            return r.finishNotReady(ctx, cr, seedStatuses, shootStatuses, 0)
         }
         applyHost() // full remote success → proceed to host
     } else {
         applyHost()
-        remoteStatuses = r.applyAll(ctx, shootApplier, remoteManifests, ownedBy)
+        shootStatuses = r.applyAll(ctx, shootApplier, shootManifests, ownedBy)
     }
 
     // 8. Prune orphans (only for renders that were actually applied this cycle).
@@ -1051,18 +1051,18 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
     //    render, delete in reverse of the fixed intra-render kind priority; across
     //    renders, prune in the reverse of spec.applyOrder. CRDs skipped under
     //    retentionPolicy.crds: Retain.
-    if remoteFirst { // reverse of ShootFirst apply = prune host first, then remote
-        r.prune(ctx, hostApplier, cr.Status.HostResources, hostManifests, cr)
-        r.prune(ctx, shootApplier, cr.Status.RemoteResources, remoteManifests, cr)
+    if shootFirst { // reverse of ShootFirst apply = prune host first, then remote
+        r.prune(ctx, seedApplier, cr.Status.SeedResources, seedManifests, cr)
+        r.prune(ctx, shootApplier, cr.Status.ShootResources, shootManifests, cr)
     } else {
-        r.prune(ctx, shootApplier, cr.Status.RemoteResources, remoteManifests, cr)
-        r.prune(ctx, hostApplier, cr.Status.HostResources, hostManifests, cr)
+        r.prune(ctx, shootApplier, cr.Status.ShootResources, shootManifests, cr)
+        r.prune(ctx, seedApplier, cr.Status.SeedResources, seedManifests, cr)
     }
 
     // 9. Update status. Recorded applied-set = the render just applied.
-    cr.Status.HostResources = hostStatuses
-    cr.Status.RemoteResources = remoteStatuses
-    cr.Status.Conditions = computeConditions(hostStatuses, remoteStatuses)
+    cr.Status.SeedResources = seedStatuses
+    cr.Status.ShootResources = shootStatuses
+    cr.Status.Conditions = computeConditions(seedStatuses, shootStatuses)
     cr.Status.LastReconcile = &metav1.Time{Time: time.Now()}
     if err := r.Status().Update(ctx, cr); err != nil {
         return ctrl.Result{}, err
@@ -1078,8 +1078,8 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 // backoff is a fixed RequeueAfter (used for WaitingForShootCredentials).
 func (r *DualDeploymentOperatorReconciler) finishNotReady(ctx context.Context, cr *v1alpha1.DualDeploymentOperator,
     host, remote []v1alpha1.ResourceStatus, backoff time.Duration) (ctrl.Result, error) {
-    cr.Status.HostResources = host
-    cr.Status.RemoteResources = remote
+    cr.Status.SeedResources = host
+    cr.Status.ShootResources = remote
     cr.Status.LastReconcile = &metav1.Time{Time: time.Now()}
     if e := r.Status().Update(ctx, cr); e != nil {
         return ctrl.Result{}, e
@@ -1116,7 +1116,7 @@ Helpers used above:
 var errShootCredentialsNotReady = errors.New("shoot credentials not yet populated")
 
 func (r *DualDeploymentOperatorReconciler) buildShootApplier(ctx context.Context, cr *v1alpha1.DualDeploymentOperator) (deliver.Applier, error) {
-    ref := cr.Spec.RemoteAccess
+    ref := cr.Spec.ShootAccess
 
     secret := &corev1.Secret{}
     if err := r.Get(ctx, types.NamespacedName{Namespace: cr.Namespace, Name: ref.SecretName}, secret); err != nil {
@@ -1191,7 +1191,7 @@ func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, 
     }
 
     // Remote cleanup (reverse-delete order), respecting retentionPolicy for CRDs.
-    orphans := deliver.SortStatusForDelete(cr.Status.RemoteResources)
+    orphans := deliver.SortStatusForDelete(cr.Status.ShootResources)
     var errs []error
     for _, rs := range orphans {
         if rs.Kind == "CustomResourceDefinition" && cr.Spec.RetentionPolicy.CRDs == "Retain" {

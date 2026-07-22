@@ -1359,10 +1359,10 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx, req) (ctrl.Result, err
 
     // 2. Render TWICE — one per mode. Host uses the CR's own namespace;
     //    remote uses spec.shootNamespace.
-    hostManifests, err := src.Render(ctx, source.ModeSeed, cr.Namespace)
+    seedManifests, err := src.Render(ctx, source.ModeSeed, cr.Namespace)
     if err != nil { return r.errStatus(ctx, cr, "SeedRenderFailed", err) }
 
-    remoteManifests, err := src.Render(ctx, source.ModeShoot, cr.Spec.RemoteNamespace)
+    shootManifests, err := src.Render(ctx, source.ModeShoot, cr.Spec.ShootNamespace)
     if err != nil { return r.errStatus(ctx, cr, "ShootRenderFailed", err) }
 
     // 3. Build the ordered transformation list (single per-render scope, r7).
@@ -1374,26 +1374,26 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx, req) (ctrl.Result, err
     //    transformation naturally affects only resources present in the
     //    render it runs on. (No cross-stream phase in r7.)
     for _, t := range transforms {
-        hostManifests, err = t.Apply(hostManifests)
+        seedManifests, err = t.Apply(seedManifests)
         if err != nil { return r.errStatus(ctx, cr, "SeedTransformFailed", err) }
-        remoteManifests, err = t.Apply(remoteManifests)
+        shootManifests, err = t.Apply(shootManifests)
         if err != nil { return r.errStatus(ctx, cr, "ShootTransformFailed", err) }
     }
 
     // 5. Get clients
-    hostApplier := r.SeedApplier
+    seedApplier := r.SeedApplier
     shootApplier, err := r.buildShootApplier(ctx, cr)
     if err != nil { return r.errStatus(ctx, cr, "ShootClientFailed", err) }
 
     // 6. Apply each render to its target cluster. WebhookConfigurations and
     //    conversion-webhook CRDs are applied with caBundle unset (the injector
     //    owns that field via its target patch mode).
-    hostStatus := r.applyAll(ctx, hostApplier, hostManifests)
-    remoteStatus := r.applyAll(ctx, shootApplier, remoteManifests)
+    hostStatus := r.applyAll(ctx, seedApplier, seedManifests)
+    remoteStatus := r.applyAll(ctx, shootApplier, shootManifests)
 
     // 7. Update inventory + status
-    cr.Status.HostResources = hostStatus
-    cr.Status.RemoteResources = remoteStatus
+    cr.Status.SeedResources = hostStatus
+    cr.Status.ShootResources = remoteStatus
     cr.Status.Conditions = computeConditions(hostStatus, remoteStatus)
     cr.Status.LastReconcile = &metav1.Time{Time: time.Now()}
 
@@ -1455,16 +1455,16 @@ The token-requestor Secret (`token` + `bundle.crt`) is provisioned by Gardener's
 
 ```go
 func (r *Reconciler) reconcileDelete(ctx, cr) (ctrl.Result, error) {
-    hostApplier := r.SeedApplier
+    seedApplier := r.SeedApplier
     shootApplier, _ := r.getShootApplier(ctx, cr.Spec.RemoteKubeconfig)
 
     // Host: ownerReferences cascade, but explicit delete top-level owners for determinism
-    for _, m := range cr.Status.HostResources {
-        _ = hostApplier.Delete(ctx, m.AsManifest())
+    for _, m := range cr.Status.SeedResources {
+        _ = seedApplier.Delete(ctx, m.AsManifest())
     }
 
     // Remote: explicit delete for each, respecting retentionPolicy for CRDs
-    for _, m := range cr.Status.RemoteResources {
+    for _, m := range cr.Status.ShootResources {
         if m.Kind == "CustomResourceDefinition" && cr.Spec.RetentionPolicy.CRDs == "Retain" {
             continue
         }
