@@ -36,45 +36,6 @@ The `Reconcile` method MUST fetch the CR by name; if the CR does not exist (alre
 
 ---
 
-### Requirement: Reconcile logs one info line and requeues at 10 minutes
-
-When the reconciler successfully fetches a CR, it MUST emit exactly one log line at level Info containing the message `"reconciling"` and structured fields `name` and `namespace` matching the CR, then return `ctrl.Result{RequeueAfter: 10 * time.Minute}, nil`.
-
-The requeue interval MUST be defined in code as `10 * time.Minute` and MUST match `docs/design.md` §3.6.2's drift-correction default so v1 lands with the same cadence Phase 6 will use for real work.
-
-#### Scenario: Info log line is emitted per reconcile
-
-- **WHEN** the reconciler is invoked with a `ctrl.Request` for an existing CR named `metal-operator` in namespace `shoot--cp--m-eu-de-1`
-- **THEN** exactly one Info-level log line is emitted
-- **AND** the log message is `"reconciling"`
-- **AND** the log has structured fields `name=metal-operator` and `namespace=shoot--cp--m-eu-de-1`
-
-#### Scenario: RequeueAfter is 10 minutes
-
-- **WHEN** the reconciler is invoked with a valid CR
-- **THEN** the returned `ctrl.Result.RequeueAfter` equals `10 * time.Minute`
-- **AND** the returned `ctrl.Result.Requeue` is `false`
-- **AND** the returned error is `nil`
-
----
-
-### Requirement: Reconcile does not mutate the CR
-
-The v1 reconciler MUST NOT write to any field of the CR — no `Spec` mutation, no `Status` update, no `Metadata` change (except that controller-runtime may set observed generation internally), no finalizer add/remove. This preserves the reconciler as a pure wiring stub; Phase 6 introduces status writes and finalizer management.
-
-#### Scenario: CR is byte-identical after reconcile
-
-- **WHEN** a CR is created, then the reconciler is invoked
-- **THEN** the CR's `spec`, `status`, and `metadata.finalizers` fields are unchanged after reconcile
-- **AND** no `Update` or `Patch` call is issued by the reconciler against the CR
-
-#### Scenario: No status subresource writes
-
-- **WHEN** a CR is reconciled multiple times over 30 minutes of envtest simulated time
-- **THEN** `status.hostResources`, `status.remoteResources`, `status.conditions`, and `status.lastReconcile` remain unset
-
----
-
 ### Requirement: Manager health and readiness endpoints
 
 The manager MUST expose `/healthz` (liveness) and `/readyz` (readiness) HTTP endpoints on the health-probe port configured by the kubebuilder scaffold (default `:8081`). Both endpoints MUST return HTTP 200 when the manager is running.
