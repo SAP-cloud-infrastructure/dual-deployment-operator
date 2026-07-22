@@ -956,6 +956,15 @@ The contrast in one line: **both grants are broad applier grants; seed is chart-
 
 Namespaced objects skip the guard — namespace isolation already prevents cross-CR collision, so the extra GET is spent only where it matters. The guard converts a silent single-install-per-seed violation into a visible, non-destructive failure. `ForceOwnership` alone cannot tell "reclaim my own stale field" from "steal another CR's object"; the label check supplies that distinction without disabling force globally.
 
+#### 3.6.8 Remote namespace existence (render/bootstrap responsibility, not operator-created)
+
+`spec.remoteNamespace` is a **render-time default**, not a cluster-side ensure. It flows into a single place — the remote render's `manifest.ApplyNamespace` — which only *stamps* the namespace string onto namespaced manifests that omit an explicit `metadata.namespace`. The operator does **not** create the namespace object itself, and there is no dedicated ensure-namespace step. So whether a first reconcile succeeds when `remoteNamespace` does not yet exist on the shoot depends entirely on **what the remote render emits**:
+
+- **If the remote render contains a `Namespace` object** for `remoteNamespace` — it is applied *first* (`Namespace` sorts to apply-priority 0 in the fixed intra-render order, §3.6.1 ordering) and is exempt from `ApplyNamespace` (cluster-scoped), so it is created before the namespaced objects that follow, which then land cleanly. This is the expected shape: the wrapper chart's `additions` (mode=remote guard) ships the namespace (see the metal-operator walk-through, §3.5.4, `Namespace/metal-servers`), and the install-time shoot-RBAC-bootstrap ManagedResource (§3.6.7) seeds the SA + RBAC ahead of the operator.
+- **If neither the render nor a prior bootstrap created it** — the namespaced applies are rejected by the shoot API server (`namespaces "…" not found`). This is caught per-resource, marked `Degraded` with the raw API message, aggregated into `Ready=False` (`ResourcesDegraded`, or `RemoteApplyFailed` if all fail), and requeued with backoff. The reconcile **degrades gracefully but never self-heals** until the namespace appears; the operator does not attempt to create it.
+
+This mirrors the RBAC-bootstrap philosophy of §3.6.7: prerequisites the operator cannot (or by contract should not) self-provision fail **visibly and non-destructively**, never silently. Two known ergonomic gaps in v1: (a) a missing `remoteNamespace` surfaces as a generic per-resource `Degraded` message rather than a first-class `RemoteNamespaceNotFound` condition, so it must be read off individual resource statuses; and (b) the CEL validation on the field (`MinLength` + DNS-label pattern) can only check syntactic validity, never existence on a remote cluster. A dedicated ensure-namespace step and/or a distinct not-found condition is a possible future enhancement (Phase 7+), deliberately out of scope for the initial delivery/reconciler work.
+
 ### 3.7 CR deletion
 
 Finalizer-driven cleanup:
