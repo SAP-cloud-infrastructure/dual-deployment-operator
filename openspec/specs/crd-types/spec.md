@@ -32,37 +32,37 @@ The `dual-deployment-operator` module SHALL register a Custom Resource Definitio
 | Go field | JSON tag | Required | Type |
 |---|---|---|---|
 | `Source` | `source` | yes | `Source` |
-| `RemoteAccess` | `remoteAccess` | yes | `RemoteAccessRef` |
-| `RemoteNamespace` | `remoteNamespace` | yes | `string` |
+| `ShootAccess` | `shootAccess` | yes | `ShootAccessRef` |
+| `ShootNamespace` | `shootNamespace` | yes | `string` |
 | `Transformations` | `transformations,omitempty` | no | `[]Transformation` |
 | `RetentionPolicy` | `retentionPolicy,omitempty` | no | `RetentionPolicy` |
 | `ApplyOrder` | `applyOrder,omitempty` | no | `string` |
 
-`ApplyOrder` MUST carry `+kubebuilder:validation:Enum=HostFirst;RemoteFirst` and `+kubebuilder:default=RemoteFirst`. No other top-level fields SHALL be present in `DualDeploymentOperatorSpec`.
+`ApplyOrder` MUST carry `+kubebuilder:validation:Enum=SeedFirst;ShootFirst` and `+kubebuilder:default=ShootFirst`. No other top-level fields SHALL be present in `DualDeploymentOperatorSpec`.
 
 #### Scenario: Required fields reject empty spec
 
 - **WHEN** a CR is applied with `spec: {}`
 - **THEN** the API server rejects the request
-- **AND** the rejection message identifies `spec.source`, `spec.remoteAccess`, and `spec.remoteNamespace` as required
+- **AND** the rejection message identifies `spec.source`, `spec.shootAccess`, and `spec.shootNamespace` as required
 
 #### Scenario: Optional fields default to empty
 
-- **WHEN** a CR is applied with only `spec.source`, `spec.remoteAccess`, and `spec.remoteNamespace` set
+- **WHEN** a CR is applied with only `spec.source`, `spec.shootAccess`, and `spec.shootNamespace` set
 - **THEN** the API server accepts the request
 - **AND** `spec.transformations` is stored as an empty list
 - **AND** `spec.retentionPolicy` is stored as `{crds: Retain}` via the object-level default (see the RetentionPolicy requirement)
-- **AND** `spec.applyOrder` is stored as `RemoteFirst` via its field-level default
+- **AND** `spec.applyOrder` is stored as `ShootFirst` via its field-level default
 
 #### Scenario: ApplyOrder rejects invalid value
 
 - **WHEN** a CR is applied with `spec.applyOrder: "ShootFirst"`
 - **THEN** the API server rejects the request
 
-#### Scenario: ApplyOrder accepts HostFirst
+#### Scenario: ApplyOrder accepts SeedFirst
 
-- **WHEN** a CR is applied with `spec.applyOrder: "HostFirst"`
-- **THEN** the API server accepts the request and stores `spec.applyOrder: "HostFirst"`
+- **WHEN** a CR is applied with `spec.applyOrder: "SeedFirst"`
+- **THEN** the API server accepts the request and stores `spec.applyOrder: "SeedFirst"`
 
 ### Requirement: Source discriminated union
 
@@ -85,8 +85,8 @@ Callers SHALL set exactly one of `Helm` or `Kustomize`; the "exactly one" invari
 
 #### Scenario: Kustomize source variant compiles and marshals
 
-- **WHEN** a Go program constructs `Source{Kustomize: &KustomizeSource{URL: "https://github.com/x/y//p?ref=v1", HostPath: "host", RemotePath: "remote"}}`
-- **THEN** `json.Marshal` produces `{"kustomize":{"url":"https://github.com/x/y//p?ref=v1","hostPath":"host","remotePath":"remote"}}`
+- **WHEN** a Go program constructs `Source{Kustomize: &KustomizeSource{URL: "https://github.com/x/y//p?ref=v1", SeedPath: "seed", ShootPath: "shoot"}}`
+- **THEN** `json.Marshal` produces `{"kustomize":{"url":"https://github.com/x/y//p?ref=v1","seedPath":"seed","shootPath":"shoot"}}`
 - **AND** `json.Unmarshal` of that output round-trips to an equal `Source` value
 
 ---
@@ -101,12 +101,12 @@ Callers SHALL set exactly one of `Helm` or `Kustomize`; the "exactly one" invari
 | `Name` | `name` | yes (`MinLength=1`) | `string` |
 | `Version` | `version` | yes (`MinLength=1`) | `string` |
 | `Values` | `values,omitempty` | no | `*apiextensionsv1.JSON` |
-| `HostValues` | `hostValues,omitempty` | no | `*apiextensionsv1.JSON` |
-| `RemoteValues` | `remoteValues,omitempty` | no | `*apiextensionsv1.JSON` |
+| `SeedValues` | `seedValues,omitempty` | no | `*apiextensionsv1.JSON` |
+| `ShootValues` | `shootValues,omitempty` | no | `*apiextensionsv1.JSON` |
 
-Semantics: `Values` applies to both renders; `HostValues` overrides `Values` for the host render; `RemoteValues` overrides `Values` for the remote render. This change lands the type shape only; value merging is executed by Phase 2's Helm renderer.
+Semantics: `Values` applies to both renders; `SeedValues` overrides `Values` for the seed render; `ShootValues` overrides `Values` for the shoot render. This change lands the type shape only; value merging is executed by Phase 2's Helm renderer.
 
-The `Values`, `HostValues`, and `RemoteValues` fields MUST be marked `+kubebuilder:validation:Schemaless` and `+kubebuilder:pruning:PreserveUnknownFields` so arbitrary chart values are accepted without structural validation.
+The `Values`, `SeedValues`, and `ShootValues` fields MUST be marked `+kubebuilder:validation:Schemaless` and `+kubebuilder:pruning:PreserveUnknownFields` so arbitrary chart values are accepted without structural validation.
 
 #### Scenario: Helm version accepts semver constraint strings
 
@@ -129,36 +129,36 @@ The `Values`, `HostValues`, and `RemoteValues` fields MUST be marked `+kubebuild
 | Go field | JSON tag | Required | Type | Constraint |
 |---|---|---|---|---|
 | `URL` | `url` | yes | `string` | `MinLength=1`, must include `?ref=<value>` (CEL) |
-| `HostPath` | `hostPath` | yes | `string` | `MinLength=1` |
-| `RemotePath` | `remotePath` | yes | `string` | `MinLength=1` |
+| `SeedPath` | `seedPath` | yes | `string` | `MinLength=1` |
+| `ShootPath` | `shootPath` | yes | `string` | `MinLength=1` |
 
-`HostPath` and `RemotePath` are subpaths under `URL`; they name the two overlay directories the operator renders (host and remote respectively). No `+kubebuilder:default` markers are set on either field. This deviates from `docs/design.md` §3.3 and `docs/implementation.md` §Phase 1, which describe both fields as optional with defaults `"host"` and `"remote"` — the deviation is deliberate per the `design.md` decision "KustomizeSource.HostPath and RemotePath are both required, no defaults."
+`SeedPath` and `ShootPath` are subpaths under `URL`; they name the two overlay directories the operator renders (seed and shoot respectively). No `+kubebuilder:default` markers are set on either field. This deviates from `docs/design.md` §3.3 and `docs/implementation.md` §Phase 1, which describe both fields as optional with defaults `"seed"` and `"shoot"` — the deviation is deliberate per the `design.md` decision "KustomizeSource.SeedPath and ShootPath are both required, no defaults."
 
-#### Scenario: Missing HostPath is rejected
+#### Scenario: Missing SeedPath is rejected
 
-- **WHEN** a CR is applied with `spec.source.kustomize.url: "https://github.com/x/y//p?ref=v1"` and `remotePath: "remote"` but no `hostPath`
+- **WHEN** a CR is applied with `spec.source.kustomize.url: "https://github.com/x/y//p?ref=v1"` and `shootPath: "shoot"` but no `seedPath`
 - **THEN** the API server rejects the request
-- **AND** the rejection message identifies `spec.source.kustomize.hostPath` as required
+- **AND** the rejection message identifies `spec.source.kustomize.seedPath` as required
 
-#### Scenario: Empty HostPath is rejected
+#### Scenario: Empty SeedPath is rejected
 
-- **WHEN** a CR is applied with `spec.source.kustomize.hostPath: ""`
+- **WHEN** a CR is applied with `spec.source.kustomize.seedPath: ""`
 - **THEN** the API server rejects the request via the `MinLength=1` constraint
 
 #### Scenario: Explicit paths are accepted
 
-- **WHEN** a CR is applied with `spec.source.kustomize: {url: "https://github.com/x/y//p?ref=v1", hostPath: "overlays/host", remotePath: "overlays/remote"}`
+- **WHEN** a CR is applied with `spec.source.kustomize: {url: "https://github.com/x/y//p?ref=v1", seedPath: "overlays/seed", shootPath: "overlays/shoot"}`
 - **THEN** the API server accepts the request
-- **AND** the stored `hostPath` and `remotePath` values are exactly as submitted
+- **AND** the stored `seedPath` and `shootPath` values are exactly as submitted
 
 ---
 
-### Requirement: RemoteAccessRef fields
+### Requirement: ShootAccessRef fields
 
-`RemoteAccessRef` MUST declare two required fields and two optional fields:
+`ShootAccessRef` MUST declare two required fields and two optional fields:
 
 ```go
-type RemoteAccessRef struct {
+type ShootAccessRef struct {
     SecretName string `json:"secretName"`
     Server     string `json:"server"`
     TokenKey   string `json:"tokenKey,omitempty"`
@@ -172,22 +172,22 @@ The operator builds the shoot REST config directly from these — `{Host: Server
 
 #### Scenario: SecretName and Server required
 
-- **WHEN** a CR is applied with `spec.remoteAccess: {secretName: "kc"}` and no `server`
+- **WHEN** a CR is applied with `spec.shootAccess: {secretName: "kc"}` and no `server`
 - **THEN** the API server rejects the request
 
 #### Scenario: Server URL required
 
-- **WHEN** a CR is applied with `spec.remoteAccess: {server: "https://api.example:443"}` and no `secretName`
+- **WHEN** a CR is applied with `spec.shootAccess: {server: "https://api.example:443"}` and no `secretName`
 - **THEN** the API server rejects the request
 
 #### Scenario: Token and CA keys default to Gardener conventions
 
-- **WHEN** a CR is applied with `spec.remoteAccess: {secretName: "kc", server: "https://api.example:443"}` and no `tokenKey` or `caKey`
+- **WHEN** a CR is applied with `spec.shootAccess: {secretName: "kc", server: "https://api.example:443"}` and no `tokenKey` or `caKey`
 - **THEN** the operator reads the bearer token from the Secret key `token` and the CA bundle from the Secret key `bundle.crt`
 
 #### Scenario: Custom token and CA keys are honored
 
-- **WHEN** a CR is applied with `spec.remoteAccess.tokenKey: "access-token"` and `spec.remoteAccess.caKey: "ca.crt"`
+- **WHEN** a CR is applied with `spec.shootAccess.tokenKey: "access-token"` and `spec.shootAccess.caKey: "ca.crt"`
 - **THEN** the operator reads the bearer token from Secret key `access-token` and the CA bundle from Secret key `ca.crt`
 
 ---
@@ -360,8 +360,8 @@ type RetentionPolicy struct {
 
 ```go
 type DualDeploymentOperatorStatus struct {
-    HostResources   []ResourceStatus   `json:"hostResources,omitempty"`
-    RemoteResources []ResourceStatus   `json:"remoteResources,omitempty"`
+    SeedResources   []ResourceStatus   `json:"seedResources,omitempty"`
+    ShootResources []ResourceStatus   `json:"shootResources,omitempty"`
     Conditions      []metav1.Condition `json:"conditions,omitempty"`
     LastReconcile   *metav1.Time       `json:"lastReconcile,omitempty"`
 }
@@ -396,7 +396,7 @@ const (
 #### Scenario: Empty status round-trips
 
 - **WHEN** the no-op reconciler processes a CR
-- **THEN** `status.hostResources`, `status.remoteResources`, `status.conditions`, and `status.lastReconcile` remain unset
+- **THEN** `status.seedResources`, `status.shootResources`, `status.conditions`, and `status.lastReconcile` remain unset
 
 ---
 
@@ -423,24 +423,24 @@ The package `api/v1alpha1` MUST declare a `GroupVersion` variable at `dual-deplo
 - **THEN** the call returns `nil`
 - **AND** the scheme can encode and decode `DualDeploymentOperator` objects
 
-### Requirement: RemoteNamespace field
+### Requirement: ShootNamespace field
 
-`DualDeploymentOperatorSpec.RemoteNamespace` (JSON tag `remoteNamespace`) MUST be a required string naming the target namespace for the remote (shoot) render and delivery. It MUST be validated as a DNS-1123 label (`+kubebuilder:validation:MinLength=1` and `+kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$``). It carries no `omitempty` and no default — a value must be supplied. The host render/delivery does NOT use this field; the host target namespace is the CR's own `metadata.namespace`.
+`DualDeploymentOperatorSpec.ShootNamespace` (JSON tag `shootNamespace`) MUST be a required string naming the target namespace for the shoot render and delivery. It MUST be validated as a DNS-1123 label (`+kubebuilder:validation:MinLength=1` and `+kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$``). It carries no `omitempty` and no default — a value must be supplied. The seed render/delivery does NOT use this field; the seed target namespace is the CR's own `metadata.namespace`.
 
-#### Scenario: Missing remoteNamespace is rejected
+#### Scenario: Missing shootNamespace is rejected
 
-- **WHEN** a CR is applied with `spec.source` and `spec.remoteAccess` set but no `spec.remoteNamespace`
+- **WHEN** a CR is applied with `spec.source` and `spec.shootAccess` set but no `spec.shootNamespace`
 - **THEN** the API server rejects the request
-- **AND** the rejection identifies `spec.remoteNamespace` as required
+- **AND** the rejection identifies `spec.shootNamespace` as required
 
 #### Scenario: Invalid namespace value is rejected
 
-- **WHEN** a CR is applied with `spec.remoteNamespace` set to a value that is not a valid DNS-1123 label (for example `Invalid_NS` or an empty string)
+- **WHEN** a CR is applied with `spec.shootNamespace` set to a value that is not a valid DNS-1123 label (for example `Invalid_NS` or an empty string)
 - **THEN** the API server rejects the request
 
-#### Scenario: Valid remoteNamespace is accepted
+#### Scenario: Valid shootNamespace is accepted
 
-- **WHEN** a CR is applied with `spec.remoteNamespace` set to a valid DNS-1123 label (for example `metal-operator`)
+- **WHEN** a CR is applied with `spec.shootNamespace` set to a valid DNS-1123 label (for example `metal-operator`)
 - **THEN** the API server accepts the request
-- **AND** the stored object preserves `spec.remoteNamespace`
+- **AND** the stored object preserves `spec.shootNamespace`
 

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Defines the typed Go transformation pipeline applied to each render's manifest stream in the dual-deployment-operator. The `internal/transform` package provides a `Transformation` interface and three concrete implementations (`patch`, `rewriteWebhookURL`, `filterKinds`) that are composed and applied independently to the host render and the remote render.
+Defines the typed Go transformation pipeline applied to each render's manifest stream in the dual-deployment-operator. The `internal/transform` package provides a `Transformation` interface and three concrete implementations (`patch`, `rewriteWebhookURL`, `filterKinds`) that are composed and applied independently to the seed render and the shoot render.
 
 ## Requirements
 
@@ -183,7 +183,7 @@ The `filterKinds` transformation SHALL drop manifests whose kind is in its `kind
 
 ### Requirement: Transformations do not mutate input in place
 
-Every transformation's `Apply` SHALL return fresh `[]manifest.Manifest` and MUST NOT mutate the caller's input slice or the underlying `unstructured.Unstructured` objects. The reconciler threads the same ordered `[]Transformation` through the host render and the remote render independently, so mutating shared state would corrupt the second render.
+Every transformation's `Apply` SHALL return fresh `[]manifest.Manifest` and MUST NOT mutate the caller's input slice or the underlying `unstructured.Unstructured` objects. The reconciler threads the same ordered `[]Transformation` through the seed render and the shoot render independently, so mutating shared state would corrupt the second render.
 
 #### Scenario: Input slice and objects unchanged after Apply
 

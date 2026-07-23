@@ -13,118 +13,112 @@ Defines the full reconciliation pipeline of the `DualDeploymentOperator` control
 
 ### Requirement: Two-render reconcile pipeline
 
-The reconciler SHALL, on each reconcile of a `DualDeploymentOperator`, build the source renderer from `spec.source`, render it twice (host mode using the CR's own namespace; remote mode using `spec.remoteNamespace`), apply the declared transformations to each render independently in declaration order, sort each render by the fixed intra-render kind priority, and then deliver each render to its target cluster. A failure in source construction, rendering, or transformation SHALL be fatal to the reconcile and set a `Ready=False` condition with a reason identifying the failing stage. A missing shoot-access Secret is likewise fatal (`ShootClientFailed`); however, a shoot-access Secret that exists but whose token/CA are not yet populated is NOT fatal — it is a benign progressing state (see the "Remote credentials not yet ready" requirement).
+The reconciler SHALL, on each reconcile of a `DualDeploymentOperator`, build the source renderer from `spec.source`, render it twice (seed mode using the CR's own namespace; shoot mode using `spec.shootNamespace`), apply the declared transformations to each render independently in declaration order, sort each render by the fixed intra-render kind priority, and then deliver each render to its target cluster. A failure in source construction, rendering, or transformation SHALL be fatal to the reconcile and set a `Ready=False` condition with a reason identifying the failing stage. A missing shoot-access Secret is likewise fatal (`ShootClientFailed`); however, a shoot-access Secret that exists but whose token/CA are not yet populated is NOT fatal — it is a benign progressing state (see the "Shoot credentials not yet ready" requirement).
 
-#### Scenario: Host and remote rendered with mode-specific namespace
+#### Scenario: Seed and shoot rendered with mode-specific namespace
 
 - **WHEN** a CR is reconciled
-- **THEN** the source is rendered once in host mode with the CR's `metadata.namespace`
-- **AND** rendered once in remote mode with `spec.remoteNamespace`
+- **THEN** the source is rendered once in seed mode with the CR's `metadata.namespace`
+- **AND** rendered once in shoot mode with `spec.shootNamespace`
 
 #### Scenario: Transformations applied per render in declaration order
 
 - **WHEN** `spec.transformations` is non-empty
-- **THEN** each transformation is applied to the host render and the remote render independently, in declaration order
+- **THEN** each transformation is applied to the seed render and the shoot render independently, in declaration order
 
 #### Scenario: Render or transform failure is fatal and surfaced
 
 - **WHEN** source construction, a render, or a transformation fails, or the shoot-access Secret is missing
 - **THEN** the reconcile stops before delivery of the affected render
-- **AND** sets `Ready=False` with a reason identifying the stage (e.g. `InvalidSource`, `HostRenderFailed`, `RemoteRenderFailed`, `InvalidTransformation`, `ShootClientFailed`)
+- **AND** sets `Ready=False` with a reason identifying the stage (e.g. `InvalidSource`, `SeedRenderFailed`, `ShootRenderFailed`, `InvalidTransformation`, `ShootClientFailed`)
 - **AND** requeues
 
----
+### Requirement: Shoot failure severity respects spec.applyOrder
 
-### Requirement: Remote failure severity respects spec.applyOrder
+The reconciler SHALL distinguish three shoot-render outcomes and, under `ShootFirst`, use them to decide whether the seed render may proceed. This respects the `ShootFirst` contract — seed depends on the shoot (CRDs/RBAC/webhooks) being present first, so the seed render MUST NOT proceed when the shoot render has not fully converged.
 
-The reconciler SHALL distinguish three remote-render outcomes and, under `RemoteFirst`, use them to decide whether the host render may proceed. This respects the `RemoteFirst` contract — host depends on the remote (CRDs/RBAC/webhooks) being present first, so the host render MUST NOT proceed when the remote render has not fully converged.
+**Why any shoot failure gates seed under `ShootFirst`.** The shoot cluster is a **workless** cluster: the shoot render contains only structural dependencies the seed controller consumes — CRDs, ClusterRoles/Roles and their bindings, ServiceAccounts, Validating/Mutating WebhookConfigurations, and additions. There are effectively no "seed doesn't care" resources in the shoot render. Therefore a *partial* shoot failure is not benign under `ShootFirst`: whatever failed is something the seed depends on, and starting the seed render against a missing CRD/RBAC/webhook would crash-loop or silently no-op the seed controller. So under `ShootFirst` **both** partial and complete shoot failures gate the seed render. Partial vs complete still differ in *diagnostics* (which resources failed, and the requeue path) but not in the seed-gating decision.
 
-**Why any remote failure gates host under `RemoteFirst`.** The remote (shoot) cluster is a **workless** cluster: the remote render contains only structural dependencies the host controller consumes — CRDs, ClusterRoles/Roles and their bindings, ServiceAccounts, Validating/Mutating WebhookConfigurations, and additions. There are effectively no "host doesn't care" resources in the remote render. Therefore a *partial* remote failure is not benign under `RemoteFirst`: whatever failed is something the host depends on, and starting the host render against a missing CRD/RBAC/webhook would crash-loop or silently no-op the host controller. So under `RemoteFirst` **both** partial and complete remote failures gate the host render. Partial vs complete still differ in *diagnostics* (which resources failed, and the requeue path) but not in the host-gating decision.
+- **Partial failure** — the shoot client was built and at least one shoot resource applied, but some failed. Under `ShootFirst` the reconciler SHALL **stop before applying the seed render** (the failed structural resources are seed dependencies), record the failed shoot resources as `Health=Degraded` with a `Message`, set `Ready=False` reason `ResourcesDegraded`, aggregate the per-resource errors, and requeue. Under `SeedFirst` the seed render is applied first regardless and the failures are flagged (`ResourcesDegraded`) without blocking seed.
+- **Complete shoot failure** — the shoot client cannot be built or reached (e.g. shoot NotFound/unreachable, forbidden), or zero of the shoot render's resources applied. Under `ShootFirst` the reconciler SHALL **stop before applying the seed render**, set `Ready=False` reason `ShootApplyFailed`, and requeue. Under `SeedFirst` the seed render is applied first regardless and the shoot failure is flagged (`ShootApplyFailed`) but does not block seed.
+- **Credentials not yet ready** — the shoot-access Secret exists but the token or CA bundle is absent or empty (the normal window before Gardener's token-requestor fills it). This is a benign bootstrap wait, **not** a failure: the reconciler SHALL set `Ready=False` reason `WaitingForShootCredentials` (progressing, not degraded) and requeue with a short backoff. Under `ShootFirst` it also **defers the seed render** (seed must not start before the shoot it depends on); under `SeedFirst` the seed render is applied first regardless.
 
-- **Partial failure** — the shoot client was built and at least one remote resource applied, but some failed. Under `RemoteFirst` the reconciler SHALL **stop before applying the host render** (the failed structural resources are host dependencies), record the failed remote resources as `Health=Degraded` with a `Message`, set `Ready=False` reason `ResourcesDegraded`, aggregate the per-resource errors, and requeue. Under `HostFirst` the host render is applied first regardless and the failures are flagged (`ResourcesDegraded`) without blocking host.
-- **Complete remote failure** — the shoot client cannot be built or reached (e.g. shoot NotFound/unreachable, forbidden), or zero of the remote render's resources applied. Under `RemoteFirst` the reconciler SHALL **stop before applying the host render**, set `Ready=False` reason `RemoteApplyFailed`, and requeue. Under `HostFirst` the host render is applied first regardless and the remote failure is flagged (`RemoteApplyFailed`) but does not block host.
-- **Credentials not yet ready** — the shoot-access Secret exists but the token or CA bundle is absent or empty (the normal window before Gardener's token-requestor fills it). This is a benign bootstrap wait, **not** a failure: the reconciler SHALL set `Ready=False` reason `WaitingForShootCredentials` (progressing, not degraded) and requeue with a short backoff. Under `RemoteFirst` it also **defers the host render** (host must not start before the remote it depends on); under `HostFirst` the host render is applied first regardless.
+`SeedFirst` never blocks the seed render on a shoot outcome — the consumer has declared seed does not depend on shoot coming up first. Only `ShootFirst` gates the seed render on shoot convergence; under `ShootFirst` *any* incomplete shoot outcome (partial, complete, or credentials-not-ready) gates seed.
 
-`HostFirst` never blocks the host render on a remote outcome — the consumer has declared host does not depend on remote coming up first. Only `RemoteFirst` gates the host render on remote convergence; under `RemoteFirst` *any* incomplete remote outcome (partial, complete, or credentials-not-ready) gates host.
+#### Scenario: ShootFirst — complete shoot failure stops before seed
 
-#### Scenario: RemoteFirst — complete remote failure stops before host
-
-- **WHEN** a CR with `spec.applyOrder: RemoteFirst` (or unset) is reconciled and the remote render cannot be applied at all (shoot NotFound/unreachable, forbidden, or zero resources applied)
-- **THEN** the host render is NOT applied this cycle
-- **AND** the `Ready` condition is `False` with reason `RemoteApplyFailed`
+- **WHEN** a CR with `spec.applyOrder: ShootFirst` (or unset) is reconciled and the shoot render cannot be applied at all (shoot NotFound/unreachable, forbidden, or zero resources applied)
+- **THEN** the seed render is NOT applied this cycle
+- **AND** the `Ready` condition is `False` with reason `ShootApplyFailed`
 - **AND** the reconcile requeues
 
-#### Scenario: RemoteFirst — credentials not ready defers host
+#### Scenario: ShootFirst — credentials not ready defers seed
 
-- **WHEN** a CR with `spec.applyOrder: RemoteFirst` (or unset) is reconciled and its shoot-access Secret exists but the token or CA is absent or empty
-- **THEN** neither the remote nor the host render is applied this cycle
+- **WHEN** a CR with `spec.applyOrder: ShootFirst` (or unset) is reconciled and its shoot-access Secret exists but the token or CA is absent or empty
+- **THEN** neither the shoot nor the seed render is applied this cycle
 - **AND** the `Ready` condition is `False` with reason `WaitingForShootCredentials` (progressing, not degraded)
 - **AND** the reconcile requeues with a short backoff
 
-#### Scenario: RemoteFirst — partial remote failure also stops before host
+#### Scenario: ShootFirst — partial shoot failure also stops before seed
 
-- **WHEN** a CR with `spec.applyOrder: RemoteFirst` (or unset) is reconciled, the shoot client is built, and at least one remote resource applies while some fail
-- **THEN** the host render is NOT applied this cycle (the failed remote resources are structural dependencies the host consumes)
-- **AND** the failed remote resources are recorded `Health=Degraded` with a `Message`
+- **WHEN** a CR with `spec.applyOrder: ShootFirst` (or unset) is reconciled, the shoot client is built, and at least one shoot resource applies while some fail
+- **THEN** the seed render is NOT applied this cycle (the failed shoot resources are structural dependencies the seed consumes)
+- **AND** the failed shoot resources are recorded `Health=Degraded` with a `Message`
 - **AND** the `Ready` condition is `False` with reason `ResourcesDegraded`
 - **AND** the reconcile requeues
 
-#### Scenario: HostFirst — host applies despite partial remote failure
+#### Scenario: SeedFirst — seed applies despite partial shoot failure
 
-- **WHEN** a CR with `spec.applyOrder: HostFirst` is reconciled and the remote render has partial per-resource failures
-- **THEN** the host render is still applied first
-- **AND** the failed remote resources are flagged `ResourcesDegraded` without blocking the host render
+- **WHEN** a CR with `spec.applyOrder: SeedFirst` is reconciled and the shoot render has partial per-resource failures
+- **THEN** the seed render is still applied first
+- **AND** the failed shoot resources are flagged `ResourcesDegraded` without blocking the seed render
 
-#### Scenario: HostFirst — host applies regardless of remote outcome
+#### Scenario: SeedFirst — seed applies regardless of shoot outcome
 
-- **WHEN** a CR with `spec.applyOrder: HostFirst` is reconciled and the remote render is a complete failure or credentials are not ready
-- **THEN** the host render is still applied first
-- **AND** the remote failure is flagged (`RemoteApplyFailed`) or the wait is flagged (`WaitingForShootCredentials`) without blocking the host render
+- **WHEN** a CR with `spec.applyOrder: SeedFirst` is reconciled and the shoot render is a complete failure or credentials are not ready
+- **THEN** the seed render is still applied first
+- **AND** the shoot failure is flagged (`ShootApplyFailed`) or the wait is flagged (`WaitingForShootCredentials`) without blocking the seed render
 
 #### Scenario: Credentials populated on a later reconcile proceed normally
 
 - **WHEN** a subsequent reconcile finds the token and CA present and non-empty
-- **THEN** the shoot client is built and the remote render is applied normally
-
----
+- **THEN** the shoot client is built and the shoot render is applied normally
 
 ### Requirement: Cross-render apply order via spec.applyOrder
 
-The reconciler SHALL apply the two renders to their target clusters in the order given by `spec.applyOrder` (`RemoteFirst` default, or `HostFirst`). Whether the second render proceeds after the first render has failures depends on the ordering: under `HostFirst` the host render (first) is always applied and the remote render (second) follows regardless of host per-resource failures; under `RemoteFirst` the host render (second) is **gated on the remote render (first) fully converging** — *any* incomplete remote outcome (partial per-resource failure, complete failure, or credentials-not-ready) stops or defers the host render per the "Remote failure severity respects spec.applyOrder" requirement, because the workless shoot's remote render is entirely structural dependencies (CRDs/RBAC/webhooks) the host consumes. `HostFirst` never gates the host render on the remote outcome. Intra-render kind ordering remains the fixed built-in priority and is not affected by `applyOrder`.
+The reconciler SHALL apply the two renders to their target clusters in the order given by `spec.applyOrder` (`ShootFirst` default, or `SeedFirst`). Whether the second render proceeds after the first render has failures depends on the ordering: under `SeedFirst` the seed render (first) is always applied and the shoot render (second) follows regardless of seed per-resource failures; under `ShootFirst` the seed render (second) is **gated on the shoot render (first) fully converging** — *any* incomplete shoot outcome (partial per-resource failure, complete failure, or credentials-not-ready) stops or defers the seed render per the "Shoot failure severity respects spec.applyOrder" requirement, because the workless shoot's shoot render is entirely structural dependencies (CRDs/RBAC/webhooks) the seed consumes. `SeedFirst` never gates the seed render on the shoot outcome. Intra-render kind ordering remains the fixed built-in priority and is not affected by `applyOrder`.
 
-`spec.applyOrder` governs cross-render sequencing for both directions: **all deletion — both per-reconcile prune and CR-deletion teardown — SHALL process the two renders in the reverse of `spec.applyOrder`.** Under the default `RemoteFirst`, apply sequences remote-then-host, so deletion sequences host-then-remote (the host controller stops before the shoot CRDs/RBAC it depends on are removed); under `HostFirst` the reverse holds. This cross-render reversal is independent of, and composes with, the fixed intra-render kind-priority reversal already applied within each render.
+`spec.applyOrder` governs cross-render sequencing for both directions: **all deletion — both per-reconcile prune and CR-deletion teardown — SHALL process the two renders in the reverse of `spec.applyOrder`.** Under the default `ShootFirst`, apply sequences shoot-then-seed, so deletion sequences seed-then-shoot (the seed controller stops before the shoot CRDs/RBAC it depends on are removed); under `SeedFirst` the reverse holds. This cross-render reversal is independent of, and composes with, the fixed intra-render kind-priority reversal already applied within each render.
 
-#### Scenario: RemoteFirst applies remote render before host render
+#### Scenario: ShootFirst applies shoot render before seed render
 
-- **WHEN** a CR with `spec.applyOrder: RemoteFirst` (or unset) is reconciled
-- **THEN** the remote render is applied to the shoot cluster before the host render is applied to the seed cluster
+- **WHEN** a CR with `spec.applyOrder: ShootFirst` (or unset) is reconciled
+- **THEN** the shoot render is applied to the shoot cluster before the seed render is applied to the seed cluster
 
-#### Scenario: HostFirst applies host render before remote render
+#### Scenario: SeedFirst applies seed render before shoot render
 
-- **WHEN** a CR with `spec.applyOrder: HostFirst` is reconciled
-- **THEN** the host render is applied to the seed cluster before the remote render is applied to the shoot cluster
+- **WHEN** a CR with `spec.applyOrder: SeedFirst` is reconciled
+- **THEN** the seed render is applied to the seed cluster before the shoot render is applied to the shoot cluster
 
 #### Scenario: Deletion reverses the cross-render apply order
 
-- **WHEN** a CR with `spec.applyOrder: RemoteFirst` (or unset) is deleted, or a reconcile prunes orphans from both renders
-- **THEN** the host render's resources are deleted before the remote render's resources (the reverse of the apply order)
+- **WHEN** a CR with `spec.applyOrder: ShootFirst` (or unset) is deleted, or a reconcile prunes orphans from both renders
+- **THEN** the seed render's resources are deleted before the shoot render's resources (the reverse of the apply order)
 
-#### Scenario: HostFirst deletion order is remote-then-host
+#### Scenario: SeedFirst deletion order is shoot-then-seed
 
-- **WHEN** a CR with `spec.applyOrder: HostFirst` is deleted, or a reconcile prunes orphans from both renders
-- **THEN** the remote render's resources are deleted before the host render's resources (the reverse of the apply order)
+- **WHEN** a CR with `spec.applyOrder: SeedFirst` is deleted, or a reconcile prunes orphans from both renders
+- **THEN** the shoot render's resources are deleted before the seed render's resources (the reverse of the apply order)
 
-#### Scenario: HostFirst — remote render still applied despite host per-resource failures
+#### Scenario: SeedFirst — shoot render still applied despite seed per-resource failures
 
-- **WHEN** a CR with `spec.applyOrder: HostFirst` is reconciled and the host render (first) has one or more per-resource apply failures but is not a complete failure (at least one resource applied)
-- **THEN** the remote render (second) is still applied
+- **WHEN** a CR with `spec.applyOrder: SeedFirst` is reconciled and the seed render (first) has one or more per-resource apply failures but is not a complete failure (at least one resource applied)
+- **THEN** the shoot render (second) is still applied
 - **AND** all failures are aggregated into status
-
----
 
 ### Requirement: Continue-on-error aggregation across a render
 
-When applying a render, the reconciler SHALL attempt every resource, recording each resource's `ResourceStatus` (including `Health=Degraded` and a `Message` for failures), and SHALL aggregate all per-resource errors so the reconcile requeues while still applying the healthy resources. A single failing resource MUST NOT abort the remaining resources in that render. A cluster-scoped host object that the delivery layer refuses to apply because it is owned by a *different* CR (see the resource-delivery "Cluster-scoped apply is guarded against cross-CR conflict" requirement) is one such per-resource failure: it is recorded `Health=Degraded` with a `Message` naming the conflicting owner and aggregated like any other, never aborting the batch.
+When applying a render, the reconciler SHALL attempt every resource, recording each resource's `ResourceStatus` (including `Health=Degraded` and a `Message` for failures), and SHALL aggregate all per-resource errors so the reconcile requeues while still applying the healthy resources. A single failing resource MUST NOT abort the remaining resources in that render. A cluster-scoped seed object that the delivery layer refuses to apply because it is owned by a *different* CR (see the resource-delivery "Cluster-scoped apply is guarded against cross-CR conflict" requirement) is one such per-resource failure: it is recorded `Health=Degraded` with a `Message` naming the conflicting owner and aggregated like any other, never aborting the batch.
 
 #### Scenario: One failing resource does not block the batch
 
@@ -135,16 +129,14 @@ When applying a render, the reconciler SHALL attempt every resource, recording e
 
 #### Scenario: Cross-CR cluster-scoped conflict is a continue-on-error failure
 
-- **WHEN** applying a host render whose cluster-scoped object is already owned by a different CR, so the delivery layer refuses to apply it
+- **WHEN** applying a seed render whose cluster-scoped object is already owned by a different CR, so the delivery layer refuses to apply it
 - **THEN** that object is recorded with `Health=Degraded` and a `Message` identifying the conflicting owner
-- **AND** the remaining host resources are still applied
+- **AND** the remaining seed resources are still applied
 - **AND** the reconcile returns an aggregated error and requeues (it does not clobber the foreign-owned object)
-
----
 
 ### Requirement: Prune resources that leave a render
 
-After applying each render, the reconciler SHALL prune orphans: it SHALL diff the previous applied-set (recorded in `status.hostResources` / `status.remoteResources`) against the new render using a version-independent identity key `group/kind/namespace/name`, and delete resources present before but absent now, on that render's own target client. Within each render the orphans SHALL be deleted in reverse of the fixed intra-render kind priority; across the two renders the prune SHALL process them in the reverse of `spec.applyOrder` (the same cross-render reversal used by CR-deletion teardown). A `CustomResourceDefinition` orphan SHALL NOT be deleted while `spec.retentionPolicy.crds` is `Retain`. Status SHALL be written after apply and prune so a failed prune leaves the orphan tracked and retried on the next reconcile.
+After applying each render, the reconciler SHALL prune orphans: it SHALL diff the previous applied-set (recorded in `status.seedResources` / `status.shootResources`) against the new render using a version-independent identity key `group/kind/namespace/name`, and delete resources present before but absent now, on that render's own target client. Within each render the orphans SHALL be deleted in reverse of the fixed intra-render kind priority; across the two renders the prune SHALL process them in the reverse of `spec.applyOrder` (the same cross-render reversal used by CR-deletion teardown). A `CustomResourceDefinition` orphan SHALL NOT be deleted while `spec.retentionPolicy.crds` is `Retain`. Status SHALL be written after apply and prune so a failed prune leaves the orphan tracked and retried on the next reconcile.
 
 #### Scenario: Non-CRD orphan is pruned
 
@@ -172,11 +164,9 @@ After applying each render, the reconciler SHALL prune orphans: it SHALL diff th
 - **THEN** the orphan remains recorded in status
 - **AND** deletion is retried on the next reconcile
 
----
-
 ### Requirement: Status population and Ready condition
 
-After apply and prune, the reconciler SHALL populate `status.hostResources`, `status.remoteResources`, a `LastReconcile` timestamp, and a `Ready` condition aggregated from all per-resource health: `True` when all resources are `Healthy`, `False` with reason `ResourcesDegraded` when any is `Degraded`, and `False` with reason `Progressing` when any is `Progressing` and none is `Degraded`.
+After apply and prune, the reconciler SHALL populate `status.seedResources`, `status.shootResources`, a `LastReconcile` timestamp, and a `Ready` condition aggregated from all per-resource health: `True` when all resources are `Healthy`, `False` with reason `ResourcesDegraded` when any is `Degraded`, and `False` with reason `Progressing` when any is `Progressing` and none is `Degraded`.
 
 #### Scenario: Ready is True when all resources healthy
 
@@ -191,40 +181,48 @@ After apply and prune, the reconciler SHALL populate `status.hostResources`, `st
 #### Scenario: Status records the applied set for the next prune
 
 - **WHEN** a reconcile completes apply and prune
-- **THEN** `status.hostResources` and `status.remoteResources` reflect the resources of the render just applied
+- **THEN** `status.seedResources` and `status.shootResources` reflect the resources of the render just applied
 - **AND** `status.lastReconcile` is set to the reconcile time
-
----
 
 ### Requirement: Finalizer-driven deletion with reverse cross-render order
 
-The reconciler SHALL add a finalizer on first reconcile and, on CR deletion, tear down resources in the reverse of `spec.applyOrder`. Remote resources SHALL be deleted explicitly via the shoot client (respecting `spec.retentionPolicy.crds` for CRDs); host resources are removed by owner-reference garbage collection. The finalizer SHALL be removed only once remote deletion is confirmed complete (every remote resource deleted or observed NotFound). If the shoot is unreachable during CR deletion, the operator SHALL NOT remove the finalizer and SHALL NOT assume the resources are gone: "unreachable" is indistinguishable from "transiently down" and does not imply "deleted." Instead it SHALL surface a `ShootUnreachable` condition and Kubernetes Event on the CR and requeue, keeping the CR in `Terminating` until either the shoot becomes reachable and cleanup completes, or an operator manually removes the finalizer. This deliberately prevents silently orphaning live shoot resources; the trade-off (a CR can remain in `Terminating` if the shoot is genuinely gone and no one clears the finalizer) is accepted and surfaced rather than auto-resolved.
+The reconciler SHALL add a finalizer on first reconcile and, on CR deletion, tear down resources in the reverse of `spec.applyOrder`. Shoot resources SHALL be deleted explicitly via the shoot client (respecting `spec.retentionPolicy.crds` for CRDs); seed resources are removed by owner-reference garbage collection. The finalizer SHALL be removed only once shoot deletion is confirmed complete (every shoot resource deleted or observed NotFound). If the shoot is unreachable during CR deletion, the operator SHALL NOT remove the finalizer and SHALL NOT assume the resources are gone: "unreachable" is indistinguishable from "transiently down" and does not imply "deleted." Instead it SHALL surface a `ShootUnreachable` condition and Kubernetes Event on the CR and requeue, keeping the CR in `Terminating` until either the shoot becomes reachable and cleanup completes, or an operator manually removes the finalizer. This deliberately prevents silently orphaning live shoot resources; the trade-off (a CR can remain in `Terminating` if the shoot is genuinely gone and no one clears the finalizer) is accepted and surfaced rather than auto-resolved.
 
 #### Scenario: Finalizer added on first reconcile
 
 - **WHEN** a CR without the operator finalizer is reconciled
 - **THEN** the finalizer is added and the CR is updated before delivery proceeds
 
-#### Scenario: Remote resources deleted on CR deletion, CRDs retained
+#### Scenario: Shoot resources deleted on CR deletion, CRDs retained
 
 - **WHEN** a CR with `spec.retentionPolicy.crds: Retain` is deleted and the shoot is reachable
-- **THEN** all non-CRD remote resources are deleted via the shoot client in reverse-delete order
+- **THEN** all non-CRD shoot resources are deleted via the shoot client in reverse-delete order
 - **AND** CustomResourceDefinitions on the shoot are retained
-- **AND** the finalizer is removed only after remote deletion succeeds
+- **AND** the finalizer is removed only after shoot deletion succeeds
 
 #### Scenario: Finalizer retained when reachable shoot delete fails
 
-- **WHEN** the shoot is reachable but one or more remote deletes fail during CR deletion
+- **WHEN** the shoot is reachable but one or more shoot deletes fail during CR deletion
 - **THEN** the finalizer is not removed
 - **AND** the reconcile requeues to retry
 
 #### Scenario: Unreachable shoot blocks finalizer removal and is surfaced
 
 - **WHEN** the shoot client cannot be built or reached during CR deletion
-- **THEN** the finalizer is NOT removed and the remote resources are NOT assumed gone
+- **THEN** the finalizer is NOT removed and the shoot resources are NOT assumed gone
 - **AND** a `ShootUnreachable` condition and a Kubernetes Event are set on the CR
 - **AND** the reconcile requeues so cleanup completes if the shoot returns
 - **AND** the CR stays in `Terminating` until the shoot is reachable or an operator manually removes the finalizer
+
+### Requirement: Reconciler replaces the no-op behavior
+
+The `DualDeploymentOperator` reconciler SHALL perform the full render → transform → deliver → prune → status pipeline described above, replacing the prior no-op reconcile that only fetched the CR and requeued.
+
+#### Scenario: Reconcile delivers resources rather than no-op
+
+- **WHEN** a valid CR is reconciled
+- **THEN** the operator renders, transforms, and applies resources to the seed and shoot clusters and populates status
+- **AND** it does not merely fetch the CR and return
 
 ---
 
@@ -259,15 +257,3 @@ The reconciler SHALL rely on controller-runtime's per-CR workqueue serialization
 - **WHEN** the operator runs with leader election enabled and more than one pod exists (including the transient overlap during a rolling update)
 - **THEN** only the pod holding the lease reconciles CRs
 - **AND** the other pods remain passive standbys
-
----
-
-### Requirement: Reconciler replaces the no-op behavior
-
-The `DualDeploymentOperator` reconciler SHALL perform the full render → transform → deliver → prune → status pipeline described above, replacing the prior no-op reconcile that only fetched the CR and requeued.
-
-#### Scenario: Reconcile delivers resources rather than no-op
-
-- **WHEN** a valid CR is reconciled
-- **THEN** the operator renders, transforms, and applies resources to the host and shoot clusters and populates status
-- **AND** it does not merely fetch the CR and return

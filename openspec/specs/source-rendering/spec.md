@@ -5,13 +5,13 @@ TBD - created by archiving change source-renderers-helm-kustomize. Update Purpos
 ## Requirements
 ### Requirement: Source interface and Mode
 
-The `internal/source` package SHALL define a `Mode` string type with exactly two constants — `ModeHost` (value `"host"`) and `ModeRemote` (value `"remote"`) — and a `Source` interface with a single method `Render(ctx context.Context, mode Mode, namespace string) ([]manifest.Manifest, error)`. A `Source` implementation MUST return the manifest stream for the requested mode only, tagged with `Origin` per the manifest-parsing capability, with namespaced resources placed in the given `namespace` per the target-namespace requirement.
+The `internal/source` package SHALL define a `Mode` string type with exactly two constants — `ModeSeed` (value `"seed"`) and `ModeShoot` (value `"shoot"`) — and a `Source` interface with a single method `Render(ctx context.Context, mode Mode, namespace string) ([]manifest.Manifest, error)`. A `Source` implementation MUST return the manifest stream for the requested mode only, tagged with `Origin` per the manifest-parsing capability, with namespaced resources placed in the given `namespace` per the target-namespace requirement.
 
 #### Scenario: Mode constants have stable values
 
 - **WHEN** the `Mode` constants are compared as strings
-- **THEN** `ModeHost` equals `"host"`
-- **AND** `ModeRemote` equals `"remote"`
+- **THEN** `ModeSeed` equals `"seed"`
+- **AND** `ModeShoot` equals `"shoot"`
 
 #### Scenario: Render returns a manifest stream for a mode
 
@@ -68,19 +68,19 @@ The package SHALL define a `ChartLoader` interface with a method `Load(ctx conte
 
 ### Requirement: Helm values merge and mode injection
 
-The Helm renderer SHALL merge values in this precedence order (lowest to highest): the chart's own `values.yaml` defaults, `spec.helm.values` (common), the mode-specific overrides (`spec.helm.hostValues` for host or `spec.helm.remoteValues` for remote), and finally an operator-injected `{mode: <mode>}` at the highest precedence. The renderer MUST inject `mode` itself and MUST reject rendering with an error if the merged user-supplied values already set a top-level `mode` key.
+The Helm renderer SHALL merge values in this precedence order (lowest to highest): the chart's own `values.yaml` defaults, `spec.helm.values` (common), the mode-specific overrides (`spec.helm.seedValues` for seed or `spec.helm.shootValues` for shoot), and finally an operator-injected `{mode: <mode>}` at the highest precedence. The renderer MUST inject `mode` itself and MUST reject rendering with an error if the merged user-supplied values already set a top-level `mode` key.
 
-#### Scenario: Mode injected at highest precedence for host
+#### Scenario: Mode injected at highest precedence for seed
 
-- **WHEN** the Helm renderer renders in `ModeHost`
-- **THEN** the effective values contain `mode: host`
-- **AND** `spec.helm.hostValues` are merged above `spec.helm.values`
+- **WHEN** the Helm renderer renders in `ModeSeed`
+- **THEN** the effective values contain `mode: seed`
+- **AND** `spec.helm.seedValues` are merged above `spec.helm.values`
 
-#### Scenario: Mode injected at highest precedence for remote
+#### Scenario: Mode injected at highest precedence for shoot
 
-- **WHEN** the Helm renderer renders in `ModeRemote`
-- **THEN** the effective values contain `mode: remote`
-- **AND** `spec.helm.remoteValues` are merged above `spec.helm.values`
+- **WHEN** the Helm renderer renders in `ModeShoot`
+- **THEN** the effective values contain `mode: shoot`
+- **AND** `spec.helm.shootValues` are merged above `spec.helm.values`
 
 #### Scenario: User-supplied mode rejected
 
@@ -108,11 +108,11 @@ The Helm renderer SHALL render chart templates in client-only dry-run mode (no c
 - **WHEN** the Helm renderer renders a chart whose own templates set the `dual-deployment-operator.cc.sap/origin: additions` annotation
 - **THEN** those manifests have `Origin` of `OriginAdditions`
 
-#### Scenario: Host and remote renders differ by mode
+#### Scenario: Seed and shoot renders differ by mode
 
-- **WHEN** the Helm renderer renders the same source once in `ModeHost` and once in `ModeRemote`
+- **WHEN** the Helm renderer renders the same source once in `ModeSeed` and once in `ModeShoot`
 - **THEN** each render contains only the resources its mode guards enable
-- **AND** the two manifest sets are the disjoint host/remote sets the chart defines for each mode
+- **AND** the two manifest sets are the disjoint seed/shoot sets the chart defines for each mode
 
 ---
 
@@ -135,18 +135,18 @@ The package SHALL define a `RootResolver` interface that resolves a kustomize ro
 
 ### Requirement: Kustomize overlay selection by mode
 
-The kustomize renderer SHALL select the overlay subpath by mode: `spec.kustomize.hostPath` for `ModeHost` and `spec.kustomize.remotePath` for `ModeRemote`. It MUST build the resolved root with `krusty` and MUST parse the build output into `manifest.Manifest` values via the manifest-parsing capability with a fallback origin of `OriginUpstream`.
+The kustomize renderer SHALL select the overlay subpath by mode: `spec.kustomize.seedPath` for `ModeSeed` and `spec.kustomize.shootPath` for `ModeShoot`. It MUST build the resolved root with `krusty` and MUST parse the build output into `manifest.Manifest` values via the manifest-parsing capability with a fallback origin of `OriginUpstream`.
 
-#### Scenario: Host mode builds the host overlay
+#### Scenario: Seed mode builds the seed overlay
 
-- **WHEN** the kustomize renderer renders in `ModeHost`
-- **THEN** it resolves and builds the root at the `hostPath` subpath
+- **WHEN** the kustomize renderer renders in `ModeSeed`
+- **THEN** it resolves and builds the root at the `seedPath` subpath
 - **AND** returns the manifests that overlay selects
 
-#### Scenario: Remote mode builds the remote overlay
+#### Scenario: Shoot mode builds the shoot overlay
 
-- **WHEN** the kustomize renderer renders in `ModeRemote`
-- **THEN** it resolves and builds the root at the `remotePath` subpath
+- **WHEN** the kustomize renderer renders in `ModeShoot`
+- **THEN** it resolves and builds the root at the `shootPath` subpath
 - **AND** returns the manifests that overlay selects
 
 #### Scenario: Kustomize additions carry additions origin
@@ -179,11 +179,11 @@ Both renderers SHALL place the render's output into the `namespace` argument pas
 - **AND** `Render` is called with target namespace `N`
 - **THEN** the resulting manifest has no `metadata.namespace`
 
-#### Scenario: Host uses CR namespace, remote uses remoteNamespace
+#### Scenario: Seed uses CR namespace, shoot uses shootNamespace
 
-- **WHEN** the reconciler renders host mode with the CR's own namespace and remote mode with `spec.remoteNamespace`
-- **THEN** host-render namespaced resources lacking a namespace land in the CR's namespace
-- **AND** remote-render namespaced resources lacking a namespace land in `spec.remoteNamespace`
+- **WHEN** the reconciler renders seed mode with the CR's own namespace and shoot mode with `spec.shootNamespace`
+- **THEN** seed-render namespaced resources lacking a namespace land in the CR's namespace
+- **AND** shoot-render namespaced resources lacking a namespace land in `spec.shootNamespace`
 
 ---
 
@@ -195,6 +195,6 @@ The source-rendering and manifest-parsing capabilities SHALL be verified by tabl
 
 - **WHEN** the source-rendering unit tests run in CI
 - **THEN** they exercise both the Helm and kustomize renderers using local fixtures and fake fetchers
-- **AND** they assert host vs remote disjoint sets, correct origin tags, mode injection, user-`mode` rejection, CRD inclusion, and target-namespace application (namespaced resources stamped, explicit namespaces preserved, cluster-scoped resources untouched)
+- **AND** they assert seed vs shoot disjoint sets, correct origin tags, mode injection, user-`mode` rejection, CRD inclusion, and target-namespace application (namespaced resources stamped, explicit namespaces preserved, cluster-scoped resources untouched)
 - **AND** they complete without contacting any network endpoint or Kubernetes cluster
 
