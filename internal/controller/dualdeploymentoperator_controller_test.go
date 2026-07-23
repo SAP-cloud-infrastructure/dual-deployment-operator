@@ -395,7 +395,7 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 						SecretName: "shoot-secret-del",
 						Server:     cfg.Host,
 					},
-					ShootNamespace: "kube-system",
+					ShootNamespace:  "kube-system",
 					RetentionPolicy: ddov1alpha1.RetentionPolicy{CRDs: "Retain"},
 				},
 			}

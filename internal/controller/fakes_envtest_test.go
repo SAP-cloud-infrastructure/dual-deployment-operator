@@ -52,7 +52,7 @@ spec:
 		},
 	}
 	if !s.pruneRound {
-		files = append(files, &loader.BufferedFile		{
+		files = append(files, &loader.BufferedFile{
 			Name: "templates/orphan-cm.yaml",
 			Data: []byte(`{{- if eq .Values.mode "seed" }}
 apiVersion: v1

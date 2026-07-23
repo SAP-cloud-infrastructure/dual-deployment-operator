@@ -77,8 +77,8 @@ func TestHealthStateConstants(t *testing.T) {
 
 func TestSpecFieldsRoundTrip(t *testing.T) {
 	s := DualDeploymentOperatorSpec{
-		ShootAccess:    ShootAccessRef{SecretName: "kc", Server: "https://api.example:443"},
-		ShootNamespace: "shoot--x--y",
+		ShootAccess:     ShootAccessRef{SecretName: "kc", Server: "https://api.example:443"},
+		ShootNamespace:  "shoot--x--y",
 		RetentionPolicy: RetentionPolicy{CRDs: "Retain"},
 		ApplyOrder:      "SeedFirst",
 	}
