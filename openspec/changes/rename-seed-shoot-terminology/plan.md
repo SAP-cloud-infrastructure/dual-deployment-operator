@@ -69,7 +69,7 @@ git add api/v1alpha1/dualdeploymentoperator_types.go
 git commit -m "refactor(api): rename host/remote to seed/shoot in v1alpha1 types"
 ```
 
-- [ ] Task 1 complete
+- [x] Task 1 complete
 
 ---
 
@@ -103,7 +103,7 @@ git add api/v1alpha1/zz_generated.deepcopy.go config/crd/bases config/rbac confi
 git commit -m "chore(api): regenerate CRD/RBAC/deepcopy for seed/shoot rename"
 ```
 
-- [ ] Task 2 complete
+- [x] Task 2 complete
 
 ---
 
@@ -133,7 +133,7 @@ git add internal/source
 git commit -m "refactor(source): rename ModeHost/ModeRemote to ModeSeed/ModeShoot and field reads"
 ```
 
-- [ ] Task 3 complete
+- [x] Task 3 complete
 
 ---
 
@@ -162,7 +162,7 @@ git add internal/clients internal/deliver
 git commit -m "refactor(clients,deliver): rename HostClient to SeedClient; seed/shoot labels"
 ```
 
-- [ ] Task 4 complete
+- [x] Task 4 complete
 
 ---
 
@@ -195,7 +195,7 @@ git add internal/controller/dualdeploymentoperator_controller.go cmd/main.go
 git commit -m "refactor(controller,cmd): rename host/remote to seed/shoot (identifiers, reasons, applyOrder)"
 ```
 
-- [ ] Task 5 complete
+- [x] Task 5 complete
 
 ---
 
@@ -225,7 +225,7 @@ git add api/v1alpha1/dualdeploymentoperator_types_test.go internal/controller in
 git commit -m "test: rename host/remote to seed/shoot across the suite"
 ```
 
-- [ ] Task 6 complete
+- [x] Task 6 complete
 
 ---
 
@@ -256,7 +256,7 @@ git add README.md docs config/samples
 git commit -m "docs: align README/docs/sample with seed/shoot terminology"
 ```
 
-- [ ] Task 7 complete
+- [x] Task 7 complete
 
 ---
 
@@ -306,4 +306,4 @@ git add -A
 git commit -m "chore: final seed/shoot terminology cleanup" || echo "nothing to commit"
 ```
 
-- [ ] Task 8 complete
+- [x] Task 8 complete
