@@ -13,7 +13,7 @@ internal/manifest/*            Multi-doc YAML parser + origin tagging
 internal/source/*              Helm and kustomize renderers (two-render per reconcile)
 internal/transform/*           Manifest transformations (patch, rewriteWebhookURL, filterKinds)
 internal/deliver/*             Dual-cluster SSA applier (ForceOwnership, per-kind health, owned-by-guarded prune)
-internal/clients/*             Host (in-cluster) and shoot (token+CA from Gardener Secret) client factories
+internal/clients/*             Seed (in-cluster) and shoot (token+CA from Gardener Secret) client factories
 config/crd/bases/*             Generated CRDs (DO NOT EDIT)
 config/rbac/role.yaml          Generated RBAC (DO NOT EDIT)
 config/samples/*               Example CRs (edit these)

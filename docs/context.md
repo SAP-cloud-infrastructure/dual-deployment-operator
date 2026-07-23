@@ -113,13 +113,13 @@ spec:
     helm:
       repo, name, version
       values:       # common to both renders
-      seedValues:   # host-only overrides
-      shootValues: # remote-only overrides
+      seedValues:   # seed-only overrides
+      shootValues: # shoot-only overrides
     # OR
     kustomize:
       url:          # base
-      seedPath:     # subpath for host overlay (default "host")
-      shootPath:   # subpath for remote overlay (default "remote")
+      seedPath:     # subpath for seed overlay (default "seed")
+      shootPath:   # subpath for shoot overlay (default "shoot")
   remoteKubeconfig:
     secretName: <operator>-remote-kubeconfig
     key: kubeconfig
@@ -391,7 +391,7 @@ Stamping the injector's `--target-label` is a `patch` that only adds a label, so
 
 Under the current design (revision 4), routing is not decided by the operator or the CR. Chart/kustomization decides via mode-specific configuration:
 
-- **Helm**: `spec.source.helm.seedValues` and `spec.source.helm.shootValues` selectively enable parts of the upstream subchart per mode. Chart's own templates use `{{ if eq .Values.mode "seed" }}` / `remote` guards. Operator injects `.Values.mode` per render.
+- **Helm**: `spec.source.helm.seedValues` and `spec.source.helm.shootValues` selectively enable parts of the upstream subchart per mode. Chart's own templates use `{{ if eq .Values.mode "seed" }}` / `shoot` guards. Operator injects `.Values.mode` per render.
 - **Kustomize**: `spec.source.kustomize.seedPath` and `shootPath` point at two overlay directories in the source. Each overlay's `kustomization.yaml` selects the resources for that mode.
 
 Each render produces only the resources for its target cluster. The operator applies each render's output entirely to that target — no post-render split, no target annotations to consult.

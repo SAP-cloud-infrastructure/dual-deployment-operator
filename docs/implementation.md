@@ -70,7 +70,7 @@ dual-deployment-operator/
 │   │   ├── apply.go                            # SSA implementation
 │   │   └── health.go                           # per-resource health computation
 │   ├── clients/
-│   │   ├── host.go                             # in-cluster client factory
+│   │   ├── seed.go                             # in-cluster (seed) client factory
 │   │   └── shoot.go                            # kubeconfig-from-Secret client factory
 │   └── manifest/
 │       └── manifest.go                         # []unstructured wrapper with origin tag
@@ -94,7 +94,7 @@ Define in `api/v1alpha1/dualdeploymentoperator_types.go`:
 type DualDeploymentOperatorSpec struct {
     Source            Source                    `json:"source"`
     ShootAccess      ShootAccessRef           `json:"shootAccess"`
-    // ShootNamespace is the target namespace for the remote (shoot) render and
+    // ShootNamespace is the target namespace for the shoot render and
     // delivery. Namespaced resources in the shoot render that omit an explicit
     // metadata.namespace are placed here; cluster-scoped resources are unaffected.
     // The seed render/delivery uses the CR's own metadata.namespace.
@@ -118,12 +118,12 @@ type HelmSource struct {
     Repo         string                `json:"repo"`
     Name         string                `json:"name"`
     Version      string                `json:"version"`
-    // Values applied to BOTH host and shoot renders (common per-cluster stuff).
+    // Values applied to BOTH seed and shoot renders (common per-cluster stuff).
     Values       *apiextensionsv1.JSON `json:"values,omitempty"`
-    // Values applied ONLY to the seed render (typically enables the host-side
+    // Values applied ONLY to the seed render (typically enables the seed-side
     // parts of the upstream subchart).
     SeedValues   *apiextensionsv1.JSON `json:"seedValues,omitempty"`
-    // Values applied ONLY to the shoot render (typically enables the remote-side
+    // Values applied ONLY to the shoot render (typically enables the shoot-side
     // parts of the upstream subchart).
     ShootValues *apiextensionsv1.JSON `json:"shootValues,omitempty"`
 }
@@ -306,8 +306,8 @@ import "context"
 
 type Mode string
 const (
-    ModeSeed   Mode = "host"
-    ModeShoot Mode = "remote"
+    ModeSeed   Mode = "seed"
+    ModeShoot Mode = "shoot"
 )
 
 // Source renders the manifest stream for a specific mode into a target namespace.
@@ -355,7 +355,7 @@ func (h *Helm) Render(ctx context.Context, mode Mode, namespace string) ([]manif
     //    chart.values.yaml (chart defaults)
     //      < spec.Values                     (common per-cluster)
     //      < spec.SeedValues or spec.ShootValues (mode-specific)
-    //      < {mode: "host"|"remote"}         (operator-injected)
+    //      < {mode: "seed"|"shoot"}         (operator-injected)
     values := mergeValues(
         chart.Values,          // chart defaults (already loaded)
         parseValues(h.spec.Values),
@@ -411,10 +411,8 @@ func (k *Kustomize) Render(ctx context.Context, mode Mode, namespace string) ([]
     switch mode {
     case ModeSeed:
         subPath = k.spec.SeedPath
-        if subPath == "" { subPath = "host" }
     case ModeShoot:
         subPath = k.spec.ShootPath
-        if subPath == "" { subPath = "remote" }
     }
 
     // Construct root URL: base URL + subpath (preserving query string / ?ref=)
@@ -444,8 +442,8 @@ func (k *Kustomize) Render(ctx context.Context, mode Mode, namespace string) ([]
 **Key concerns**:
 - No value projection. `spec.source.kustomize` has no `values` field. Per-CR parameterization for kustomize is via mode selection (`seedPath`/`shootPath`) or, if needed, future kustomize-native fields (`images`, `patches` — see design.md §9.4). Not a Helm values map.
 - Ref pinning — reject URLs without `?ref=<sha|tag>` at admission time
-- Overlay layout: kustomize source must have two subdirectories (`host/` and `remote/` by default), each with its own `kustomization.yaml` selecting the appropriate resources for that mode. See design.md §4.2 for the ipam-capi layout.
-- Origin tagging: chart authors add `commonAnnotations: {dual-deployment-operator.cc.sap/origin: additions}` on the `additions/host/` and `additions/remote/` kustomization files. Other resources (upstream) default to `origin: upstream`.
+- Overlay layout: kustomize source must have two subdirectories (`seed/` and `shoot/`), each with its own `kustomization.yaml` selecting the appropriate resources for that mode. See design.md §4.2 for the ipam-capi layout.
+- Origin tagging: chart authors add `commonAnnotations: {dual-deployment-operator.cc.sap/origin: additions}` on the `additions/seed/` and `additions/shoot/` kustomization files. Other resources (upstream) default to `origin: upstream`.
 
 ---
 
@@ -767,7 +765,7 @@ type Applier interface {
 type SSAApplier struct {
     Client       client.Client
     FieldManager string
-    Cluster      string  // "host" or "remote" for logging
+    Cluster      string  // "seed" or "shoot" for logging
 }
 ```
 
@@ -850,7 +848,7 @@ func (a *SSAApplier) foreignOwner(ctx context.Context, m manifest.Manifest, owne
 }
 ```
 
-> **`SSAApplier` stays stateless** — it holds only `Client`, `FieldManager`, and `Cluster`; the per-CR ownership value is passed as the `ownedBy` argument to `Apply`, not stored on the struct, so one host/shoot applier instance is safely reused across concurrent reconciles of different CRs. The reconciler derives `ownedBy := manifest.OwnedByValue(cr.Namespace, cr.Name)` once per reconcile and threads it through every `Apply` call. `manifest.IsClusterScoped(kind)` already exists (used by `ApplyNamespace`); reuse it here. The guard costs one extra GET **only** for cluster-scoped kinds.
+> **`SSAApplier` stays stateless** — it holds only `Client`, `FieldManager`, and `Cluster`; the per-CR ownership value is passed as the `ownedBy` argument to `Apply`, not stored on the struct, so one seed/shoot applier instance is safely reused across concurrent reconciles of different CRs. The reconciler derives `ownedBy := manifest.OwnedByValue(cr.Namespace, cr.Name)` once per reconcile and threads it through every `Apply` call. `manifest.IsClusterScoped(kind)` already exists (used by `ApplyNamespace`); reuse it here. The guard costs one extra GET **only** for cluster-scoped kinds.
 
 ### Health computation
 
@@ -935,8 +933,8 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
         return r.errStatus(ctx, cr, "InvalidSource", err)
     }
 
-    // 2. Render TWICE — one per mode. Host uses the CR's own namespace;
-    //    remote uses spec.shootNamespace.
+    // 2. Render TWICE — one per mode. Seed uses the CR's own namespace;
+    //    shoot uses spec.shootNamespace.
     seedManifests, err := src.Render(ctx, source.ModeSeed, cr.Namespace)
     if err != nil { return r.errStatus(ctx, cr, "SeedRenderFailed", err) }
 
@@ -957,8 +955,8 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
         if err != nil { return r.errStatus(ctx, cr, "ShootTransformFailed", err) }
     }
 
-    // 5. Get clients. shootPhase captures the remote availability outcome:
-    //    ready | credsNotReady | clientFailed. Only `ready` means the remote
+    // 5. Get clients. shootPhase captures the shoot availability outcome:
+    //    ready | credsNotReady | clientFailed. Only `ready` means the shoot
     //    render can be attempted.
     seedApplier := r.SeedApplier   // preconstructed at startup
     shootApplier, err := r.buildShootApplier(ctx, cr)
@@ -978,61 +976,61 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
     seedManifests = deliver.SortForApply(seedManifests)
     shootManifests = deliver.SortForApply(shootManifests)
 
-    // 7. Apply per spec.applyOrder, respecting remote-failure severity.
-    //    ShootFirst gates the seed render on remote availability (host depends on
-    //    the remote coming up first); SeedFirst never gates host on the remote.
-    //    Three remote outcomes:
-    //      - complete failure (client unbuildable, or 0 of N remote applied)
-    //          ShootFirst  -> STOP before host; Ready=False ShootApplyFailed
-    //          SeedFirst    -> apply host first; flag ShootApplyFailed (non-blocking)
+    // 7. Apply per spec.applyOrder, respecting shoot-failure severity.
+    //    ShootFirst gates the seed render on shoot availability (seed depends on
+    //    the shoot coming up first); SeedFirst never gates seed on the shoot.
+    //    Three shoot outcomes:
+    //      - complete failure (client unbuildable, or 0 of N shoot applied)
+    //          ShootFirst  -> STOP before seed; Ready=False ShootApplyFailed
+    //          SeedFirst    -> apply seed first; flag ShootApplyFailed (non-blocking)
     //      - credentials not ready (benign bootstrap wait)
-    //          ShootFirst  -> DEFER host too; Ready=False WaitingForShootCredentials
-    //          SeedFirst    -> apply host first; flag WaitingForShootCredentials
-    //      - ready -> apply remote, then gate host per applyOrder. Under ShootFirst
-    //          ANY remote failure (partial ResourcesDegraded or complete
-    //          ShootApplyFailed) stops before host — the workless shoot's render is
-    //          all structural deps host consumes. Under SeedFirst host applies first.
+    //          ShootFirst  -> DEFER seed too; Ready=False WaitingForShootCredentials
+    //          SeedFirst    -> apply seed first; flag WaitingForShootCredentials
+    //      - ready -> apply shoot, then gate seed per applyOrder. Under ShootFirst
+    //          ANY shoot failure (partial ResourcesDegraded or complete
+    //          ShootApplyFailed) stops before seed — the workless shoot's render is
+    //          all structural deps seed consumes. Under SeedFirst seed applies first.
     //    WebhookConfigs/conversion CRDs are applied with caBundle stripped.
     shootFirst := cr.Spec.ApplyOrder != "SeedFirst"
     var seedStatuses, shootStatuses []v1alpha1.ResourceStatus
-    shootStatuses = cr.Status.ShootResources // preserve prior remote status by default
+    shootStatuses = cr.Status.ShootResources // preserve prior shoot status by default
 
     // Derive the ownership value once; thread it through every apply (the appliers
     // are stateless/shared, so ownedBy is an argument, never a struct field).
     ownedBy := manifest.OwnedByValue(cr.Namespace, cr.Name)
 
-    applyHost := func() { seedStatuses = r.applyAll(ctx, seedApplier, seedManifests, ownedBy) }
+    applySeed := func() { seedStatuses = r.applyAll(ctx, seedApplier, seedManifests, ownedBy) }
 
     switch shootPhase {
     case "credsNotReady":
         if !shootFirst {
-            applyHost() // SeedFirst: host does not wait on remote
+            applySeed() // SeedFirst: seed does not wait on shoot
         }
-        // ShootFirst: defer host until credentials populate.
+        // ShootFirst: defer seed until credentials populate.
         r.setCondition(cr, metav1.ConditionFalse, "WaitingForShootCredentials",
             "shoot token/CA not yet populated by Gardener; shoot render deferred")
         return r.finishNotReady(ctx, cr, seedStatuses, shootStatuses, 30*time.Second)
 
     case "clientFailed":
         if !shootFirst {
-            applyHost() // SeedFirst: host proceeds; remote failure only flagged
+            applySeed() // SeedFirst: seed proceeds; shoot failure only flagged
         }
-        // ShootFirst: stop before host — host must not start without the remote.
+        // ShootFirst: stop before seed — seed must not start without the shoot.
         r.setCondition(cr, metav1.ConditionFalse, "ShootApplyFailed",
             fmt.Sprintf("shoot render could not be applied: %v", err))
         return r.finishNotReady(ctx, cr, seedStatuses, shootStatuses, 0) // requeue w/ backoff via returned err
     }
 
-    // shootPhase == "ready": apply the shoot render, then gate host per applyOrder.
+    // shootPhase == "ready": apply the shoot render, then gate seed per applyOrder.
     if shootFirst {
         shootStatuses = r.applyAll(ctx, shootApplier, shootManifests, ownedBy)
-        // Under ShootFirst the shoot is a workless cluster: every remote resource
-        // (CRDs/RBAC/webhooks) is a structural dependency the host consumes. So ANY
-        // remote failure — partial or complete — gates the seed render this cycle;
-        // starting host against a missing CRD/RBAC/webhook would crash-loop it.
+        // Under ShootFirst the shoot is a workless cluster: every shoot resource
+        // (CRDs/RBAC/webhooks) is a structural dependency the seed consumes. So ANY
+        // shoot failure — partial or complete — gates the seed render this cycle;
+        // starting seed against a missing CRD/RBAC/webhook would crash-loop it.
         if anyFailed(shootStatuses) {
             reason := "ResourcesDegraded" // partial: some applied, some failed
-            msg := "some shoot resources failed to apply; seed render deferred until remote converges"
+            msg := "some shoot resources failed to apply; seed render deferred until shoot converges"
             if allFailed(shootStatuses) {
                 reason = "ShootApplyFailed" // complete: 0 of N applied
                 msg = "every resource in the shoot render failed to apply"
@@ -1040,9 +1038,9 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
             r.setCondition(cr, metav1.ConditionFalse, reason, msg)
             return r.finishNotReady(ctx, cr, seedStatuses, shootStatuses, 0)
         }
-        applyHost() // full remote success → proceed to host
+        applySeed() // full shoot success → proceed to seed
     } else {
-        applyHost()
+        applySeed()
         shootStatuses = r.applyAll(ctx, shootApplier, shootManifests, ownedBy)
     }
 
@@ -1051,7 +1049,7 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
     //    render, delete in reverse of the fixed intra-render kind priority; across
     //    renders, prune in the reverse of spec.applyOrder. CRDs skipped under
     //    retentionPolicy.crds: Retain.
-    if shootFirst { // reverse of ShootFirst apply = prune host first, then remote
+    if shootFirst { // reverse of ShootFirst apply = prune seed first, then shoot
         r.prune(ctx, seedApplier, cr.Status.SeedResources, seedManifests, cr)
         r.prune(ctx, shootApplier, cr.Status.ShootResources, shootManifests, cr)
     } else {
@@ -1072,14 +1070,14 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
     return ctrl.Result{RequeueAfter: 10 * time.Minute}, nil
 }
 
-// finishNotReady writes status (host/remote statuses + the already-set condition)
+// finishNotReady writes status (seed/shoot statuses + the already-set condition)
 // and requeues. A backoff of 0 means "return an error so controller-runtime
 // requeues with exponential backoff" (used for ShootApplyFailed); a non-zero
 // backoff is a fixed RequeueAfter (used for WaitingForShootCredentials).
 func (r *DualDeploymentOperatorReconciler) finishNotReady(ctx context.Context, cr *v1alpha1.DualDeploymentOperator,
-    host, remote []v1alpha1.ResourceStatus, backoff time.Duration) (ctrl.Result, error) {
-    cr.Status.SeedResources = host
-    cr.Status.ShootResources = remote
+    seed, shoot []v1alpha1.ResourceStatus, backoff time.Duration) (ctrl.Result, error) {
+    cr.Status.SeedResources = seed
+    cr.Status.ShootResources = shoot
     cr.Status.LastReconcile = &metav1.Time{Time: time.Now()}
     if e := r.Status().Update(ctx, cr); e != nil {
         return ctrl.Result{}, e
@@ -1093,8 +1091,8 @@ func (r *DualDeploymentOperatorReconciler) finishNotReady(ctx context.Context, c
 
 Helpers used above:
 - `r.setCondition(cr, status, reason, message)` — sets the `Ready` condition via `meta.SetStatusCondition` (does not write; the caller's status update persists it).
-- `anyFailed(statuses)` — reports whether **any** `ResourceStatus` in the slice has `Health=Degraded` — the partial-or-complete remote-failure test used under `ShootFirst` to gate the seed render (the workless shoot's render is entirely structural deps host consumes, so any failure gates host).
-- `allFailed(statuses)` — reports whether **every** `ResourceStatus` in the slice has `Health=Degraded` (i.e. zero of N applied) — distinguishes the "complete remote failure" (`ShootApplyFailed`) case from partial (`ResourcesDegraded`) when choosing the condition reason.
+- `anyFailed(statuses)` — reports whether **any** `ResourceStatus` in the slice has `Health=Degraded` — the partial-or-complete shoot-failure test used under `ShootFirst` to gate the seed render (the workless shoot's render is entirely structural deps seed consumes, so any failure gates seed).
+- `allFailed(statuses)` — reports whether **every** `ResourceStatus` in the slice has `Health=Degraded` (i.e. zero of N applied) — distinguishes the "complete shoot failure" (`ShootApplyFailed`) case from partial (`ResourcesDegraded`) when choosing the condition reason.
 - `r.errStatus`, `r.applyAll`, `r.prune`, `computeConditions` — as defined elsewhere in this phase.
 
 **Key differences from a single-render architecture**:
@@ -1160,7 +1158,7 @@ func (r *DualDeploymentOperatorReconciler) buildShootApplier(ctx context.Context
     return &deliver.SSAApplier{
         Client:       shootClient,
         FieldManager: FieldManagerName,
-        Cluster:      "remote",
+        Cluster:      "shoot",
     }, nil
 }
 ```
@@ -1170,8 +1168,8 @@ func (r *DualDeploymentOperatorReconciler) buildShootApplier(ctx context.Context
 ```go
 func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, cr *v1alpha1.DualDeploymentOperator) (ctrl.Result, error) {
     // Teardown runs the REVERSE of spec.applyOrder. Under the default
-    // ShootFirst, deletion is host-first so the controller stops before its
-    // CRDs are removed; under SeedFirst, deletion is remote-first.
+    // ShootFirst, deletion is seed-first so the controller stops before its
+    // CRDs are removed; under SeedFirst, deletion is shoot-first.
     shootApplier, err := r.buildShootApplier(ctx, cr)
     if err != nil {
         // Shoot unreachable: do NOT remove the finalizer and do NOT assume the
@@ -1190,7 +1188,7 @@ func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, 
         return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
     }
 
-    // Remote cleanup (reverse-delete order), respecting retentionPolicy for CRDs.
+    // Shoot cleanup (reverse-delete order), respecting retentionPolicy for CRDs.
     orphans := deliver.SortStatusForDelete(cr.Status.ShootResources)
     var errs []error
     for _, rs := range orphans {
@@ -1202,8 +1200,8 @@ func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, 
         }
     }
 
-    // Host resources are removed via ownerReferences cascade (kubelet GC);
-    // explicit host deletion is not strictly necessary.
+    // Seed resources are removed via ownerReferences cascade (kubelet GC);
+    // explicit seed deletion is not strictly necessary.
 
     if err := kerrors.NewAggregate(errs); err != nil {
         // Reachable shoot but some deletes failed: keep the finalizer so orphans
@@ -1216,7 +1214,7 @@ func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, 
 }
 ```
 
-**Finalizer safety**: the finalizer is removed **only** when remote cleanup is confirmed complete (every delete succeeded or returned NotFound). Two failure modes both keep the finalizer and requeue rather than leak:
+**Finalizer safety**: the finalizer is removed **only** when shoot cleanup is confirmed complete (every delete succeeded or returned NotFound). Two failure modes both keep the finalizer and requeue rather than leak:
 
 - **Reachable shoot, some deletes failed** → keep finalizer, requeue, retry.
 - **Unreachable shoot** → keep finalizer, set a `ShootUnreachable` condition + Event, requeue. The operator does **not** treat "unreachable" as "gone", because that guess — when the shoot is only transiently down — would silently orphan live resources with no finalizer left to clean them. The accepted cost is that a CR whose shoot is genuinely gone stays in `Terminating` until an operator manually removes the finalizer; this is surfaced (condition + Event), not auto-resolved.
@@ -1382,11 +1380,11 @@ testdata/fixtures/
 │   ├── shoot-values.yaml                      # values for target shoot
 │   ├── today-chart-render.yaml                # captured helm template of today's chart
 │   └── expected-operator-output/
-│       ├── host/
+│       ├── seed/
 │       │   ├── deployment.yaml
 │       │   ├── service.yaml
 │       │   └── ...
-│       └── remote/
+│       └── shoot/
 │           ├── crd-endpoints-metal.yaml
 │           └── ...
 ├── boot-operator/
@@ -1408,11 +1406,11 @@ func TestEquivalence(t *testing.T) {
 
             todayOutput := loadTodayChartRender(op)
 
-            requireEquivalent(t, operatorOutput.Host, todayOutput.Host,
+            requireEquivalent(t, operatorOutput.Seed, todayOutput.Seed,
                 ignore("helm.sh/chart"),           // allowed to differ
                 ignoreOrdering(),
                 ignoreWhitespace())
-            requireEquivalent(t, operatorOutput.Remote, todayOutput.Remote,
+            requireEquivalent(t, operatorOutput.Shoot, todayOutput.Shoot,
                 sameIgnores)
         })
     }
@@ -1440,7 +1438,7 @@ chart/                                 # in THIS repo (dual-deployment-operator)
 └── templates/
     ├── deployment.yaml            # --leader-elect=true
     ├── serviceaccount.yaml
-    ├── clusterrole.yaml           # broad host applier grant + CR watch (see below)
+    ├── clusterrole.yaml           # broad seed applier grant + CR watch (see below)
     ├── clusterrolebinding.yaml
     ├── leader-election-role.yaml  # Lease in own namespace (leader election)
     └── networkpolicy.yaml
@@ -1466,19 +1464,19 @@ The sapcc/Gardener-specific resources (`remote-access` Secret, `shoot-rbac-boots
 
 Because chart 2 depends on chart 1, the controller + CRD (via chart 1's `crds/`) install before chart 2's `templates/` render the CR instances — a CR is never applied before its CRD/controller exist.
 
-**Seed-side (host) RBAC scope** (the operator's own ServiceAccount on the seed, provisioned by **chart 1**) — a **broad applier grant provisioned by the controller chart**, not a namespace-only Role. The seed render is **not** namespace-local: the candidate wrapper charts emit host-side `ClusterRole`/`ClusterRoleBinding` (metal-operator, ipam-capi both do), and the operator's own `patch`/rename transforms can produce `ClusterRole`s. So the host applier must be able to create cluster-scoped host-render kinds too, and — where the seed render creates RBAC — must itself hold those powers (privilege-escalation prevention). This aligns to gardener-resource-manager (broad `cluster-admin`-equivalent target ClusterRole) and Flux (appliers bound to `cluster-admin`, tenants scoped via per-object SA impersonation, never by narrowing the applier). The grant covers:
+**Seed-side RBAC scope** (the operator's own ServiceAccount on the seed, provisioned by **chart 1**) — a **broad applier grant provisioned by the controller chart**, not a namespace-only Role. The seed render is **not** namespace-local: the candidate wrapper charts emit seed-side `ClusterRole`/`ClusterRoleBinding` (metal-operator, ipam-capi both do), and the operator's own `patch`/rename transforms can produce `ClusterRole`s. So the seed applier must be able to create cluster-scoped seed-render kinds too, and — where the seed render creates RBAC — must itself hold those powers (privilege-escalation prevention). This aligns to gardener-resource-manager (broad `cluster-admin`-equivalent target ClusterRole) and Flux (appliers bound to `cluster-admin`, tenants scoped via per-object SA impersonation, never by narrowing the applier). The grant covers:
 - Watch `DualDeploymentOperator` CRs (cluster-wide read of the CR type)
 - Get/List Secrets (for the shoot token-requestor Secret referenced by `spec.shootAccess`)
-- Create/update/delete/get/list/watch the host-render kinds — **namespaced and cluster-scoped** (Deployment, Service, Ingress, NetworkPolicy, ConfigMap, ServiceAccount, Role/RoleBinding, ClusterRole/ClusterRoleBinding, …); set ownerReferences to the CR so seed resources GC on CR deletion. Where the seed render creates RBAC, this grant holds the powers it confers.
+- Create/update/delete/get/list/watch the seed-render kinds — **namespaced and cluster-scoped** (Deployment, Service, Ingress, NetworkPolicy, ConfigMap, ServiceAccount, Role/RoleBinding, ClusterRole/ClusterRoleBinding, …); set ownerReferences to the CR so seed resources GC on CR deletion. Where the seed render creates RBAC, this grant holds the powers it confers.
 - Create/get/update Leases in own namespace (leader election)
 
 Scope the grant no broader than the seed render needs, but do not force it namespace-only — the candidate charts prove cluster-scoped seed resources exist.
 
 **RBAC differs by *provisioning*, not breadth — both appliers are broad:**
-- **Host (seed):** broad applier grant (above), provisioned by **this deployment chart**.
+- **Seed:** broad applier grant (above), provisioned by **this deployment chart**.
 - **Remote (shoot):** a broad cluster-scoped `ClusterRole` (CRDs, ClusterRoles/Bindings, Roles/Bindings, ServiceAccounts, Validating/Mutating WebhookConfigurations, + additions) carrying the privilege-escalation set, seeded by the `shoot-rbac-bootstrap.yaml` ManagedResource (GRM-applied) — resolving the SA-can't-grant-itself-RBAC chicken-and-egg. See the shoot RBAC bootstrap section below and design.md §3.6.7.
 
-**Single-install-per-seed constraint (seed cluster-scoped names are seed-global).** The seed render can contain cluster-scoped objects (`ClusterRole`/`ClusterRoleBinding`) whose names are **seed-global** — the operator applies them under their rendered upstream names and does **not** per-namespace-qualify them (upstream `roleRef`/subject references assume the fixed names). So at most **one** operator-managed install of a given operator may run per seed: two CRs on one seed emitting the same-named cluster-scoped object would fight over SSA field ownership and have ambiguous prune/GC (a cluster-scoped object cannot be owner-referenced by a namespaced CR). This matches current production — on `rt-qa-de-1`/`rt-eu-de-1` the `-remote` operators run in only the `m-<region>` workload shoot-cp namespace, and the host-side ClusterRole/Binding carry static seed-global names with a single `{{ .Release.Namespace }}` subject. It is an install-time contract (documented, not runtime-validated in v1); a per-name uniquifier or admission guard is a possible future enhancement. See design.md §3.6.7.
+**Single-install-per-seed constraint (seed cluster-scoped names are seed-global).** The seed render can contain cluster-scoped objects (`ClusterRole`/`ClusterRoleBinding`) whose names are **seed-global** — the operator applies them under their rendered upstream names and does **not** per-namespace-qualify them (upstream `roleRef`/subject references assume the fixed names). So at most **one** operator-managed install of a given operator may run per seed: two CRs on one seed emitting the same-named cluster-scoped object would fight over SSA field ownership and have ambiguous prune/GC (a cluster-scoped object cannot be owner-referenced by a namespaced CR). This matches current production — on `rt-qa-de-1`/`rt-eu-de-1` the `-remote` operators run in only the `m-<region>` workload shoot-cp namespace, and the seed-side ClusterRole/Binding carry static seed-global names with a single `{{ .Release.Namespace }}` subject. It is an install-time contract (documented, not runtime-validated in v1); a per-name uniquifier or admission guard is a possible future enhancement. See design.md §3.6.7.
 
 **Leader election (required).** Run with `--leader-elect=true` so at most one instance is active cluster-wide — required even at `replicas: 1` because a rolling update transiently runs two pods. Set `LeaderElectionReleaseOnCancel: true` so the outgoing leader releases the lease on graceful shutdown (near-instant failover instead of a ~15 s `LeaseDuration` wait). `replicas: 1` is the recommended default for this low-load per-shoot operator (matches cert-manager's default; `replicas: 2` is an optional HA upgrade — active-passive failover, not horizontal scale). See design.md §3.6.6.
 
@@ -1509,7 +1507,7 @@ spec:
 # ClusterRole (create/update/delete on CRDs/RBAC/SAs/webhookconfigs), ClusterRoleBinding.
 ```
 
-> **This bootstrap MR is a per-operator Phase 9 deliverable, not just documentation.** `chart/shoot-rbac-bootstrap.yaml` (chart 2) must be authored **once per managed operator** — the SA name and the exact apply-scoped kinds differ per operator (e.g. ipam-capi needs conversion-webhook CRD verbs; boot/argora/khalkeon need no webhook verbs). Templated from chart-2 values so `cc/kube-secrets` can vary the SA name/namespace per cluster. Without the correct per-operator MR, that operator's first remote reconcile fails `forbidden`/privilege-escalation on every RBAC/CRD apply (surfaced per-resource as `Degraded`), so the operator is non-functional for that operator until it exists. Treat "author + verify the bootstrap MR" as a required step when onboarding each operator, alongside its CR template.
+> **This bootstrap MR is a per-operator Phase 9 deliverable, not just documentation.** `chart/shoot-rbac-bootstrap.yaml` (chart 2) must be authored **once per managed operator** — the SA name and the exact apply-scoped kinds differ per operator (e.g. ipam-capi needs conversion-webhook CRD verbs; boot/argora/khalkeon need no webhook verbs). Templated from chart-2 values so `cc/kube-secrets` can vary the SA name/namespace per cluster. Without the correct per-operator MR, that operator's first shoot reconcile fails `forbidden`/privilege-escalation on every RBAC/CRD apply (surfaced per-resource as `Degraded`), so the operator is non-functional for that operator until it exists. Treat "author + verify the bootstrap MR" as a required step when onboarding each operator, alongside its CR template.
 
 ---
 
@@ -1631,9 +1629,9 @@ make test-integration
 | 3 | Each transformation's unit tests pass with table-driven cases; a single per-render `Transformation` interface + `Build()` implemented (no cross-stream scope); a `patch` that stamps the injector's `--target-label` onto WebhookConfigurations/CRDs is covered. Also: the scaffolded `PackageWebhookConfigsForInjectorSpec` CRD type is removed (see "r7 CRD cleanup") and `make manifests generate` re-run |
 | 4 | (skipped — no split step) |
 | 5 | Applier applies a resource via SSA and returns Healthy status; can also delete; strips caBundle from WebhookConfigurations and conversion-webhook CRDs before apply (so the injector owns caBundle) |
-| 6 | Reconciler successfully processes a CR end-to-end with mocked source; applies the ordered transformation list to both renders; produces host/remote manifest sets where the remote set includes WebhookConfigurations (caBundle stripped, injector-labeled); status populated |
+| 6 | Reconciler successfully processes a CR end-to-end with mocked source; applies the ordered transformation list to both renders; produces seed/shoot manifest sets where the shoot set includes WebhookConfigurations (caBundle stripped, injector-labeled); status populated |
 | 7 | Operator pulls a real (small) chart **anonymously** from `oci://keppel.global.cloud.sap/ccloud-helm/...` and fetches a real pinned-ref kustomize overlay from the public `github.com/sapcc/helm-charts` source, rendering both to manifests; the optional credential seam is exercised by a self-hosted authed test but off by default; cache pulls once per version; `make test` stays green offline while the online tier passes in CI |
-| 8 | Equivalence test passes for at least metal-operator vs. today's chart output (seed render matches host-side output; shoot render matches remote-side output) |
+| 8 | Equivalence test passes for at least metal-operator vs. today's chart output (seed render matches the prior seed-side output; shoot render matches the prior shoot-side output) |
 | 9 | Chart 1 (`dual-deployment-operator`, this repo, via kubebuilder helm plugin) builds/publishes with CRD in `crds/`; chart 2 (`dual-deployment-operator-remote`, `sapcc/helm-charts`) depends on it and installs in a QA shoot-cp namespace — controller + CRD come up first (dependency), then the CR instances (templated from `cc/kube-secrets` values); the operator reconciles the applied CRs. `cmd/main.go` probes/metrics/leader-election confirmed wired and reflected in chart 1's `deployment.yaml`; the per-operator `shoot-rbac-bootstrap` MR is authored in chart 2 |
 | 9.5 | GHCR publish workflow (via `sapcc/go-makefile-maker`) publishes the operator image to `ghcr.io/<org>/dual-deployment-operator` on merge/tag with `GITHUB_TOKEN` (no keppel push secret); keppel mirrors it to `ccloud-ghcr-io-mirror`; chart 1's `values.yaml` references the keppel-mirrored path; `helm install` of chart 1 with the published tag starts a running manager Pod with green probes |
 | 10 | Webhook scaffold builds; no-op ValidateCreate/ValidateUpdate methods pass tests; ValidatingWebhookConfiguration NOT deployed in v1 (deferred to v2) |
