@@ -16,7 +16,7 @@ import (
 func newKustomize(t *testing.T) Source {
 	t.Helper()
 	s, err := From(v1alpha1.Source{Kustomize: &v1alpha1.KustomizeSource{
-		URL: "ignored?ref=x", HostPath: "host", RemotePath: "remote",
+		URL: "ignored?ref=x", SeedPath: "seed", ShootPath: "shoot",
 	}}, Deps{RootResolver: fakeRootResolver{baseDir: "testdata/kustomize"}})
 	if err != nil {
 		t.Fatalf("From: %v", err)
@@ -24,10 +24,10 @@ func newKustomize(t *testing.T) Source {
 	return s
 }
 
-func TestKustomizeHostOverlayHasAdditionsAndUpstream(t *testing.T) {
-	ms, err := newKustomize(t).Render(context.Background(), ModeHost, "host-ns")
+func TestKustomizeSeedOverlayHasAdditionsAndUpstream(t *testing.T) {
+	ms, err := newKustomize(t).Render(context.Background(), ModeSeed, "seed-ns")
 	if err != nil {
-		t.Fatalf("render host: %v", err)
+		t.Fatalf("render seed: %v", err)
 	}
 	k := kinds(ms)
 	if k["ConfigMap/upstream-cm"] != manifest.OriginUpstream {
@@ -38,14 +38,14 @@ func TestKustomizeHostOverlayHasAdditionsAndUpstream(t *testing.T) {
 	}
 }
 
-func TestKustomizeRemoteOverlayExcludesAdditions(t *testing.T) {
-	ms, err := newKustomize(t).Render(context.Background(), ModeRemote, "remote-ns")
+func TestKustomizeShootOverlayExcludesAdditions(t *testing.T) {
+	ms, err := newKustomize(t).Render(context.Background(), ModeShoot, "shoot-ns")
 	if err != nil {
-		t.Fatalf("render remote: %v", err)
+		t.Fatalf("render shoot: %v", err)
 	}
 	k := kinds(ms)
 	if _, ok := k["ConfigMap/addition-cm"]; ok {
-		t.Error("addition-cm should not appear in remote overlay")
+		t.Error("addition-cm should not appear in shoot overlay")
 	}
 	if k["ConfigMap/upstream-cm"] != manifest.OriginUpstream {
 		t.Errorf("upstream-cm origin = %q, want upstream", k["ConfigMap/upstream-cm"])
@@ -53,13 +53,13 @@ func TestKustomizeRemoteOverlayExcludesAdditions(t *testing.T) {
 }
 
 func TestKustomizeAppliesTargetNamespace(t *testing.T) {
-	ms, err := newKustomize(t).Render(context.Background(), ModeHost, "host-ns")
+	ms, err := newKustomize(t).Render(context.Background(), ModeSeed, "seed-ns")
 	if err != nil {
-		t.Fatalf("render host: %v", err)
+		t.Fatalf("render seed: %v", err)
 	}
 	for _, m := range ms {
-		if m.Unstructured.GetKind() == "ConfigMap" && m.Unstructured.GetNamespace() != "host-ns" {
-			t.Errorf("%s namespace = %q, want host-ns", m.Unstructured.GetName(), m.Unstructured.GetNamespace())
+		if m.Unstructured.GetKind() == "ConfigMap" && m.Unstructured.GetNamespace() != "seed-ns" {
+			t.Errorf("%s namespace = %q, want seed-ns", m.Unstructured.GetName(), m.Unstructured.GetNamespace())
 		}
 	}
 }

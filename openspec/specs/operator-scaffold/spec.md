@@ -129,7 +129,7 @@ Phase 8 (deployment chart) will consume this manifest via kustomize; this change
 - `patch`, `update` on `DualDeploymentOperator/status` and `DualDeploymentOperator/finalizers`
 - `get`, `list`, `watch` on `Secrets` in the operator's own namespace (for future kubeconfig fetch, unused in v1 no-op reconciler)
 
-RBAC scaffolds for applying arbitrary host or remote resources (Phases 4-6) MUST NOT be added in this change.
+RBAC scaffolds for applying arbitrary seed or shoot resources (Phases 4-6) MUST NOT be added in this change.
 
 #### Scenario: RBAC covers only CRs and Secrets
 

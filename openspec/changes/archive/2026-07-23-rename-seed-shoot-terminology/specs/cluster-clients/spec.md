@@ -3,13 +3,18 @@ SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Spec: Cluster Clients
+## RENAMED Requirements
 
-## Purpose
+- FROM: `### Requirement: Host client factory`
+- TO: `### Requirement: Seed client factory`
+- FROM: `### Requirement: Host install RBAC is a broad grant provisioned by the operator's own chart`
+- TO: `### Requirement: Seed install RBAC is a broad grant provisioned by the operator's own chart`
+- FROM: `### Requirement: At most one operator-managed install per seed for seed-global host objects`
+- TO: `### Requirement: At most one operator-managed install per seed for seed-global objects`
 
-Defines the `internal/clients` package: factory functions that construct Kubernetes `client.Client` instances for the seed cluster and the shoot cluster. The seed client is built once from the manager's in-cluster REST config; the shoot client is built per reconcile from the Gardener token-requestor Secret referenced by `spec.shootAccess`. Also documents the RBAC prerequisites for both clusters.
+---
 
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Seed client factory
 
@@ -26,8 +31,6 @@ The `internal/clients` package SHALL provide a factory that returns a `client.Cl
 - **WHEN** the manager starts
 - **THEN** a single seed `SSAApplier` (field manager `dual-deployment-operator`, cluster label `"seed"`) is constructed and held on the reconciler
 - **AND** it is reused for every CR reconcile rather than rebuilt per reconcile
-
----
 
 ### Requirement: Shoot client factory from token-requestor Secret
 
@@ -64,26 +67,6 @@ The factory MUST distinguish a **missing Secret** (a misconfiguration) from **cr
 - **THEN** the shoot client is rebuilt from the Secret on each reconcile
 - **AND** a rotated token in the Secret is picked up on the next reconcile without operator restart
 
----
-
-### Requirement: Shoot ServiceAccount must be pre-empowered to apply (cluster-scoped, GRM-seeded)
-
-The ServiceAccount the operator authenticates as on the **shoot** MUST already hold a cluster-scoped grant permitting it to create, update, and delete the cluster-scoped kinds the operator delivers (CustomResourceDefinitions, ClusterRoles, ClusterRoleBindings, Roles, RoleBindings, ServiceAccounts, Validating/Mutating WebhookConfigurations, and the operator's additions). The operator SHALL NOT attempt to bootstrap its own apply permissions, because Kubernetes privilege-escalation prevention forbids an applier from creating a ClusterRole granting powers it does not already hold, and the shoot ServiceAccount is not otherwise permitted to create RBAC. This apply-scoped grant is a broad **ClusterRole + ClusterRoleBinding** and is an **install-time prerequisite** seeded by a minimal, static Gardener `ManagedResource` applied by the privileged gardener-resource-manager (out of scope for the operator's own code — see design.md "shoot RBAC bootstrap"). When the grant is absent, per-resource applies that require it fail and are surfaced as `Degraded` in status (continue-on-error), never silently.
-
-#### Scenario: Applies succeed when the SA is pre-empowered
-
-- **WHEN** the bootstrap `ManagedResource` has seeded the shoot ServiceAccount and its apply-scoped ClusterRole/Binding, and the operator applies the shoot render
-- **THEN** the CRD, RBAC, ServiceAccount, and WebhookConfiguration resources are created/updated successfully
-
-#### Scenario: Applies fail visibly when the SA lacks apply RBAC
-
-- **WHEN** the shoot ServiceAccount lacks the apply-scoped grant (bootstrap `ManagedResource` missing) and the operator attempts to apply RBAC or CRDs
-- **THEN** those applies fail with a forbidden/privilege-escalation error
-- **AND** each failing resource is recorded with `Health=Degraded` and the error `Message`, and the reconcile requeues
-- **AND** the operator does not attempt to create its own apply permissions
-
----
-
 ### Requirement: Seed install RBAC is a broad grant provisioned by the operator's own chart
 
 The operator's own ServiceAccount on the **seed** cluster MUST hold a grant broad enough to apply every kind the seed render may contain, provisioned by the operator's **own install chart** (not GRM). The seed render is NOT guaranteed to be namespace-local: the candidate wrapper charts emit cluster-scoped resources on the seed side (e.g. metal-operator and ipam-capi both ship a seed-side `ClusterRole` + `ClusterRoleBinding`), and the operator's own `patch`/rename transforms can produce `ClusterRole`s (design.md documents renaming upstream namespace-scoped `Role`→`ClusterRole` for shared-namespace deployment). Therefore the seed grant MUST cover the seed-render kinds including any cluster-scoped kinds, and — where the seed render creates RBAC — MUST itself hold the powers it grants (Kubernetes privilege-escalation prevention forbids creating a `ClusterRole`/`Role` conferring verbs the applier lacks).
@@ -104,11 +87,9 @@ The seed grant SHALL be no broader than needed to apply the seed render and oper
 - **THEN** its seed apply permissions are provisioned by the operator's own deployment chart (not by a GRM-seeded ManagedResource)
 - **AND** the grant is broad enough to cover every kind the seed render may contain, including cluster-scoped kinds
 
----
-
 ### Requirement: At most one operator-managed install per seed for seed-global objects
 
-Host-render cluster-scoped objects (e.g. `ClusterRole`, `ClusterRoleBinding`) retain their upstream **seed-global fixed names**; the operator SHALL NOT auto-qualify these names per shoot-cp namespace. Consequently, deploying two `DualDeploymentOperator` CRs on the same seed whose host renders emit the **same-named** cluster-scoped object is an **unsupported configuration**: the operator does not de-conflict them and the outcome is undefined (SSA field-ownership contention on the shared object, and ambiguous prune/garbage-collection because a cluster-scoped object cannot be owner-referenced by a namespaced CR). This matches how the current wrapper charts behave in production, where each seed runs a given `-remote` operator in only one workload shoot-cp namespace. This constraint is an **install-time contract**, documented rather than runtime-validated in v1; a per-name uniquifier or an admission guard is a possible future enhancement.
+Seed-render cluster-scoped objects (e.g. `ClusterRole`, `ClusterRoleBinding`) retain their upstream **seed-global fixed names**; the operator SHALL NOT auto-qualify these names per shoot-cp namespace. Consequently, deploying two `DualDeploymentOperator` CRs on the same seed whose seed renders emit the **same-named** cluster-scoped object is an **unsupported configuration**: the operator does not de-conflict them and the outcome is undefined (SSA field-ownership contention on the shared object, and ambiguous prune/garbage-collection because a cluster-scoped object cannot be owner-referenced by a namespaced CR). This matches how the current wrapper charts behave in production, where each seed runs a given `-remote` operator in only one workload shoot-cp namespace. This constraint is an **install-time contract**, documented rather than runtime-validated in v1; a per-name uniquifier or an admission guard is a possible future enhancement.
 
 #### Scenario: Seed cluster-scoped object names are not per-namespace qualified
 

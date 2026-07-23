@@ -1,8 +1,10 @@
-# source-rendering Specification
+<!--
+SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company
+SPDX-License-Identifier: Apache-2.0
+-->
 
-## Purpose
-TBD - created by archiving change source-renderers-helm-kustomize. Update Purpose after archive.
-## Requirements
+## MODIFIED Requirements
+
 ### Requirement: Source interface and Mode
 
 The `internal/source` package SHALL define a `Mode` string type with exactly two constants — `ModeSeed` (value `"seed"`) and `ModeShoot` (value `"shoot"`) — and a `Source` interface with a single method `Render(ctx context.Context, mode Mode, namespace string) ([]manifest.Manifest, error)`. A `Source` implementation MUST return the manifest stream for the requested mode only, tagged with `Origin` per the manifest-parsing capability, with namespaced resources placed in the given `namespace` per the target-namespace requirement.
@@ -18,53 +20,6 @@ The `internal/source` package SHALL define a `Mode` string type with exactly two
 - **WHEN** `Render` is called with a valid `Mode` and a target namespace
 - **THEN** it returns a slice of `manifest.Manifest` for that mode
 - **AND** each returned manifest carries an `Origin`
-
----
-
-### Requirement: Source discriminator factory
-
-The package SHALL provide a `From` factory that constructs a `Source` from a `v1alpha1.Source` spec plus its injectable dependencies (a `ChartLoader` for Helm, a `RootResolver` for kustomize). `From` MUST return a Helm renderer when exactly `spec.helm` is set, a kustomize renderer when exactly `spec.kustomize` is set, and MUST return an error when neither or both discriminator fields are set.
-
-#### Scenario: Helm source selected
-
-- **WHEN** `From` receives a spec with `helm` set and `kustomize` unset
-- **THEN** it returns a Helm-backed `Source`
-- **AND** returns no error
-
-#### Scenario: Kustomize source selected
-
-- **WHEN** `From` receives a spec with `kustomize` set and `helm` unset
-- **THEN** it returns a kustomize-backed `Source`
-- **AND** returns no error
-
-#### Scenario: Neither discriminator set is rejected
-
-- **WHEN** `From` receives a spec with both `helm` and `kustomize` unset
-- **THEN** it returns an error indicating exactly one source type must be set
-
-#### Scenario: Both discriminators set is rejected
-
-- **WHEN** `From` receives a spec with both `helm` and `kustomize` set
-- **THEN** it returns an error indicating exactly one source type must be set
-
----
-
-### Requirement: Pluggable chart acquisition
-
-The package SHALL define a `ChartLoader` interface with a method `Load(ctx context.Context, repo, name, version string) (*chart.Chart, error)`. The Helm renderer MUST obtain its chart exclusively through the injected `ChartLoader` and MUST NOT embed chart pull/registry logic directly. The package MUST provide a production implementation that pulls from OCI/HTTP Helm repositories, and MUST allow a test fake that loads a chart from a local directory.
-
-#### Scenario: Renderer loads chart via injected loader
-
-- **WHEN** the Helm renderer renders a source
-- **THEN** it calls the injected `ChartLoader.Load` with the spec's `repo`, `name`, and `version`
-- **AND** renders the chart returned by the loader
-
-#### Scenario: Fake loader enables offline rendering
-
-- **WHEN** a test injects a fake `ChartLoader` that returns a chart loaded from a local directory
-- **THEN** the Helm renderer produces manifests without any network access
-
----
 
 ### Requirement: Helm values merge and mode injection
 
@@ -86,8 +41,6 @@ The Helm renderer SHALL merge values in this precedence order (lowest to highest
 
 - **WHEN** the Helm renderer is asked to render a spec whose merged values already set a top-level `mode` key
 - **THEN** the renderer returns an error indicating `mode` is operator-controlled and must not be set by the user
-
----
 
 ### Requirement: Helm rendering includes CRDs
 
@@ -114,25 +67,6 @@ The Helm renderer SHALL render chart templates in client-only dry-run mode (no c
 - **THEN** each render contains only the resources its mode guards enable
 - **AND** the two manifest sets are the disjoint seed/shoot sets the chart defines for each mode
 
----
-
-### Requirement: Pluggable kustomize root acquisition
-
-The package SHALL define a `RootResolver` interface that resolves a kustomize root for a given base URL and mode subpath into a filesystem path the kustomizer can build, returning a cleanup function. The kustomize renderer MUST obtain its build root exclusively through the injected `RootResolver` and MUST NOT embed remote git-fetch logic directly. The package MUST provide a production implementation that resolves the `?ref=`-pinned remote URL, and MUST allow a test fake that resolves to a local overlay directory.
-
-#### Scenario: Renderer resolves root via injected resolver
-
-- **WHEN** the kustomize renderer renders a source in a given mode
-- **THEN** it calls the injected `RootResolver` with the spec's `url` and the mode's subpath
-- **AND** builds the resolved filesystem root
-
-#### Scenario: Fake resolver enables offline rendering
-
-- **WHEN** a test injects a fake `RootResolver` that resolves to a local overlay directory
-- **THEN** the kustomize renderer produces manifests without any network access
-
----
-
 ### Requirement: Kustomize overlay selection by mode
 
 The kustomize renderer SHALL select the overlay subpath by mode: `spec.kustomize.seedPath` for `ModeSeed` and `spec.kustomize.shootPath` for `ModeShoot`. It MUST build the resolved root with `krusty` and MUST parse the build output into `manifest.Manifest` values via the manifest-parsing capability with a fallback origin of `OriginUpstream`.
@@ -154,8 +88,6 @@ The kustomize renderer SHALL select the overlay subpath by mode: `spec.kustomize
 - **WHEN** the kustomize renderer builds an overlay whose `additions/` resources set `dual-deployment-operator.cc.sap/origin: additions` via commonAnnotations
 - **THEN** those manifests have `Origin` of `OriginAdditions`
 - **AND** upstream-referenced resources have `Origin` of `OriginUpstream`
-
----
 
 ### Requirement: Target namespace application
 
@@ -185,8 +117,6 @@ Both renderers SHALL place the render's output into the `namespace` argument pas
 - **THEN** seed-render namespaced resources lacking a namespace land in the CR's namespace
 - **AND** shoot-render namespaced resources lacking a namespace land in `spec.shootNamespace`
 
----
-
 ### Requirement: Source rendering test coverage
 
 The source-rendering and manifest-parsing capabilities SHALL be verified by table-driven unit tests that run offline using the fake `ChartLoader` and fake `RootResolver` against local testdata fixtures (a real small Helm chart and kustomize overlays). These tests MUST NOT require a Kubernetes cluster; cluster-level and equivalence testing are deferred to later phases (reconciler and equivalence phases).
@@ -197,4 +127,3 @@ The source-rendering and manifest-parsing capabilities SHALL be verified by tabl
 - **THEN** they exercise both the Helm and kustomize renderers using local fixtures and fake fetchers
 - **AND** they assert seed vs shoot disjoint sets, correct origin tags, mode injection, user-`mode` rejection, CRD inclusion, and target-namespace application (namespaced resources stamped, explicit namespaces preserved, cluster-scoped resources untouched)
 - **AND** they complete without contacting any network endpoint or Kubernetes cluster
-

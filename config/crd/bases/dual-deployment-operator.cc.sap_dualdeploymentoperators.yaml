@@ -41,12 +41,23 @@ spec:
             description: DualDeploymentOperatorSpec defines the desired state of DualDeploymentOperator.
             properties:
               applyOrder:
-                default: RemoteFirst
+                default: ShootFirst
                 enum:
-                - HostFirst
-                - RemoteFirst
+                - SeedFirst
+                - ShootFirst
                 type: string
-              remoteAccess:
+              retentionPolicy:
+                default:
+                  crds: Retain
+                properties:
+                  crds:
+                    default: Retain
+                    enum:
+                    - Retain
+                    - Delete
+                    type: string
+                type: object
+              shootAccess:
                 properties:
                   caKey:
                     type: string
@@ -62,42 +73,31 @@ spec:
                 - secretName
                 - server
                 type: object
-              remoteNamespace:
+              shootNamespace:
                 description: |-
-                  RemoteNamespace is the target namespace for the remote (shoot) render and
-                  delivery. Namespaced resources in the remote render that omit an explicit
+                  ShootNamespace is the target namespace for the shoot render and
+                  delivery. Namespaced resources in the shoot render that omit an explicit
                   metadata.namespace are placed here; cluster-scoped resources are unaffected.
-                  The host render/delivery uses the CR's own metadata.namespace.
+                  The seed render/delivery uses the CR's own metadata.namespace.
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
-              retentionPolicy:
-                default:
-                  crds: Retain
-                properties:
-                  crds:
-                    default: Retain
-                    enum:
-                    - Retain
-                    - Delete
-                    type: string
-                type: object
               source:
                 description: Source is a discriminated union — exactly one of Helm
                   or Kustomize.
                 properties:
                   helm:
                     properties:
-                      hostValues:
-                        x-kubernetes-preserve-unknown-fields: true
                       name:
                         minLength: 1
                         type: string
-                      remoteValues:
-                        x-kubernetes-preserve-unknown-fields: true
                       repo:
                         minLength: 1
                         type: string
+                      seedValues:
+                        x-kubernetes-preserve-unknown-fields: true
+                      shootValues:
+                        x-kubernetes-preserve-unknown-fields: true
                       values:
                         x-kubernetes-preserve-unknown-fields: true
                       version:
@@ -112,18 +112,18 @@ spec:
                     description: KustomizeSource references a kustomize root plus
                       its two overlay subpaths.
                     properties:
-                      hostPath:
+                      seedPath:
                         minLength: 1
                         type: string
-                      remotePath:
+                      shootPath:
                         minLength: 1
                         type: string
                       url:
                         minLength: 1
                         type: string
                     required:
-                    - hostPath
-                    - remotePath
+                    - seedPath
+                    - shootPath
                     - url
                     type: object
                     x-kubernetes-validations:
@@ -214,8 +214,8 @@ spec:
                       ? 1 : 0) + (has(self.filterKinds) ? 1 : 0) == 1'
                 type: array
             required:
-            - remoteAccess
-            - remoteNamespace
+            - shootAccess
+            - shootNamespace
             - source
             type: object
           status:
@@ -278,7 +278,10 @@ spec:
                   - type
                   type: object
                 type: array
-              hostResources:
+              lastReconcile:
+                format: date-time
+                type: string
+              seedResources:
                 items:
                   properties:
                     apiVersion:
@@ -308,10 +311,7 @@ spec:
                   - name
                   type: object
                 type: array
-              lastReconcile:
-                format: date-time
-                type: string
-              remoteResources:
+              shootResources:
                 items:
                   properties:
                     apiVersion:

@@ -2,9 +2,9 @@
 
 # dual-deployment-operator
 
-A Kubernetes operator that manages the deployment of split host/remote controllers in Gardener environments. Consumes a Helm chart or kustomize source per operator, renders it, applies typed Go transformations, and applies each half to its target cluster (host = seed, remote = shoot) via server-side apply.
+A Kubernetes operator that manages the deployment of split seed/shoot controllers in Gardener environments. Consumes a Helm chart or kustomize source per operator, renders it, applies typed Go transformations, and applies each half to its target cluster (seed and shoot) via server-side apply.
 
-**Status**: Phase 0–6 complete (design revision 7 — two-render + hybrid patch DSL). Kubebuilder scaffold, `v1alpha1` CRD types with CEL admission validation are in place. Source rendering (`internal/manifest` — multi-doc YAML parser + origin tagging; `internal/source` — Helm and kustomize renderers, two-render per reconcile, mode injection) is implemented and unit-tested. Manifest transformation (`internal/transform` — `patch` strategic-merge/JSON Patch, `rewriteWebhookURL`, `filterKinds`) is implemented and unit-tested. Dual-cluster SSA delivery (`internal/deliver` — SSAApplier with ForceOwnership, per-kind health, owned-by-guarded prune) and host/shoot client factories (`internal/clients`) are implemented. The reconciler performs the full render→transform→apply→prune→status pipeline with finalizer-driven deletion.
+**Status**: Phase 0–6 complete (design revision 7 — two-render + hybrid patch DSL). Kubebuilder scaffold, `v1alpha1` CRD types with CEL admission validation are in place. Source rendering (`internal/manifest` — multi-doc YAML parser + origin tagging; `internal/source` — Helm and kustomize renderers, two-render per reconcile, mode injection) is implemented and unit-tested. Manifest transformation (`internal/transform` — `patch` strategic-merge/JSON Patch, `rewriteWebhookURL`, `filterKinds`) is implemented and unit-tested. Dual-cluster SSA delivery (`internal/deliver` — SSAApplier with ForceOwnership, per-kind health, owned-by-guarded prune) and seed/shoot client factories (`internal/clients`) are implemented. The reconciler performs the full render→transform→apply→prune→status pipeline with finalizer-driven deletion.
 
 ## Purpose
 
@@ -26,12 +26,12 @@ Goals:
 **Model C, Option 2 delivery, two-render pattern**. Full design in [`docs/design.md`](docs/design.md).
 
 - Operator watches `DualDeploymentOperator` CRs
-- **Renders the source twice per reconcile** — once for host, once for remote — using mode-specific configuration (Helm: `hostValues`/`remoteValues`; kustomize: `hostPath`/`remotePath` selecting overlay directories)
+- **Renders the source twice per reconcile** — once for seed, once for shoot — using mode-specific configuration (Helm: `seedValues`/`shootValues`; kustomize: `seedPath`/`shootPath` selecting overlay directories)
 - Applies 3 per-render transformations to each render independently: `patch` (strategic-merge or JSON Patch DSL), `rewriteWebhookURL` (typed; rewrites webhook and conversion-webhook URLs, also rewrites `.spec.conversion.webhook.clientConfig` on CRDs), `filterKinds` (typed)
 - No cross-stream scope: WebhookConfigurations are applied directly to the shoot with `caBundle` unset; the webhook-injector patches `caBundle` in place via target patch mode ([webhook-injector#14](https://github.com/SAP-cloud-infrastructure/webhook-injector/pull/14)), with disjoint SSA field ownership
 - No split step, no routing rules — each render goes entirely to its target cluster
-- Applies host render's output to the seed cluster (in-cluster client)
-- Applies remote render's output to the shoot cluster (kubeconfig from a Gardener token-requestor Secret)
+- Applies seed render's output to the seed cluster (in-cluster client)
+- Applies shoot render's output to the shoot cluster (kubeconfig from a Gardener token-requestor Secret)
 - Tracks per-resource health, drift-corrects on periodic reconcile
 
 ## Architecture
@@ -40,7 +40,7 @@ The following diagrams reflect the current design (revision 7). Both are editabl
 
 ![dual-deployment-operator reconcile dataflow (two-render, r7)](assets/architecture-dataflow.drawio.svg)
 
-*Reconcile dataflow: the operator renders the source twice (host + remote), applies three per-render transforms, and applies each render directly to its target cluster via server-side apply. The webhook-injector sidecar (target patch mode) patches only `.caBundle` on labeled objects on the shoot — it is not a delivery path for WebhookConfigurations.*
+*Reconcile dataflow: the operator renders the source twice (seed + shoot), applies three per-render transforms, and applies each render directly to its target cluster via server-side apply. The webhook-injector sidecar (target patch mode) patches only `.caBundle` on labeled objects on the shoot — it is not a delivery path for WebhookConfigurations.*
 
 ![dual-deployment-operator per-shoot deployment topology](assets/architecture-topology.drawio.svg)
 

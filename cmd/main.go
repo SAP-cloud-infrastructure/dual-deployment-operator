@@ -187,10 +187,10 @@ func main() {
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Recorder: recorder,
-		HostApplier: &deliver.SSAApplier{
+		SeedApplier: &deliver.SSAApplier{
 			Client:       mgr.GetClient(),
 			FieldManager: controller.FieldManagerName,
-			Cluster:      "host",
+			Cluster:      "seed",
 		},
 		// TODO(production-loaders): wire real OCI/HTTP ChartLoader + RootResolver; internal/source ships only test fakes, so live source rendering fails until then.
 		SourceDeps: source.Deps{},

@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package source renders a DualDeploymentOperator spec.source into origin-tagged
-// manifest streams, once per mode (host or remote), per the two-render pattern.
+// manifest streams, once per mode (seed or shoot), per the two-render pattern.
 package source
 
 import (
@@ -21,10 +21,10 @@ import (
 type Mode string
 
 const (
-	// ModeHost renders the host-cluster (seed) resources.
-	ModeHost Mode = "host"
-	// ModeRemote renders the remote-cluster (shoot) resources.
-	ModeRemote Mode = "remote"
+	// ModeSeed renders the seed-cluster resources.
+	ModeSeed Mode = "seed"
+	// ModeShoot renders the shoot-cluster resources.
+	ModeShoot Mode = "shoot"
 )
 
 // Source renders the manifest stream for a specific mode.

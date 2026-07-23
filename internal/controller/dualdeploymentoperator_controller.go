@@ -34,7 +34,7 @@ import (
 )
 
 const (
-	// FinalizerName is the finalizer added on first reconcile to guard remote teardown.
+	// FinalizerName is the finalizer added on first reconcile to guard shoot teardown.
 	FinalizerName = "dual-deployment-operator.cc.sap/finalizer"
 
 	// FieldManagerName is the SSA field manager used for all applies.
@@ -47,7 +47,7 @@ const (
 type DualDeploymentOperatorReconciler struct {
 	client.Client
 	Scheme      *runtime.Scheme
-	HostApplier deliver.Applier
+	SeedApplier deliver.Applier
 	Recorder    record.EventRecorder
 	SourceDeps  source.Deps
 
@@ -97,14 +97,14 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 	}
 
 	// 2. Render TWICE — once per mode.
-	hostManifests, err := src.Render(ctx, source.ModeHost, cr.Namespace)
+	seedManifests, err := src.Render(ctx, source.ModeSeed, cr.Namespace)
 	if err != nil {
-		return r.errStatus(ctx, cr, "HostRenderFailed", err)
+		return r.errStatus(ctx, cr, "SeedRenderFailed", err)
 	}
 
-	remoteManifests, err := src.Render(ctx, source.ModeRemote, cr.Spec.RemoteNamespace)
+	shootManifests, err := src.Render(ctx, source.ModeShoot, cr.Spec.ShootNamespace)
 	if err != nil {
-		return r.errStatus(ctx, cr, "RemoteRenderFailed", err)
+		return r.errStatus(ctx, cr, "ShootRenderFailed", err)
 	}
 
 	// 3. Build the ordered transformation list.
@@ -115,13 +115,13 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 
 	// 4. Apply each transformation to both renders independently, in declaration order.
 	for _, t := range transforms {
-		hostManifests, err = t.Apply(hostManifests)
+		seedManifests, err = t.Apply(seedManifests)
 		if err != nil {
-			return r.errStatus(ctx, cr, "HostTransformFailed", err)
+			return r.errStatus(ctx, cr, "SeedTransformFailed", err)
 		}
-		remoteManifests, err = t.Apply(remoteManifests)
+		shootManifests, err = t.Apply(shootManifests)
 		if err != nil {
-			return r.errStatus(ctx, cr, "RemoteTransformFailed", err)
+			return r.errStatus(ctx, cr, "ShootTransformFailed", err)
 		}
 	}
 
@@ -138,108 +138,108 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 	}
 
 	// 6. Sort each render by the fixed intra-render kind priority.
-	hostManifests = deliver.SortForApply(hostManifests)
-	remoteManifests = deliver.SortForApply(remoteManifests)
+	seedManifests = deliver.SortForApply(seedManifests)
+	shootManifests = deliver.SortForApply(shootManifests)
 
 	// 7. Derive the ownership value once; thread it through every apply call.
 	ownedBy := manifest.OwnedByValue(cr.Namespace, cr.Name)
 
-	// Preserve prior remote status by default (not overwritten if remote is skipped).
-	var hostStatuses, remoteStatuses []ddov1alpha1.ResourceStatus
-	remoteStatuses = cr.Status.RemoteResources
+	// Preserve prior shoot status by default (not overwritten if shoot is skipped).
+	var seedStatuses, shootStatuses []ddov1alpha1.ResourceStatus
+	shootStatuses = cr.Status.ShootResources
 
-	remoteFirst := cr.Spec.ApplyOrder != "HostFirst"
+	shootFirst := cr.Spec.ApplyOrder != "SeedFirst"
 
-	prevHostResources := cr.Status.HostResources
-	prevRemoteResources := cr.Status.RemoteResources
+	prevSeedResources := cr.Status.SeedResources
+	prevShootResources := cr.Status.ShootResources
 
 	var applyErrs []error
 
-	applyHost := func() {
+	applySeed := func() {
 		var err error
-		hostStatuses, err = r.applyAll(ctx, r.HostApplier, hostManifests, ownedBy)
+		seedStatuses, err = r.applyAll(ctx, r.SeedApplier, seedManifests, ownedBy)
 		if err != nil {
 			applyErrs = append(applyErrs, err)
 		}
 	}
 
-	pruneHost := func() error {
-		retained, err := r.prune(ctx, r.HostApplier, prevHostResources, hostManifests, cr, ownedBy)
-		hostStatuses = append(hostStatuses, retained...)
+	pruneSeed := func() error {
+		retained, err := r.prune(ctx, r.SeedApplier, prevSeedResources, seedManifests, cr, ownedBy)
+		seedStatuses = append(seedStatuses, retained...)
 		return err
 	}
 
 	switch shootPhase {
 	case "credsNotReady":
-		if !remoteFirst {
-			applyHost() // HostFirst: host does not wait on remote
-			if err := pruneHost(); err != nil {
-				logger.Error(err, "Failed to prune host orphans")
+		if !shootFirst {
+			applySeed() // SeedFirst: seed does not wait on shoot
+			if err := pruneSeed(); err != nil {
+				logger.Error(err, "Failed to prune seed orphans")
 			}
 		}
 		r.setCondition(cr, "WaitingForShootCredentials",
-			"shoot token/CA not yet populated by Gardener; remote render deferred")
-		return r.finishNotReady(ctx, cr, hostStatuses, remoteStatuses, 30*time.Second)
+			"shoot token/CA not yet populated by Gardener; shoot render deferred")
+		return r.finishNotReady(ctx, cr, seedStatuses, shootStatuses, 30*time.Second)
 
 	case "clientFailed":
-		if !remoteFirst {
-			applyHost() // HostFirst: host proceeds; remote failure only flagged
-			if err := pruneHost(); err != nil {
-				logger.Error(err, "Failed to prune host orphans")
+		if !shootFirst {
+			applySeed() // SeedFirst: seed proceeds; shoot failure only flagged
+			if err := pruneSeed(); err != nil {
+				logger.Error(err, "Failed to prune seed orphans")
 			}
 		}
-		r.setCondition(cr, "RemoteApplyFailed",
-			fmt.Sprintf("remote render could not be applied: %v", shootErr))
-		return r.finishNotReady(ctx, cr, hostStatuses, remoteStatuses, 0)
+		r.setCondition(cr, "ShootApplyFailed",
+			fmt.Sprintf("shoot render could not be applied: %v", shootErr))
+		return r.finishNotReady(ctx, cr, seedStatuses, shootStatuses, 0)
 	}
 
-	// shootPhase == "ready": apply the remote render, then gate host per applyOrder.
-	if remoteFirst {
-		var remoteErr error
-		remoteStatuses, remoteErr = r.applyAll(ctx, shootApplier, remoteManifests, ownedBy)
-		if remoteErr != nil {
-			applyErrs = append(applyErrs, remoteErr)
+	// shootPhase == "ready": apply the shoot render, then gate seed per applyOrder.
+	if shootFirst {
+		var shootErr error
+		shootStatuses, shootErr = r.applyAll(ctx, shootApplier, shootManifests, ownedBy)
+		if shootErr != nil {
+			applyErrs = append(applyErrs, shootErr)
 		}
-		if anyFailed(remoteStatuses) {
+		if anyFailed(shootStatuses) {
 			reason := "ResourcesDegraded"
-			msg := "some remote resources failed to apply; host render deferred until remote converges"
-			if allFailed(remoteStatuses) {
-				reason = "RemoteApplyFailed"
-				msg = "every resource in the remote render failed to apply"
+			msg := "some shoot resources failed to apply; seed render deferred until shoot converges"
+			if allFailed(shootStatuses) {
+				reason = "ShootApplyFailed"
+				msg = "every resource in the shoot render failed to apply"
 			}
 			r.setCondition(cr, reason, msg)
-			return r.finishNotReady(ctx, cr, hostStatuses, remoteStatuses, 0)
+			return r.finishNotReady(ctx, cr, seedStatuses, shootStatuses, 0)
 		}
-		applyHost()
+		applySeed()
 	} else {
-		applyHost()
-		var remoteErr error
-		remoteStatuses, remoteErr = r.applyAll(ctx, shootApplier, remoteManifests, ownedBy)
-		if remoteErr != nil {
-			applyErrs = append(applyErrs, remoteErr)
+		applySeed()
+		var shootErr error
+		shootStatuses, shootErr = r.applyAll(ctx, shootApplier, shootManifests, ownedBy)
+		if shootErr != nil {
+			applyErrs = append(applyErrs, shootErr)
 		}
 	}
 
 	// 8. Prune orphans in reverse of apply order, only for renders applied this cycle.
 	var pruneErrs []error
-	pruneRemote := func() error {
-		retained, err := r.prune(ctx, shootApplier, prevRemoteResources, remoteManifests, cr, ownedBy)
-		remoteStatuses = append(remoteStatuses, retained...)
+	pruneShoot := func() error {
+		retained, err := r.prune(ctx, shootApplier, prevShootResources, shootManifests, cr, ownedBy)
+		shootStatuses = append(shootStatuses, retained...)
 		return err
 	}
-	if remoteFirst {
-		pruneErrs = append(pruneErrs, pruneHost())
-		pruneErrs = append(pruneErrs, pruneRemote())
+	if shootFirst {
+		pruneErrs = append(pruneErrs, pruneSeed())
+		pruneErrs = append(pruneErrs, pruneShoot())
 	} else {
-		pruneErrs = append(pruneErrs, pruneRemote())
-		pruneErrs = append(pruneErrs, pruneHost())
+		pruneErrs = append(pruneErrs, pruneShoot())
+		pruneErrs = append(pruneErrs, pruneSeed())
 	}
 	pruneErr := kerrors.NewAggregate(pruneErrs)
 
 	// 9. Write status.
-	cr.Status.HostResources = hostStatuses
-	cr.Status.RemoteResources = remoteStatuses
-	cr.Status.Conditions = computeConditions(hostStatuses, remoteStatuses)
+	cr.Status.SeedResources = seedStatuses
+	cr.Status.ShootResources = shootStatuses
+	cr.Status.Conditions = computeConditions(seedStatuses, shootStatuses)
 	cr.Status.LastReconcile = &metav1.Time{Time: time.Now()}
 	if err := r.Status().Update(ctx, cr); err != nil {
 		return ctrl.Result{}, err
@@ -254,7 +254,7 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 // reconcileDelete tears down both renders in the reverse of spec.applyOrder, retaining
 // the finalizer until all deletes succeed. If the shoot is unreachable (any error
 // building the shoot client), the finalizer is kept, a ShootUnreachable condition and
-// Event are set, and the CR is requeued. Host and remote resources are both deleted
+// Event are set, and the CR is requeued. Seed and shoot resources are both deleted
 // explicitly (the applier sets no owner references).
 func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, cr *ddov1alpha1.DualDeploymentOperator) (ctrl.Result, error) {
 	shootApplier, err := r.buildShootApplierOrDefault(ctx, cr)
@@ -290,16 +290,16 @@ func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, 
 		return errs
 	}
 
-	// Tear down in the reverse of spec.applyOrder. Host resources are deleted
+	// Tear down in the reverse of spec.applyOrder. Seed resources are deleted
 	// explicitly (not via owner-reference GC — the applier sets no ownerRefs, and
-	// cluster-scoped host resources cannot be owned by a namespaced CR anyway).
+	// cluster-scoped seed resources cannot be owned by a namespaced CR anyway).
 	var errs []error
-	if cr.Spec.ApplyOrder == "HostFirst" {
-		errs = append(errs, deleteRender(shootApplier, cr.Status.RemoteResources)...)
-		errs = append(errs, deleteRender(r.HostApplier, cr.Status.HostResources)...)
+	if cr.Spec.ApplyOrder == "SeedFirst" {
+		errs = append(errs, deleteRender(shootApplier, cr.Status.ShootResources)...)
+		errs = append(errs, deleteRender(r.SeedApplier, cr.Status.SeedResources)...)
 	} else {
-		errs = append(errs, deleteRender(r.HostApplier, cr.Status.HostResources)...)
-		errs = append(errs, deleteRender(shootApplier, cr.Status.RemoteResources)...)
+		errs = append(errs, deleteRender(r.SeedApplier, cr.Status.SeedResources)...)
+		errs = append(errs, deleteRender(shootApplier, cr.Status.ShootResources)...)
 	}
 
 	if agg := kerrors.NewAggregate(errs); agg != nil {
@@ -311,11 +311,11 @@ func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, 
 }
 
 // buildShootApplier constructs a shoot SSAApplier from the Gardener token-requestor
-// Secret referenced by cr.Spec.RemoteAccess. Returns errShootCredentialsNotReady
+// Secret referenced by cr.Spec.ShootAccess. Returns errShootCredentialsNotReady
 // when the Secret exists but token/CA are not yet populated (benign bootstrap wait).
 // A missing Secret is a misconfiguration error.
 func (r *DualDeploymentOperatorReconciler) buildShootApplier(ctx context.Context, cr *ddov1alpha1.DualDeploymentOperator) (deliver.Applier, error) {
-	ref := cr.Spec.RemoteAccess
+	ref := cr.Spec.ShootAccess
 
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: cr.Namespace, Name: ref.SecretName}, secret); err != nil {
@@ -338,14 +338,14 @@ func (r *DualDeploymentOperatorReconciler) buildShootApplier(ctx context.Context
 	return &deliver.SSAApplier{
 		Client:       shootClient,
 		FieldManager: FieldManagerName,
-		Cluster:      "remote",
+		Cluster:      "shoot",
 	}, nil
 }
 
 // errShootCredentialsNotReady signals that the shoot-access Secret exists but
 // Gardener's token-requestor has not yet populated token/CA (absent or empty).
 // This is a benign bootstrap state — NOT a fatal error. The caller maps it to a
-// WaitingForShootCredentials condition, skips the remote render this cycle, and requeues.
+// WaitingForShootCredentials condition, skips the shoot render this cycle, and requeues.
 var errShootCredentialsNotReady = errors.New("shoot credentials not yet populated")
 
 // applyAll calls applier.Apply for every manifest in ms, continues on error,
@@ -386,21 +386,21 @@ func (r *DualDeploymentOperatorReconciler) errStatus(ctx context.Context, cr *dd
 	return ctrl.Result{}, err
 }
 
-// finishNotReady writes status (host/remote statuses + the already-set condition)
+// finishNotReady writes status (seed/shoot statuses + the already-set condition)
 // and requeues. A backoff of 0 means return an error so controller-runtime requeues
 // with exponential backoff (used for hard failures); non-zero is a fixed RequeueAfter
 // (used for benign waits like WaitingForShootCredentials).
 func (r *DualDeploymentOperatorReconciler) finishNotReady(ctx context.Context, cr *ddov1alpha1.DualDeploymentOperator,
-	host, remote []ddov1alpha1.ResourceStatus, backoff time.Duration) (ctrl.Result, error) {
+	seed, shoot []ddov1alpha1.ResourceStatus, backoff time.Duration) (ctrl.Result, error) {
 
-	cr.Status.HostResources = host
-	cr.Status.RemoteResources = remote
+	cr.Status.SeedResources = seed
+	cr.Status.ShootResources = shoot
 	cr.Status.LastReconcile = &metav1.Time{Time: time.Now()}
 	if e := r.Status().Update(ctx, cr); e != nil {
 		return ctrl.Result{}, e
 	}
 	if backoff == 0 {
-		return ctrl.Result{}, errors.New("remote render unavailable; requeuing")
+		return ctrl.Result{}, errors.New("shoot render unavailable; requeuing")
 	}
 	return ctrl.Result{RequeueAfter: backoff}, nil
 }
@@ -429,10 +429,10 @@ func allFailed(statuses []ddov1alpha1.ResourceStatus) bool {
 	return true
 }
 
-// computeConditions derives the Ready condition from the aggregated host and remote
+// computeConditions derives the Ready condition from the aggregated seed and shoot
 // resource statuses. Ready=True only when no resource is Degraded.
-func computeConditions(host, remote []ddov1alpha1.ResourceStatus) []metav1.Condition {
-	if anyFailed(host) || anyFailed(remote) {
+func computeConditions(seed, shoot []ddov1alpha1.ResourceStatus) []metav1.Condition {
+	if anyFailed(seed) || anyFailed(shoot) {
 		return []metav1.Condition{{
 			Type:               "Ready",
 			Status:             metav1.ConditionFalse,
@@ -441,7 +441,7 @@ func computeConditions(host, remote []ddov1alpha1.ResourceStatus) []metav1.Condi
 			LastTransitionTime: metav1.Now(),
 		}}
 	}
-	if anyProgressing(host) || anyProgressing(remote) {
+	if anyProgressing(seed) || anyProgressing(shoot) {
 		return []metav1.Condition{{
 			Type:               "Ready",
 			Status:             metav1.ConditionFalse,

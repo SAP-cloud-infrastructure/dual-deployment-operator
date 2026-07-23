@@ -24,7 +24,7 @@ The `internal/deliver` package SHALL define an `Applier` interface that abstract
 #### Scenario: Interface is implemented by a stateless SSA applier
 
 - **WHEN** the delivery layer is constructed
-- **THEN** the concrete implementation `SSAApplier` holds only a `client.Client`, a `FieldManager` string, and a `Cluster` label (`"host"` or `"remote"`)
+- **THEN** the concrete implementation `SSAApplier` holds only a `client.Client`, a `FieldManager` string, and a `Cluster` label (`"seed"` or `"shoot"`)
 - **AND** it holds no per-reconcile mutable state, so one instance MAY be reused across reconciles for the same cluster
 
 ---
@@ -164,7 +164,7 @@ After a successful apply, `SSAApplier` SHALL read the live object back with a GE
 
 ### Requirement: Fixed intra-render apply and delete ordering
 
-The delivery layer SHALL provide pure ordering functions that sort a manifest set by a fixed kind priority for apply (Namespace → CustomResourceDefinition → RBAC (ClusterRole, ClusterRoleBinding, Role, RoleBinding, ServiceAccount) → other kinds → webhook configurations) and the exact reverse for delete. This ordering MUST NOT be consumer-configurable; only the cross-render (host-vs-remote) sequence is configurable (see the reconcile-loop capability).
+The delivery layer SHALL provide pure ordering functions that sort a manifest set by a fixed kind priority for apply (Namespace → CustomResourceDefinition → RBAC (ClusterRole, ClusterRoleBinding, Role, RoleBinding, ServiceAccount) → other kinds → webhook configurations) and the exact reverse for delete. This ordering MUST NOT be consumer-configurable; only the cross-render (seed-vs-shoot) sequence is configurable (see the reconcile-loop capability).
 
 #### Scenario: Apply order places CRDs and namespaces before dependents
 

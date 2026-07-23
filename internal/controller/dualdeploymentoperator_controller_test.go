@@ -49,7 +49,7 @@ func newTestReconciler(objs ...client.Object) *DualDeploymentOperatorReconciler 
 	return &DualDeploymentOperatorReconciler{
 		Client:      c,
 		Scheme:      scheme,
-		HostApplier: &deliver.SSAApplier{Client: c, FieldManager: FieldManagerName, Cluster: "host"},
+		SeedApplier: &deliver.SSAApplier{Client: c, FieldManager: FieldManagerName, Cluster: "seed"},
 	}
 }
 
@@ -69,10 +69,10 @@ func TestReconcileMissingCRReturnsNoError(t *testing.T) {
 //
 // Source strategy: inject a fakeChartLoader (same as internal/source tests)
 // via SourceDeps.ChartLoader pointing at the demo testdata chart. The demo
-// chart renders a CRD (cluster-scoped) for ModeRemote and a CRD + ConfigMap
-// (addition) + optional Deployment for ModeHost. We use ApplyOrder=HostFirst
-// and point RemoteAccess at a Secret with an EMPTY token so the shoot phase
-// is "credsNotReady" — host applies cleanly, conditions are written, and
+// chart renders a CRD (cluster-scoped) for ModeShoot and a CRD + ConfigMap
+// (addition) + optional Deployment for ModeSeed. We use ApplyOrder=SeedFirst
+// and point ShootAccess at a Secret with an EMPTY token so the shoot phase
+// is "credsNotReady" — seed applies cleanly, conditions are written, and
 // LastReconcile is set. This exercises the full pipeline up to the status
 // write without needing a real shoot API server.
 //
@@ -101,14 +101,14 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 						Version: "0.1.0",
 					},
 				},
-				RemoteAccess: ddov1alpha1.RemoteAccessRef{
+				ShootAccess: ddov1alpha1.ShootAccessRef{
 					SecretName: remoteSecretName,
 					Server:     "https://shoot-api.example:6443",
 				},
-				RemoteNamespace: "kube-system",
-				// HostFirst so that even with credsNotReady for the shoot, the
-				// host render is applied and status/conditions are populated.
-				ApplyOrder: "HostFirst",
+				ShootNamespace: "kube-system",
+				// SeedFirst so that even with credsNotReady for the shoot, the
+				// seed render is applied and status/conditions are populated.
+				ApplyOrder: "SeedFirst",
 			},
 		}
 	}
@@ -148,10 +148,10 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 		testReconciler = &DualDeploymentOperatorReconciler{
 			Client: k8sClient,
 			Scheme: k8sClient.Scheme(),
-			HostApplier: &deliver.SSAApplier{
+			SeedApplier: &deliver.SSAApplier{
 				Client:       k8sClient,
 				FieldManager: FieldManagerName,
-				Cluster:      "host",
+				Cluster:      "seed",
 			},
 			SourceDeps: source.Deps{
 				ChartLoader: envtestFakeChartLoader{dir: demoChartDir},
@@ -159,7 +159,7 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 		}
 	})
 
-	It("delivers host render and populates status conditions and LastReconcile", func() {
+	It("delivers seed render and populates status conditions and LastReconcile", func() {
 		cr := newCR("test-deliver")
 		Expect(k8sClient.Create(ctx, cr)).To(Succeed())
 
@@ -191,7 +191,7 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 		}, 5*time.Second, 100*time.Millisecond).Should(Succeed())
 	})
 
-	It("prunes orphaned host resources and respects retentionPolicy and owned-by guard", func() {
+	It("prunes orphaned seed resources and respects retentionPolicy and owned-by guard", func() {
 		cr := newCR("test-prune")
 		ownedBy := manifest.OwnedByValue(cr.Namespace, cr.Name)
 
@@ -199,10 +199,10 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 		reconciler := &DualDeploymentOperatorReconciler{
 			Client: k8sClient,
 			Scheme: k8sClient.Scheme(),
-			HostApplier: &deliver.SSAApplier{
+			SeedApplier: &deliver.SSAApplier{
 				Client:       k8sClient,
 				FieldManager: FieldManagerName,
-				Cluster:      "host",
+				Cluster:      "seed",
 			},
 			SourceDeps: source.Deps{ChartLoader: loader},
 		}
@@ -229,7 +229,7 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 		Eventually(func(g Gomega) {
 			got := &ddov1alpha1.DualDeploymentOperator{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), got)).To(Succeed())
-			g.Expect(got.Status.HostResources).ToNot(BeEmpty())
+			g.Expect(got.Status.SeedResources).ToNot(BeEmpty())
 		}, 5*time.Second, 100*time.Millisecond).Should(Succeed())
 
 		// Track foreign-cm in status as if it were previously applied, so prune
@@ -238,7 +238,7 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 		Eventually(func(g Gomega) {
 			got := &ddov1alpha1.DualDeploymentOperator{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), got)).To(Succeed())
-			got.Status.HostResources = append(got.Status.HostResources, ddov1alpha1.ResourceStatus{
+			got.Status.SeedResources = append(got.Status.SeedResources, ddov1alpha1.ResourceStatus{
 				Kind: "ConfigMap", APIVersion: "v1", Namespace: cr.Namespace, Name: "foreign-cm",
 				Health: ddov1alpha1.HealthHealthy,
 			})
@@ -277,7 +277,7 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 
 		got := &ddov1alpha1.DualDeploymentOperator{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), got)).To(Succeed())
-		for _, rs := range got.Status.HostResources {
+		for _, rs := range got.Status.SeedResources {
 			Expect(rs.Name).NotTo(Equal("orphan-cm"), "orphan-cm must not appear in status after prune")
 		}
 
@@ -285,18 +285,18 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 	})
 
 	// Ready-phase reconcile: inject a shoot applier backed by the envtest cluster
-	// (via shootApplierFor) so the full success path runs — remote apply, host
+	// (via shootApplierFor) so the full success path runs — shoot apply, seed
 	// apply, prune, and a Ready=True status — for both apply orders.
 	readyReconciler := func() *DualDeploymentOperatorReconciler {
 		return &DualDeploymentOperatorReconciler{
 			Client: k8sClient,
 			Scheme: k8sClient.Scheme(),
-			HostApplier: &deliver.SSAApplier{
-				Client: k8sClient, FieldManager: FieldManagerName, Cluster: "host",
+			SeedApplier: &deliver.SSAApplier{
+				Client: k8sClient, FieldManager: FieldManagerName, Cluster: "seed",
 			},
 			SourceDeps: source.Deps{ChartLoader: envtestFakeChartLoader{dir: demoChartDir}},
 			shootApplierFor: func(_ context.Context, _ *ddov1alpha1.DualDeploymentOperator) (deliver.Applier, error) {
-				return &deliver.SSAApplier{Client: k8sClient, FieldManager: FieldManagerName, Cluster: "remote"}, nil
+				return &deliver.SSAApplier{Client: k8sClient, FieldManager: FieldManagerName, Cluster: "shoot"}, nil
 			},
 		}
 	}
@@ -321,9 +321,9 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 	}
 
-	It("reaches Ready=True on the HostFirst success path", func() {
-		cr := newCR("test-ready-hostfirst")
-		cr.Spec.ApplyOrder = "HostFirst"
+	It("reaches Ready=True on the SeedFirst success path", func() {
+		cr := newCR("test-ready-seedfirst")
+		cr.Spec.ApplyOrder = "SeedFirst"
 		r := readyReconciler()
 		reconcileTwice(r, cr)
 
@@ -337,14 +337,14 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 			g.Expect(cond).ToNot(BeNil())
 			g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 			g.Expect(cond.Reason).To(Equal("ReconcileSuccess"))
-			g.Expect(got.Status.HostResources).ToNot(BeEmpty())
-			g.Expect(got.Status.RemoteResources).ToNot(BeEmpty())
+			g.Expect(got.Status.SeedResources).ToNot(BeEmpty())
+			g.Expect(got.Status.ShootResources).ToNot(BeEmpty())
 		}, 10*time.Second, 200*time.Millisecond).Should(Succeed())
 	})
 
-	It("reaches Ready=True on the RemoteFirst success path", func() {
-		cr := newCR("test-ready-remotefirst")
-		cr.Spec.ApplyOrder = "RemoteFirst"
+	It("reaches Ready=True on the ShootFirst success path", func() {
+		cr := newCR("test-ready-shootfirst")
+		cr.Spec.ApplyOrder = "ShootFirst"
 		r := readyReconciler()
 		reconcileTwice(r, cr)
 
@@ -357,7 +357,7 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 			cond := meta.FindStatusCondition(got.Status.Conditions, "Ready")
 			g.Expect(cond).ToNot(BeNil())
 			g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-			g.Expect(got.Status.RemoteResources).ToNot(BeEmpty())
+			g.Expect(got.Status.ShootResources).ToNot(BeEmpty())
 		}, 10*time.Second, 200*time.Millisecond).Should(Succeed())
 	})
 
@@ -369,7 +369,7 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 	//       finalizer NOT removed, ShootUnreachable condition set, requeue 30s.
 	//   (c) Reachable shoot: Secret populated with real envtest token+CA so
 	//       buildShootApplier builds a client pointing at the envtest cluster.
-	//       Non-CRD remote resources deleted; CRD retained (retentionPolicy=Retain
+	//       Non-CRD shoot resources deleted; CRD retained (retentionPolicy=Retain
 	//       default); finalizer removed on success.
 	// -------------------------------------------------------------------------
 
@@ -391,11 +391,11 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 							Version: "0.1.0",
 						},
 					},
-					RemoteAccess: ddov1alpha1.RemoteAccessRef{
+					ShootAccess: ddov1alpha1.ShootAccessRef{
 						SecretName: "shoot-secret-del",
 						Server:     cfg.Host,
 					},
-					RemoteNamespace: "kube-system",
+					ShootNamespace:  "kube-system",
 					RetentionPolicy: ddov1alpha1.RetentionPolicy{CRDs: "Retain"},
 				},
 			}
@@ -411,10 +411,10 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 				Client:   k8sClient,
 				Scheme:   k8sClient.Scheme(),
 				Recorder: fakeRecorder,
-				HostApplier: &deliver.SSAApplier{
+				SeedApplier: &deliver.SSAApplier{
 					Client:       k8sClient,
 					FieldManager: FieldManagerName,
-					Cluster:      "host",
+					Cluster:      "seed",
 				},
 			}
 
@@ -446,20 +446,20 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 			Expect(fakeRecorder.Events).To(Receive(ContainSubstring("ShootUnreachable")))
 		})
 
-		It("deletes non-CRD remote resources, retains CRDs, removes finalizer on success", func() {
+		It("deletes non-CRD shoot resources, retains CRDs, removes finalizer on success", func() {
 			// Given: a CR with finalizer whose shoot applier is injected via
 			// shootApplierFor to point at the envtest cluster (deterministic —
-			// independent of envtest auth mode), and remote status recording a
+			// independent of envtest auth mode), and shoot status recording a
 			// ConfigMap (to delete) and a CRD (to retain under Retain).
 			cr := newDeleteCR("test-del-reachable")
 			ownedBy := manifest.OwnedByValue(cr.Namespace, cr.Name)
 
-			remoteConfigMap := &unstructured.Unstructured{}
-			remoteConfigMap.SetGroupVersionKind(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"})
-			remoteConfigMap.SetName("remote-cm-to-delete")
-			remoteConfigMap.SetNamespace(deleteNS)
-			remoteConfigMap.SetLabels(map[string]string{manifest.OwnedByLabel: ownedBy})
-			Expect(k8sClient.Create(ctx, remoteConfigMap)).To(Succeed())
+			shootConfigMap := &unstructured.Unstructured{}
+			shootConfigMap.SetGroupVersionKind(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"})
+			shootConfigMap.SetName("shoot-cm-to-delete")
+			shootConfigMap.SetNamespace(deleteNS)
+			shootConfigMap.SetLabels(map[string]string{manifest.OwnedByLabel: ownedBy})
+			Expect(k8sClient.Create(ctx, shootConfigMap)).To(Succeed())
 
 			// Create the CRD so the retention assertion is self-contained (not reliant
 			// on another spec having rendered it into the shared envtest cluster).
@@ -482,8 +482,8 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 
 			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
 
-			cr.Status.RemoteResources = []ddov1alpha1.ResourceStatus{
-				{Kind: "ConfigMap", APIVersion: "v1", Namespace: deleteNS, Name: "remote-cm-to-delete", Health: ddov1alpha1.HealthHealthy},
+			cr.Status.ShootResources = []ddov1alpha1.ResourceStatus{
+				{Kind: "ConfigMap", APIVersion: "v1", Namespace: deleteNS, Name: "shoot-cm-to-delete", Health: ddov1alpha1.HealthHealthy},
 				{Kind: "CustomResourceDefinition", APIVersion: "apiextensions.k8s.io/v1", Name: "demos.demo.cc.sap", Health: ddov1alpha1.HealthHealthy},
 			}
 			Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
@@ -493,13 +493,13 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 				Client:   k8sClient,
 				Scheme:   k8sClient.Scheme(),
 				Recorder: fakeRecorder,
-				HostApplier: &deliver.SSAApplier{
+				SeedApplier: &deliver.SSAApplier{
 					Client:       k8sClient,
 					FieldManager: FieldManagerName,
-					Cluster:      "host",
+					Cluster:      "seed",
 				},
 				shootApplierFor: func(_ context.Context, _ *ddov1alpha1.DualDeploymentOperator) (deliver.Applier, error) {
-					return &deliver.SSAApplier{Client: k8sClient, FieldManager: FieldManagerName, Cluster: "remote"}, nil
+					return &deliver.SSAApplier{Client: k8sClient, FieldManager: FieldManagerName, Cluster: "shoot"}, nil
 				},
 			}
 
@@ -511,13 +511,13 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Then: the non-CRD remote resource is deleted.
+			// Then: the non-CRD shoot resource is deleted.
 			deletedCM := &unstructured.Unstructured{}
 			deletedCM.SetGroupVersionKind(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"})
-			deletedCM.SetName("remote-cm-to-delete")
+			deletedCM.SetName("shoot-cm-to-delete")
 			deletedCM.SetNamespace(deleteNS)
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(deletedCM), deletedCM)).
-				NotTo(Succeed(), "non-CRD remote resource must be deleted")
+				NotTo(Succeed(), "non-CRD shoot resource must be deleted")
 
 			// The CRD is retained (retentionPolicy.crds=Retain default).
 			retainedCRD := &unstructured.Unstructured{}
@@ -530,7 +530,7 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 			got := &ddov1alpha1.DualDeploymentOperator{}
 			if getErr := k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), got); getErr == nil {
 				Expect(controllerutil.ContainsFinalizer(got, FinalizerName)).To(BeFalse(),
-					"finalizer must be removed after successful remote cleanup")
+					"finalizer must be removed after successful shoot cleanup")
 			}
 		})
 
@@ -545,7 +545,7 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 			Expect(k8sClient.Create(ctx, foreignCM)).To(Succeed())
 
 			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
-			cr.Status.RemoteResources = []ddov1alpha1.ResourceStatus{
+			cr.Status.ShootResources = []ddov1alpha1.ResourceStatus{
 				{Kind: "ConfigMap", APIVersion: "v1", Namespace: deleteNS, Name: "foreign-owned-cm", Health: ddov1alpha1.HealthHealthy},
 			}
 			Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
@@ -554,11 +554,11 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 				Client:   k8sClient,
 				Scheme:   k8sClient.Scheme(),
 				Recorder: record.NewFakeRecorder(10),
-				HostApplier: &deliver.SSAApplier{
-					Client: k8sClient, FieldManager: FieldManagerName, Cluster: "host",
+				SeedApplier: &deliver.SSAApplier{
+					Client: k8sClient, FieldManager: FieldManagerName, Cluster: "seed",
 				},
 				shootApplierFor: func(_ context.Context, _ *ddov1alpha1.DualDeploymentOperator) (deliver.Applier, error) {
-					return &deliver.SSAApplier{Client: k8sClient, FieldManager: FieldManagerName, Cluster: "remote"}, nil
+					return &deliver.SSAApplier{Client: k8sClient, FieldManager: FieldManagerName, Cluster: "shoot"}, nil
 				},
 			}
 

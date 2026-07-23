@@ -39,14 +39,14 @@ func kinds(ms []manifest.Manifest) map[string]manifest.Origin {
 	return out
 }
 
-func TestHelmHostRenderEnablesControllerAndTagsOrigins(t *testing.T) {
+func TestHelmSeedRenderEnablesControllerAndTagsOrigins(t *testing.T) {
 	spec := &v1alpha1.HelmSource{
 		Repo: "r", Name: "demo", Version: "0.1.0",
-		HostValues: jsonVal(t, `{"controllerManager":{"enable":true}}`),
+		SeedValues: jsonVal(t, `{"controllerManager":{"enable":true}}`),
 	}
-	ms, err := newHelm(t, spec).Render(context.Background(), ModeHost, "host-ns")
+	ms, err := newHelm(t, spec).Render(context.Background(), ModeSeed, "seed-ns")
 	if err != nil {
-		t.Fatalf("render host: %v", err)
+		t.Fatalf("render seed: %v", err)
 	}
 	k := kinds(ms)
 	if k["Deployment/demo-controller-manager"] != manifest.OriginUpstream {
@@ -60,29 +60,29 @@ func TestHelmHostRenderEnablesControllerAndTagsOrigins(t *testing.T) {
 func TestHelmRenderAppliesTargetNamespace(t *testing.T) {
 	spec := &v1alpha1.HelmSource{
 		Repo: "r", Name: "demo", Version: "0.1.0",
-		HostValues: jsonVal(t, `{"controllerManager":{"enable":true}}`),
+		SeedValues: jsonVal(t, `{"controllerManager":{"enable":true}}`),
 	}
-	ms, err := newHelm(t, spec).Render(context.Background(), ModeHost, "host-ns")
+	ms, err := newHelm(t, spec).Render(context.Background(), ModeSeed, "seed-ns")
 	if err != nil {
-		t.Fatalf("render host: %v", err)
+		t.Fatalf("render seed: %v", err)
 	}
 	byName := map[string]manifest.Manifest{}
 	for _, m := range ms {
 		byName[m.Unstructured.GetKind()+"/"+m.Unstructured.GetName()] = m
 	}
-	if got := byName["ConfigMap/demo-addition"].Unstructured.GetNamespace(); got != "host-ns" {
-		t.Errorf("addition namespace = %q, want host-ns", got)
+	if got := byName["ConfigMap/demo-addition"].Unstructured.GetNamespace(); got != "seed-ns" {
+		t.Errorf("addition namespace = %q, want seed-ns", got)
 	}
-	if got := byName["Deployment/demo-controller-manager"].Unstructured.GetNamespace(); got != "host-ns" {
-		t.Errorf("deployment namespace = %q, want host-ns", got)
+	if got := byName["Deployment/demo-controller-manager"].Unstructured.GetNamespace(); got != "seed-ns" {
+		t.Errorf("deployment namespace = %q, want seed-ns", got)
 	}
 }
 
-func TestHelmRenderRemoteNamespaceAndClusterScoped(t *testing.T) {
+func TestHelmRenderShootNamespaceAndClusterScoped(t *testing.T) {
 	spec := &v1alpha1.HelmSource{Repo: "r", Name: "demo", Version: "0.1.0"}
-	ms, err := newHelm(t, spec).Render(context.Background(), ModeRemote, "remote-ns")
+	ms, err := newHelm(t, spec).Render(context.Background(), ModeShoot, "shoot-ns")
 	if err != nil {
-		t.Fatalf("render remote: %v", err)
+		t.Fatalf("render shoot: %v", err)
 	}
 	for _, m := range ms {
 		if m.Unstructured.GetKind() == "CustomResourceDefinition" {
@@ -93,27 +93,27 @@ func TestHelmRenderRemoteNamespaceAndClusterScoped(t *testing.T) {
 	}
 }
 
-func TestHelmRemoteRenderIncludesCRDs(t *testing.T) {
+func TestHelmShootRenderIncludesCRDs(t *testing.T) {
 	spec := &v1alpha1.HelmSource{Repo: "r", Name: "demo", Version: "0.1.0"}
-	ms, err := newHelm(t, spec).Render(context.Background(), ModeRemote, "remote-ns")
+	ms, err := newHelm(t, spec).Render(context.Background(), ModeShoot, "shoot-ns")
 	if err != nil {
-		t.Fatalf("render remote: %v", err)
+		t.Fatalf("render shoot: %v", err)
 	}
 	if _, ok := kinds(ms)["CustomResourceDefinition/demos.demo.cc.sap"]; !ok {
-		t.Error("expected CRD in remote render (IncludeCRDs)")
+		t.Error("expected CRD in shoot render (IncludeCRDs)")
 	}
-	// host-only Deployment must NOT appear in remote render
+	// seed-only Deployment must NOT appear in shoot render
 	if _, ok := kinds(ms)["Deployment/demo-controller-manager"]; ok {
-		t.Error("host-only Deployment leaked into remote render")
+		t.Error("seed-only Deployment leaked into shoot render")
 	}
 }
 
 func TestHelmRejectsUserSuppliedMode(t *testing.T) {
 	spec := &v1alpha1.HelmSource{
 		Repo: "r", Name: "demo", Version: "0.1.0",
-		Values: jsonVal(t, `{"mode":"host"}`),
+		Values: jsonVal(t, `{"mode":"seed"}`),
 	}
-	_, err := newHelm(t, spec).Render(context.Background(), ModeHost, "host-ns")
+	_, err := newHelm(t, spec).Render(context.Background(), ModeSeed, "seed-ns")
 	if err == nil {
 		t.Fatal("expected error when user values set mode")
 	}

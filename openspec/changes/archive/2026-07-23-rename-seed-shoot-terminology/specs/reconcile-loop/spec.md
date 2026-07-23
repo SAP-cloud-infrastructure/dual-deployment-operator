@@ -3,13 +3,14 @@ SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Spec: Reconcile Loop
+## RENAMED Requirements
 
-## Purpose
+- FROM: `### Requirement: Remote failure severity respects spec.applyOrder`
+- TO: `### Requirement: Shoot failure severity respects spec.applyOrder`
 
-Defines the full reconciliation pipeline of the `DualDeploymentOperator` controller: two-render source rendering, per-render transformation, cross-render apply ordering (`spec.applyOrder`), continue-on-error aggregation, orphan pruning, status population, finalizer-driven deletion, periodic drift-correction requeue, and concurrency safety. Supersedes the noop-reconciler capability.
+---
 
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Two-render reconcile pipeline
 
@@ -223,37 +224,3 @@ The `DualDeploymentOperator` reconciler SHALL perform the full render → transf
 - **WHEN** a valid CR is reconciled
 - **THEN** the operator renders, transforms, and applies resources to the seed and shoot clusters and populates status
 - **AND** it does not merely fetch the CR and return
-
----
-
-### Requirement: Periodic drift-correction requeue
-
-On a successful reconcile the reconciler SHALL requeue after a fixed interval (default 10 minutes) so the render is periodically re-applied for drift correction; the periodic re-apply MUST continue to omit `caBundle` so it never reverts the webhook-injector's value.
-
-#### Scenario: Successful reconcile requeues for drift correction
-
-- **WHEN** a reconcile completes successfully
-- **THEN** it requeues after the fixed interval (default 10 minutes)
-
----
-
-### Requirement: Concurrency safety without an application-level lock
-
-The reconciler SHALL rely on controller-runtime's per-CR workqueue serialization (one reconcile per CR key at a time), optimistic concurrency on the CR via `resourceVersion` for status writes, and Server-Side Apply field ownership on target objects; it SHALL NOT implement a Helm-style status-as-lock. The operator MUST be run with leader election enabled so at most one instance is active cluster-wide, which is required even at a single replica because a rolling update transiently runs two pods.
-
-#### Scenario: Same CR is never reconciled concurrently within a process
-
-- **WHEN** multiple events arrive for the same CR
-- **THEN** controller-runtime processes that CR key on at most one worker at a time
-
-#### Scenario: Concurrent CR status change yields a conflict and requeue
-
-- **WHEN** the CR is modified by another writer between read and `Status().Update`
-- **THEN** the update fails with a 409 conflict
-- **AND** the reconcile requeues and re-reads the CR rather than overwriting
-
-#### Scenario: Leader election ensures a single active instance
-
-- **WHEN** the operator runs with leader election enabled and more than one pod exists (including the transient overlap during a rolling update)
-- **THEN** only the pod holding the lease reconciles CRs
-- **AND** the other pods remain passive standbys

@@ -21,7 +21,7 @@ func (f envtestFakeChartLoader) Load(_ context.Context, _, _, _ string) (*chart.
 }
 
 // switchableChartLoader is a chart loader for prune tests.
-// pruneRound=false: renders CRD + orphan-cm ConfigMap (host mode only).
+// pruneRound=false: renders CRD + orphan-cm ConfigMap (seed mode only).
 // pruneRound=true:  renders only the CRD (orphan-cm absent → prune fires).
 type switchableChartLoader struct{ pruneRound bool }
 
@@ -54,7 +54,7 @@ spec:
 	if !s.pruneRound {
 		files = append(files, &loader.BufferedFile{
 			Name: "templates/orphan-cm.yaml",
-			Data: []byte(`{{- if eq .Values.mode "host" }}
+			Data: []byte(`{{- if eq .Values.mode "seed" }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

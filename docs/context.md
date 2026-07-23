@@ -61,7 +61,7 @@ spec:
 
 ### Revision 2: Single-chart CR, MR-based remote delivery (rejected)
 
-**Shape**: CR references one chart; operator renders it with transformations; splits by target annotation; delivers remote resources as ManagedResource + Secret pairs.
+**Shape**: CR references one chart; operator renders it with transformations; splits by target annotation; delivers shoot resources as ManagedResource + Secret pairs.
 
 ```yaml
 spec:
@@ -76,7 +76,7 @@ spec:
   # remote: managedResourceClass: shoot-core   # (this field was invented, then dropped)
 ```
 
-**Rejected because**: GRM (gardener-resource-manager) provides drift correction, health tracking, keepObjects, token rotation. But — and this is the critical point — **the operator must implement drift correction and health tracking for host resources anyway** (Flux HelmRelease doesn't drift-correct at resource level, doesn't track per-resource health). Once these mechanisms exist for host, applying remote via a second Kubernetes client uses the same code. GRM's differential benefit is illusory.
+**Rejected because**: GRM (gardener-resource-manager) provides drift correction, health tracking, keepObjects, token rotation. But — and this is the critical point — **the operator must implement drift correction and health tracking for seed resources anyway** (Flux HelmRelease doesn't drift-correct at resource level, doesn't track per-resource health). Once these mechanisms exist for host, applying remote via a second Kubernetes client uses the same code. GRM's differential benefit is illusory.
 
 MR wrapping added a layer of abstraction (chart emits MR → operator applies MR → GRM reads MR → GRM applies actual resource → observe MR status → operator surfaces to CR status) without capability gain.
 
@@ -113,13 +113,13 @@ spec:
     helm:
       repo, name, version
       values:       # common to both renders
-      hostValues:   # host-only overrides
-      remoteValues: # remote-only overrides
+      seedValues:   # seed-only overrides
+      shootValues: # shoot-only overrides
     # OR
     kustomize:
       url:          # base
-      hostPath:     # subpath for host overlay (default "host")
-      remotePath:   # subpath for remote overlay (default "remote")
+      seedPath:     # subpath for seed overlay (default "seed")
+      shootPath:   # subpath for shoot overlay (default "shoot")
   remoteKubeconfig:
     secretName: <operator>-remote-kubeconfig
     key: kubeconfig
@@ -133,7 +133,7 @@ spec:
 - No hardcoded kind rules; no `setTarget` transformation; no routing config
 - 2× render per reconcile is a small cost (~100-200ms total; reconcile is 10-min-scale)
 
-`hostValues`/`remoteValues` fields are Helm-specific, nested under `spec.source.helm`. Kustomize uses `hostPath`/`remotePath` nested under `spec.source.kustomize`. Each source discriminator declares its own fields; no shared `values` at the `source` level.
+`seedValues`/`shootValues` fields are Helm-specific, nested under `spec.source.helm`. Kustomize uses `seedPath`/`shootPath` nested under `spec.source.kustomize`. Each source discriminator declares its own fields; no shared `values` at the `source` level.
 
 ### Revision 5: Cross-stream transformation for webhook-injector constraint (superseded)
 
@@ -141,12 +141,12 @@ spec:
 
 **Motivation**: The current webhook-injector implementation reads WebhookConfigurations from a source ConfigMap on the seed and cannot be scoped narrowly by label. Pure Option 2 (operator applies WebhookConfigs directly to shoot, injector patches only caBundle) would require injector code changes we can't get. To keep the injector operational without changing it, the operator must produce the source ConfigMap it expects.
 
-**Change**: Add `packageWebhookConfigsForInjector` as a **cross-stream transformation** (v1's only one). Runs after per-render transformations. Reads WebhookConfigurations from the remote render, serializes them, emits a ConfigMap into the host render. Injector then delivers those WebhookConfigs to the shoot (same as today's behavior).
+**Change**: Add `packageWebhookConfigsForInjector` as a **cross-stream transformation** (v1's only one). Runs after per-render transformations. Reads WebhookConfigurations from the shoot render, serializes them, emits a ConfigMap into the seed render. Injector then delivers those WebhookConfigs to the shoot (same as today's behavior).
 
-Result: injector's role is preserved (source ConfigMap → deliver → caBundle rotate). Operator applies CRDs, ClusterRoles, RoleBindings, ServiceAccount directly to shoot (Option 2 style), but not WebhookConfigurations. Two delivery paths for remote resources: operator direct-apply (CRDs/RBAC) and injector-via-ConfigMap (WebhookConfigs).
+Result: injector's role is preserved (source ConfigMap → deliver → caBundle rotate). Operator applies CRDs, ClusterRoles, RoleBindings, ServiceAccount directly to shoot (Option 2 style), but not WebhookConfigurations. Two delivery paths for shoot resources: operator direct-apply (CRDs/RBAC) and injector-via-ConfigMap (WebhookConfigs).
 
 **Trade-off vs. pure Option 2 (r4)**:
-- Retained: zero `make build-` targets (operator packages live-rendered WebhookConfigs), Option 2 model for non-WebhookConfig remote resources, direct-apply drift correction and health tracking
+- Retained: zero `make build-` targets (operator packages live-rendered WebhookConfigs), Option 2 model for non-WebhookConfig shoot resources, direct-apply drift correction and health tracking
 - Sacrificed: single remote-delivery path (injector remains as a delivery mechanism for WebhookConfigs, not just for certs)
 
 **Alternative rejected**: reintroduce a tiny `make build-webhooks` target that pre-renders `webhooks.yaml` and lets the chart wrap it in a ConfigMap via `.Files.Get`. Rejected because it fragments the "zero make targets" goal and requires manual regeneration on upstream webhook changes.
@@ -208,7 +208,7 @@ PR #14 removes both:
 
 **Changes vs. r6**:
 
-1. **`packageWebhookConfigsForInjector` removed**, and with it the entire **cross-stream scope**. The operator now applies WebhookConfigurations directly to the shoot (in the remote render), like any other kind.
+1. **`packageWebhookConfigsForInjector` removed**, and with it the entire **cross-stream scope**. The operator now applies WebhookConfigurations directly to the shoot (in the shoot render), like any other kind.
 2. **Single transformation interface.** `CrossStreamTransformation` and the `Group()` scope-splitter are gone; `transform.Build()` returns one ordered `[]Transformation`, all per-render.
 3. **Disjoint *field* ownership replaces disjoint *resource* ownership.** The operator applies WebhookConfigs / conversion-webhook CRDs with `caBundle` **unset** (never owns that field); the injector owns `caBundle` only. Two managers, same objects, non-overlapping fields — SSA keeps them from clobbering each other. This is the SSA co-ownership story that r3 wanted but abandoned when it turned out the injector didn't do SSA; PR #14's caBundle-only strategic-merge patch is the moral equivalent.
 4. **§9.2 closed.** Conversion-webhook CRD caBundle is stamped on the shoot CRD directly by the injector — no ManagedResource, no GRM.
@@ -220,7 +220,7 @@ PR #14 removes both:
 - Cross-stream: none.
 
 **Trade-off**:
-- Retained: zero `make build-` targets, direct-apply drift/health for all remote resources, injector still owns certs + caBundle.
+- Retained: zero `make build-` targets, direct-apply drift/health for all shoot resources, injector still owns certs + caBundle.
 - Gained: single remote-delivery path (operator applies everything), one transformation scope/interface, §9.2 closed, injector shrinks to its specialty.
 - Cost: the operator must label its webhook objects and apply them caBundle-unset; the injector must be deployed in target patch mode. Both are cheaper than the r5/r6 ConfigMap machinery they replace.
 
@@ -273,7 +273,7 @@ Preserves today's three-path remote delivery.
 
 - ✅ Single remote-delivery path for CRDs/RBAC/SA/additions (operator applies these directly)
 - ✅ Chart emits no delivery-shaped resources
-- ✅ Drift/health uniformly serves host + remote via one code path
+- ✅ Drift/health uniformly serves seed + shoot via one code path
 - ⚠️ (r5/r6 form C) WebhookConfigs were still delivered by the injector from an operator-produced source ConfigMap; the operator and injector wrote *disjoint resources* (operator never applied WebhookConfigs). Two remote-delivery paths remained.
 - ✅ (r7 form C′) The operator applies WebhookConfigs directly too (caBundle unset); the injector runs in **target patch mode** and owns only the `caBundle` field. **Disjoint *fields*, same objects.** One remote-delivery path. See revision 7 above and `design.md` §2.2.4.
 - ⚠️ Requires shoot kubeconfig in operator — same credential model as injector today, via Gardener token-requestor
@@ -315,7 +315,7 @@ Original design proposed per-seed operator (one instance per seed watching all s
 
 **Reasoning**:
 
-Under Option 2, operator needs a shoot kubeconfig to apply remote resources. Two placements:
+Under Option 2, operator needs a shoot kubeconfig to apply shoot resources. Two placements:
 
 - **Per-seed**: operator needs to juggle N kubeconfigs (one per shoot in its seed). Credential handling non-trivial. Token rotation must be coordinated across all shoots.
 - **Per-shoot**: operator runs in each shoot-cp namespace with the shoot's kubeconfig mounted from a Gardener token-requestor Secret in the same namespace. Direct apply is trivial. RBAC scoped to that namespace.
@@ -391,8 +391,8 @@ Stamping the injector's `--target-label` is a `patch` that only adds a label, so
 
 Under the current design (revision 4), routing is not decided by the operator or the CR. Chart/kustomization decides via mode-specific configuration:
 
-- **Helm**: `spec.source.helm.hostValues` and `spec.source.helm.remoteValues` selectively enable parts of the upstream subchart per mode. Chart's own templates use `{{ if eq .Values.mode "host" }}` / `remote` guards. Operator injects `.Values.mode` per render.
-- **Kustomize**: `spec.source.kustomize.hostPath` and `remotePath` point at two overlay directories in the source. Each overlay's `kustomization.yaml` selects the resources for that mode.
+- **Helm**: `spec.source.helm.seedValues` and `spec.source.helm.shootValues` selectively enable parts of the upstream subchart per mode. Chart's own templates use `{{ if eq .Values.mode "seed" }}` / `shoot` guards. Operator injects `.Values.mode` per render.
+- **Kustomize**: `spec.source.kustomize.seedPath` and `shootPath` point at two overlay directories in the source. Each overlay's `kustomization.yaml` selects the resources for that mode.
 
 Each render produces only the resources for its target cluster. The operator applies each render's output entirely to that target — no post-render split, no target annotations to consult.
 
@@ -474,7 +474,7 @@ If any of these become concretely needed, they can be added — but they're reje
 - **"Every resource must carry a `target` annotation, operator errors on missing"** — considered under single-render designs, rejected. Under two-render, target is implicit from which render produces the resource; no per-resource `target` annotation needed.
 - **"CR carries the routing table"** — considered, rejected. Duplicates chart-scoped knowledge across every CR; under two-render, chart/kustomization owns this.
 - **"Chart emits a routing config ConfigMap that operator consumes"** — considered, rejected. Doesn't solve multi-Deployment topologies; adds indirection without capability.
-- **"Kustomize source has a `values` map like Helm"** — no. Kustomize has no Helm-values equivalent. Per-CR parameterization for kustomize sources is via `hostPath`/`remotePath` (mode selection) plus, if needed, future kustomize-native fields (`images`, `patches`). Not a values map.
+- **"Kustomize source has a `values` map like Helm"** — no. Kustomize has no Helm-values equivalent. Per-CR parameterization for kustomize sources is via `seedPath`/`shootPath` (mode selection) plus, if needed, future kustomize-native fields (`images`, `patches`). Not a values map.
 - **"Replace ALL typed transformations with generic JSON manipulation (DSL)"** — considered, rejected. Loss of self-describing names for stream-level operations and complex iteration/conditional operations. However, r6 adopted `patch` DSL specifically for the 2 patch-shaped operations (`injectInitContainer`, `addLabels`) where typed wrapping hid the same content that patch would show. Non-patch-shaped operations stay typed (`rewriteWebhookURL`, `filterKinds`).
 - **"ConfigMap-based patch library that operator resolves"** — considered as middle-ground between typed and DSL. Rejected: adds templating engine complexity, ConfigMap versioning, and runtime failure surface. `patch` DSL inline in the CR is simpler and equally flexible.
 - **"webhook-injector should be scoped narrowly via labels so operator can apply WebhookConfigs directly (pure Option 2)"** — was rejected in r5 ("the injector cannot be modified"), then **adopted in r7** once [webhook-injector#14](https://github.com/SAP-cloud-infrastructure/webhook-injector/pull/14) added exactly this: `--target-label` label-scoping + caBundle-only patching. The operator now applies WebhookConfigs directly and the injector patches caBundle in place. The r5/r6 `packageWebhookConfigsForInjector` cross-stream workaround is removed. See revision 7.
