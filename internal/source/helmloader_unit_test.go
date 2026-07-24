@@ -106,7 +106,7 @@ func TestHostOf(t *testing.T) {
 			want:  "charts.example.com",
 		},
 		{
-			name:  "unparseable URL returns input unchanged",
+			name:  "unparsable URL returns input unchanged",
 			input: "not a url",
 			want:  "not a url",
 		},
