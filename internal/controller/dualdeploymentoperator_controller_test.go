@@ -22,7 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -406,7 +406,7 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 			cr := newDeleteCR("test-del-unreachable")
 			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
 
-			fakeRecorder := record.NewFakeRecorder(10)
+			fakeRecorder := events.NewFakeRecorder(10)
 			r := &DualDeploymentOperatorReconciler{
 				Client:   k8sClient,
 				Scheme:   k8sClient.Scheme(),
@@ -488,7 +488,7 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 			}
 			Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
 
-			fakeRecorder := record.NewFakeRecorder(10)
+			fakeRecorder := events.NewFakeRecorder(10)
 			r := &DualDeploymentOperatorReconciler{
 				Client:   k8sClient,
 				Scheme:   k8sClient.Scheme(),
@@ -553,7 +553,7 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 			r := &DualDeploymentOperatorReconciler{
 				Client:   k8sClient,
 				Scheme:   k8sClient.Scheme(),
-				Recorder: record.NewFakeRecorder(10),
+				Recorder: events.NewFakeRecorder(10),
 				SeedApplier: &deliver.SSAApplier{
 					Client: k8sClient, FieldManager: FieldManagerName, Cluster: "seed",
 				},

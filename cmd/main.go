@@ -182,7 +182,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	recorder := mgr.GetEventRecorderFor("dual-deployment-operator") //nolint:staticcheck,nolintlint // Keep record.EventRecorder until events.EventRecorder migration (tracked as a future-phase item).
+	recorder := mgr.GetEventRecorder("dual-deployment-operator")
 	if err := (&controller.DualDeploymentOperatorReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
