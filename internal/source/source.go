@@ -58,16 +58,29 @@ func NewHelmLoader() ChartLoader { return newHelmLoader(nil) }
 // NewGitResolver returns a production git RootResolver.
 func NewGitResolver() RootResolver { return &gitResolver{} }
 
-func bindHelmCreds(cl ChartLoader, cr *CredentialResolver, ref *v1alpha1.SecretReference) {
-	if hl, ok := cl.(*helmLoader); ok && cr != nil {
-		hl.resolve = func(ctx context.Context, _ string) (creds, error) { return cr.Resolve(ctx, ref) }
+// withHelmCreds returns a ChartLoader that resolves credentials for this source's
+// authSecretRef. If cl is a production *helmLoader and a resolver is configured, it
+// returns a FRESH loader (copy) with the per-source resolver bound — never mutating
+// the shared instance (which would race across concurrent reconciles). Fakes and the
+// no-resolver case pass through unchanged.
+func withHelmCreds(cl ChartLoader, cr *CredentialResolver, ref *v1alpha1.SecretReference) ChartLoader {
+	hl, ok := cl.(*helmLoader)
+	if !ok || cr == nil {
+		return cl
 	}
+	cp := *hl // shallow copy of the value; settings is shared read-only, resolve is replaced
+	cp.resolve = func(ctx context.Context, _ string) (creds, error) { return cr.Resolve(ctx, ref) }
+	return &cp
 }
 
-func bindGitCreds(rr RootResolver, cr *CredentialResolver, ref *v1alpha1.SecretReference) {
-	if gr, ok := rr.(*gitResolver); ok && cr != nil {
-		gr.resolve = func(ctx context.Context, _ string) (creds, error) { return cr.Resolve(ctx, ref) }
+func withGitCreds(rr RootResolver, cr *CredentialResolver, ref *v1alpha1.SecretReference) RootResolver {
+	gr, ok := rr.(*gitResolver)
+	if !ok || cr == nil {
+		return rr
 	}
+	cp := *gr
+	cp.resolve = func(ctx context.Context, _ string) (creds, error) { return cr.Resolve(ctx, ref) }
+	return &cp
 }
 
 // From constructs a Source from a spec discriminator plus its dependencies.
@@ -78,14 +91,14 @@ func From(spec v1alpha1.Source, deps Deps) (Source, error) {
 		if deps.ChartLoader == nil {
 			return nil, errors.New("source: helm source requires a ChartLoader (none configured)")
 		}
-		bindHelmCreds(deps.ChartLoader, deps.CredentialResolver, spec.Helm.AuthSecretRef)
-		return &helmSource{spec: spec.Helm, loader: deps.ChartLoader}, nil
+		loader := withHelmCreds(deps.ChartLoader, deps.CredentialResolver, spec.Helm.AuthSecretRef)
+		return &helmSource{spec: spec.Helm, loader: loader}, nil
 	case spec.Kustomize != nil && spec.Helm == nil:
 		if deps.RootResolver == nil {
 			return nil, errors.New("source: kustomize source requires a RootResolver (none configured)")
 		}
-		bindGitCreds(deps.RootResolver, deps.CredentialResolver, spec.Kustomize.AuthSecretRef)
-		return &kustomizeSource{spec: spec.Kustomize, resolver: deps.RootResolver}, nil
+		resolver := withGitCreds(deps.RootResolver, deps.CredentialResolver, spec.Kustomize.AuthSecretRef)
+		return &kustomizeSource{spec: spec.Kustomize, resolver: resolver}, nil
 	default:
 		return nil, errors.New("source: exactly one of source.helm or source.kustomize must be set")
 	}
