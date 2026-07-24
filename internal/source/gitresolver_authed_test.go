@@ -98,7 +98,8 @@ func TestGitResolverHTTPSBasicAuth(t *testing.T) {
 	defer srvAnon.Close()
 
 	anonResolver := &gitResolver{} // nil resolve => anonymous
-	_, cleanupAnon, _ := anonResolver.Resolve(context.Background(), srvAnon.URL+"?ref=v1", "")
+	_, cleanupAnon, errAnon := anonResolver.Resolve(context.Background(), srvAnon.URL+"?ref=v1", "")
+	_ = errAnon // anonymous path: we only assert no Authorization header was sent (checked below)
 	if cleanupAnon != nil {
 		cleanupAnon()
 	}

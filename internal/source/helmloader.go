@@ -124,7 +124,10 @@ func hostOf(raw string) string {
 
 // findTGZ locates the pulled chart tgz in dest (helm writes <name>-<version>.tgz).
 func findTGZ(dest string) (string, error) {
-	entries, _ := os.ReadDir(dest)
+	entries, err := os.ReadDir(dest)
+	if err != nil {
+		return "", fmt.Errorf("source: read chart dir: %w", err)
+	}
 	for _, e := range entries {
 		if strings.HasSuffix(e.Name(), ".tgz") {
 			return filepath.Join(dest, e.Name()), nil

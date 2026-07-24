@@ -7,6 +7,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -28,7 +29,7 @@ type gitResolver struct {
 	resolve func(ctx context.Context, host string) (creds, error) // nil => anonymous
 }
 
-func (r *gitResolver) Resolve(ctx context.Context, rawURL, subPath string) (string, func(), error) {
+func (r *gitResolver) Resolve(ctx context.Context, rawURL, subPath string) (fsPath string, cleanup func(), err error) {
 	noop := func() {}
 	base, ref, err := splitRef(rawURL)
 	if err != nil {
@@ -38,7 +39,7 @@ func (r *gitResolver) Resolve(ctx context.Context, rawURL, subPath string) (stri
 	if err != nil {
 		return "", noop, err
 	}
-	cleanup := func() { _ = os.RemoveAll(dir) }
+	cleanup = func() { _ = os.RemoveAll(dir) }
 
 	auth, err := r.authFor(ctx, base)
 	if err != nil {
@@ -74,7 +75,7 @@ func splitRef(rawURL string) (base, ref string, err error) {
 	}
 	ref = u.Query().Get("ref")
 	if ref == "" {
-		return "", "", fmt.Errorf("source: kustomize url missing pinned ?ref=")
+		return "", "", errors.New("source: kustomize url missing pinned ?ref=")
 	}
 	u.RawQuery = ""
 	return u.String(), ref, nil

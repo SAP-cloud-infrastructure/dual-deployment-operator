@@ -29,7 +29,10 @@ func makeLocalRepo(t *testing.T) (fileURL, sha string) {
 	if err := os.WriteFile(filepath.Join(work, "seed", "kustomization.yaml"), []byte("resources: []\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	w, _ := r.Worktree()
+	w, err := r.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := w.Add("."); err != nil {
 		t.Fatal(err)
 	}
