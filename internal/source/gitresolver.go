@@ -40,7 +40,11 @@ func (r *gitResolver) Resolve(ctx context.Context, rawURL, subPath string) (stri
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
 
-	auth := r.authFor(ctx, base)
+	auth, err := r.authFor(ctx, base)
+	if err != nil {
+		cleanup()
+		return "", noop, fmt.Errorf("source: resolve credentials: %w", err)
+	}
 	if err := fetchPinned(ctx, dir, base, ref, auth); err != nil {
 		cleanup()
 		return "", noop, err
@@ -48,15 +52,18 @@ func (r *gitResolver) Resolve(ctx context.Context, rawURL, subPath string) (stri
 	return filepath.Join(dir, subPath), cleanup, nil
 }
 
-func (r *gitResolver) authFor(ctx context.Context, base string) transport.AuthMethod {
+func (r *gitResolver) authFor(ctx context.Context, base string) (transport.AuthMethod, error) {
 	if r.resolve == nil {
-		return nil
+		return nil, nil // no resolver => anonymous
 	}
 	c, err := r.resolve(ctx, hostOf(base))
-	if err != nil || !c.ok {
-		return nil
+	if err != nil {
+		return nil, err
 	}
-	return &httpauth.BasicAuth{Username: c.user, Password: c.pass}
+	if !c.ok {
+		return nil, nil // recognized-keys-absent / nil ref => anonymous
+	}
+	return &httpauth.BasicAuth{Username: c.user, Password: c.pass}, nil
 }
 
 // splitRef extracts the base repo URL and the pinned ref from a ?ref= URL.

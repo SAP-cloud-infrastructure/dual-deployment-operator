@@ -18,8 +18,6 @@ import (
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/registry"
-
-	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // helmLoader is the production ChartLoader. It pulls charts from OCI (oci://) and
@@ -56,20 +54,18 @@ func (l *helmLoader) Load(ctx context.Context, repo, name, version string) (*cha
 	return loader.Load(chartPath)
 }
 
-func (l *helmLoader) credFor(ctx context.Context, host string) creds {
+func (l *helmLoader) credFor(ctx context.Context, _ string) (creds, error) {
 	if l.resolve == nil {
-		return creds{}
+		return creds{}, nil // no resolver configured => anonymous
 	}
-	c, err := l.resolve(ctx, host)
-	if err != nil {
-		log.FromContext(ctx).Info(fmt.Sprintf("credential resolve failed for %s (proceeding anonymously): %v", host, err))
-		return creds{}
-	}
-	return c
+	return l.resolve(ctx, "")
 }
 
 func (l *helmLoader) pullOCI(ctx context.Context, repo, name, version, dest string) (string, error) {
-	c := l.credFor(ctx, ociHost(repo))
+	c, err := l.credFor(ctx, ociHost(repo))
+	if err != nil {
+		return "", fmt.Errorf("source: resolve credentials: %w", err)
+	}
 
 	opts := []registry.ClientOption{registry.ClientOptEnableCache(true)}
 	if c.ok {
@@ -93,7 +89,10 @@ func (l *helmLoader) pullOCI(ctx context.Context, repo, name, version, dest stri
 }
 
 func (l *helmLoader) pullHTTP(ctx context.Context, repo, name, version, dest string) (string, error) {
-	c := l.credFor(ctx, hostOf(repo))
+	c, err := l.credFor(ctx, hostOf(repo))
+	if err != nil {
+		return "", fmt.Errorf("source: resolve credentials: %w", err)
+	}
 	rc, err := registry.NewClient(registry.ClientOptEnableCache(true))
 	if err != nil {
 		return "", err
