@@ -29,20 +29,21 @@ type gitResolver struct {
 }
 
 func (r *gitResolver) Resolve(ctx context.Context, rawURL, subPath string) (string, func(), error) {
+	noop := func() {}
 	base, ref, err := splitRef(rawURL)
 	if err != nil {
-		return "", nil, err
+		return "", noop, err
 	}
 	dir, err := os.MkdirTemp("", "ddo-kustomize-")
 	if err != nil {
-		return "", nil, err
+		return "", noop, err
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
 
 	auth := r.authFor(ctx, base)
 	if err := fetchPinned(ctx, dir, base, ref, auth); err != nil {
 		cleanup()
-		return "", nil, err
+		return "", noop, err
 	}
 	return filepath.Join(dir, subPath), cleanup, nil
 }
