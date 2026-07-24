@@ -142,7 +142,7 @@ func TestGitResolverHTTPSBasicAuth(t *testing.T) {
 		t.Fatal("authed resolver: httptest server received NO Authorization header; expected Basic credentials")
 	}
 	if obs != wantToken {
-		t.Fatalf("authed resolver: Authorization header %q, want %q", obs, wantToken)
+		t.Fatal("authed resolver: Authorization header did not match the expected Basic credentials (values redacted)")
 	}
 
 	if strings.Contains(err.Error(), wantPass) {
@@ -165,7 +165,7 @@ func TestGitResolverHTTPSBasicAuth(t *testing.T) {
 	}
 
 	if v := anonAuth.Load(); v != nil && v.(string) != "" {
-		t.Fatalf("anonymous resolver: unexpected Authorization header %q; want none", v.(string))
+		t.Fatal("anonymous resolver: unexpected Authorization header (value redacted); want none")
 	}
 }
 

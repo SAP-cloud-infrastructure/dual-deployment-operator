@@ -28,7 +28,7 @@ func TestCredentialsFromSecretData(t *testing.T) {
 	// basic auth
 	c = credsFromSecretData(map[string][]byte{"username": []byte("u"), "password": []byte("p")})
 	if c.user != "u" || c.pass != "p" || !c.ok {
-		t.Fatalf("basic: got %+v", c)
+		t.Fatalf("basic: got user=%q pass=<redacted> ok=%v", c.user, c.ok)
 	}
 	// username-only (no password, no token) => anonymous; must not attempt empty-password auth
 	if credsFromSecretData(map[string][]byte{"username": []byte("u")}).ok {
