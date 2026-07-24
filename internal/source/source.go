@@ -46,8 +46,28 @@ type RootResolver interface {
 
 // Deps holds the injectable fetchers a Source needs.
 type Deps struct {
-	ChartLoader  ChartLoader
-	RootResolver RootResolver
+	ChartLoader        ChartLoader
+	RootResolver       RootResolver
+	CredentialResolver *CredentialResolver // optional; nil => anonymous
+}
+
+// NewHelmLoader returns a production OCI+HTTP ChartLoader (no cache). The
+// per-source credential resolver is injected via Deps.CredentialResolver.
+func NewHelmLoader() ChartLoader { return newHelmLoader(nil) }
+
+// NewGitResolver returns a production git RootResolver.
+func NewGitResolver() RootResolver { return &gitResolver{} }
+
+func bindHelmCreds(cl ChartLoader, cr *CredentialResolver, ref *v1alpha1.SecretReference) {
+	if hl, ok := cl.(*helmLoader); ok && cr != nil {
+		hl.resolve = func(ctx context.Context, _ string) (creds, error) { return cr.Resolve(ctx, ref) }
+	}
+}
+
+func bindGitCreds(rr RootResolver, cr *CredentialResolver, ref *v1alpha1.SecretReference) {
+	if gr, ok := rr.(*gitResolver); ok && cr != nil {
+		gr.resolve = func(ctx context.Context, _ string) (creds, error) { return cr.Resolve(ctx, ref) }
+	}
 }
 
 // From constructs a Source from a spec discriminator plus its dependencies.
@@ -58,11 +78,13 @@ func From(spec v1alpha1.Source, deps Deps) (Source, error) {
 		if deps.ChartLoader == nil {
 			return nil, errors.New("source: helm source requires a ChartLoader (none configured)")
 		}
+		bindHelmCreds(deps.ChartLoader, deps.CredentialResolver, spec.Helm.AuthSecretRef)
 		return &helmSource{spec: spec.Helm, loader: deps.ChartLoader}, nil
 	case spec.Kustomize != nil && spec.Helm == nil:
 		if deps.RootResolver == nil {
 			return nil, errors.New("source: kustomize source requires a RootResolver (none configured)")
 		}
+		bindGitCreds(deps.RootResolver, deps.CredentialResolver, spec.Kustomize.AuthSecretRef)
 		return &kustomizeSource{spec: spec.Kustomize, resolver: deps.RootResolver}, nil
 	default:
 		return nil, errors.New("source: exactly one of source.helm or source.kustomize must be set")
