@@ -1295,6 +1295,8 @@ Use `helm.sh/helm/v3/pkg/registry` (`registry.NewClient`; call `registryClient.L
 
 **Caching.** LRU keyed by `repo|name|version`, shared across both renders of a reconcile (seed + shoot pull the same chart once) and across reconciles until evicted. Charts are immutable at a pinned version, so cache-by-version is safe; a version bump is a new key. Bound the cache (size + optional TTL) so long-lived operators don't grow unbounded.
 
+> **SCOPE UPDATE (2026-07): caching is DEFERRED to Phase 7.5.** The `production-source-loaders` OpenSpec change (which realizes this Phase 7) deliberately ships **no cache** — both loaders fetch fresh each reconcile (Helm: pull tgz to a temp dir, load, clean up; kustomize: re-fetch root each call). The code sketch above with `cache *chartCache` / `l.cache.get`/`put` and this "Caching" paragraph describe the **Phase 7.5** target, not Phase 7. See the new "Phase 7.5: Source caching" below for the actual (resolve-then-key, `emptyDir`-backed, symmetric) design. Treat the loader code above as illustrative of the eventual shape, not the Phase 7 deliverable.
+
 ### Production `RootResolver` (kustomize — git, pinned ref)
 
 ```go
@@ -1336,7 +1338,7 @@ So the production `RootResolver` needs **no credential material** for the curren
 
 Do not assume auth is required; the resolver returns empty auth for public github. Never log a token.
 
-> **The real open item for kustomize is egress, not auth.** Because the kustomization fetches transitive bases from `github.com` and `raw.githubusercontent.com` at build time, the operator Pod (running in the seed) must have **egress to github.com** — not just to `sapcc/helm-charts` but to the upstream `kubernetes-sigs` repos the source references. This is `design.md` §9 open question 1 (seed→kustomize-source egress), and it is a **network-reachability** prerequisite, distinct from credentials. Verify seed egress to github.com/raw.githubusercontent.com before the ipam-capi migration; if blocked, the resolver would need an in-landscape git mirror (which could reintroduce an auth question against that mirror).
+> **The real open item for kustomize is egress, not auth — VERIFIED AVAILABLE on qa (conditional on Gardener labels).** Because the kustomization fetches transitive bases from `github.com` and `raw.githubusercontent.com` at build time, the operator Pod (running in the seed) must have **egress to github.com** — not just to `sapcc/helm-charts` but to the upstream `kubernetes-sigs` repos the source references. This is `design.md` §9 open question 1 (seed→kustomize-source egress), a **network-reachability** prerequisite distinct from credentials. **Smoke-tested 2026-07 on `a-qa-de-200` / `shoot--cp--m-qa-de-200`** (the seed namespace where the `-remote` operators actually run): from a Pod carrying the Gardener networking labels, `git-upload-pack` against `github.com/sapcc/helm-charts` and `github.com/kubernetes-sigs/cluster-api-ipam-provider-in-cluster` both returned HTTP 200 with refs advertised, `raw.githubusercontent.com/.../cluster-api/v1.13.4/...` returned HTTP 200, and keppel served an anonymous token + real chart tags. **The gating factor is the Gardener `deny-all` NetworkPolicy, not the WAN path**: an *unlabeled* Pod could not even resolve DNS. So egress works iff the operator Pod carries `networking.gardener.cloud/to-dns`, `to-public-networks`, and `to-private-networks` — a **Phase 9 chart requirement** (see Phase 9 "Gardener egress labels on the operator Pod"), not operator code. No in-landscape git mirror is needed for qa-de-200; re-verify per landscape before each operator's migration.
 
 **krusty fetches transitive bases itself — the resolver only supplies the ROOT.** The renderer already (Phase 2) calls `krusty.MakeKustomizer(...).Run(fSys, root)` with `LoadRestrictionsNone`. Critically, the ipam-capi kustomization references upstream manifests by **remote URL** (not vendored): its `manager/`, `webhook/`, `managedresources/` kustomizations pull `github.com/kubernetes-sigs/cluster-api-ipam-provider-in-cluster//config/*?ref=v1.1.0` and `raw.githubusercontent.com/kubernetes-sigs/cluster-api/.../*.yaml`. **krusty resolves those remote bases during the build** — the `RootResolver` does NOT need to (and should not try to) pre-fetch them; it only needs to make the pinned **root** available as a local path. So the seam stays: resolver fetches the root, krusty (in the renderer) fetches the transitive remote bases. `LoadRestrictionsNone` is what permits krusty to follow those remote references. The interface seam from Phase 2 is unchanged.
 
@@ -1366,6 +1368,52 @@ While wiring the production loaders in [`cmd/main.go`](../cmd/main.go), also mig
 - Remove the `//nolint:staticcheck` from the `recorder :=` line in `cmd/main.go` and confirm lint is clean without it.
 
 **Success criterion**: `cmd/main.go` no longer calls `GetEventRecorderFor` and carries no `//nolint:staticcheck` for it; `golangci-lint run` is clean; events are still emitted on reconcile (verified by the controller suite).
+
+---
+
+## Phase 7.5: Source caching (resolve-then-key, emptyDir) (~3-4 days) — NOT STARTED
+
+Phase 7 ships both production loaders **without caching** — every reconcile pulls the Helm chart fresh (temp dir → load → cleanup) and re-fetches the kustomize root (krusty then re-fetches transitive bases). Reconcile is 10-minute-scale and the fleet is small, so this is correct and acceptable; caching was deliberately split out because a *sound* cache has its own design (mutable refs, transitive-tag immutability, Helm/kustomize symmetry) that is bigger than "make the loaders render". This phase adds that cache.
+
+### Core idea: resolve-then-key
+
+A cache is only sound when its key maps to immutable content. A CR's pinned `?ref=` (git) or `:version` (OCI tag) is **not** guaranteed immutable — `?ref=main` moves, a tag can be force-pushed. But git/OCI both let us **resolve a ref to its concrete content id cheaply, at fetch time**:
+
+- **git**: `ls-remote` (the `info/refs` advertisement — a small round trip, no clone) resolves `main` / `v1.1.0` / a short SHA → the exact **commit SHA** it points at right now.
+- **OCI**: a `HEAD`/manifest request resolves `repo:0.6.2` → the immutable **manifest digest** (`sha256:…`).
+
+Key the cache on the **resolved id**, not the ref string. A push to `main` or a moved tag → new resolved id → cache miss → re-fetch. **Auto-invalidates, no TTL.** This is sound for any ref kind, unlike a `repo|name|version`-string key.
+
+### Two cache layers (symmetric across both loaders)
+
+1. **Helm chart-artifact cache (disk `.tgz`), keyed by resolved OCI digest.** On `Load`: resolve `repo:version` → digest; if `<digest>.tgz` is cached, load it; else pull, store under the digest. Disk-backed LRU, evict-before-write (on-disk usage ≤ cap by construction), **no TTL**, cache-write failure (`ENOSPC`) is **non-fatal** (log, return the pulled chart, re-pull next reconcile — the cache is an optimization, never the source of truth). For classic HTTP(S) repos with no digest, fall back to no-cache or a `repo|name|resolved-version` key (design decision for this phase).
+2. **kustomize render cache, keyed by resolved root SHA.** On `Resolve`+render: `ls-remote` → root SHA; if the rendered `[]manifest` for `base|SHA|subPath` is cached, return it (skips clone **and** krusty **and** transitive fetches — the expensive part); else fetch@SHA, run krusty, cache the result. **Soundness caveat to design around:** the root SHA covers the transitive refs only insofar as they are pinned in the committed kustomization files (they are, for ipam-capi: `?ref=v1.1.0`, `v1.13.4`) — but those transitive refs are **tags**, so a force-moved upstream tag under the *same* root SHA would serve a stale render. Decide in this phase: (a) trust upstream release tags not to move (document it), or (b) resolve transitive refs to SHAs too (fully sound, more work). Start with (a) + a documented caveat; escalate to (b) only if needed.
+
+### Chart-1 deployment cross-ref (the emptyDir moved here from Phase 9)
+
+The disk caches need a volume. Chart 1's `deployment.yaml` mounts an `emptyDir` at the cache dir:
+```yaml
+# pod spec
+volumes:
+  - name: source-cache
+    emptyDir:
+      sizeLimit: 640Mi   # >= the loader's LRU cap (default 512Mi) + headroom
+# manager container
+volumeMounts:
+  - name: source-cache
+    mountPath: /cache/source   # match the loader's configured cache dir
+```
+Set `emptyDir.sizeLimit` ≥ the LRU cap so the cache is isolated from other ephemeral-storage consumers and cannot contribute to node disk pressure; the loader's evict-before-write LRU keeps on-disk usage under the cap by construction, so the two bounds agree. `emptyDir` (not a PVC) is correct — the cache is disposable; a Pod restart just re-populates. The loader falls back to an `os.TempDir()` subdir when no volume is mounted, so it runs correctly even before this chart change lands. (This is the block previously drafted under Phase 9; it belongs with the caching implementation, not the deployment-chart phase.)
+
+### Optional (valuable regardless of caching): record the resolved id in status
+
+Even without a cache, recording the **resolved commit SHA / OCI digest** in `status` (or an Event/log) per reconcile makes every render **auditable and reproducible** — "this reconcile rendered ipam-capi at `sapcc/helm-charts@a1b2c3` / metal-operator-remote@`sha256:…`" — even when the CR pins `?ref=main`. Consider landing this small piece first; it is independent of the cache and useful on its own.
+
+### Cache flags (deferred from Phase 7)
+
+The `--chart-cache-dir` / `--chart-cache-cap-mb` (or unified `--source-cache-*`) manager flags and their `cmd/main.go` wiring belong to this phase, not Phase 7.
+
+**Success criterion**: repeated reconciles of an unchanged source pull/clone/render once (subsequent reconciles are cache hits keyed by resolved digest/SHA); a source change (new push to a tracked branch, tag move, or version bump) is picked up on the next reconcile via a changed resolved id (no TTL, no stale render); on-disk cache stays ≤ the configured cap; a cache-write failure never fails a render; `make test` stays green offline while an online tier proves resolve-then-key hit/miss behavior.
 
 ---
 
@@ -1436,7 +1484,7 @@ chart/                                 # in THIS repo (dual-deployment-operator)
 ├── crds/
 │   └── dualdeploymentoperator.yaml   # CRD definition (installed once, not templated)
 └── templates/
-    ├── deployment.yaml            # --leader-elect=true
+    ├── deployment.yaml            # --leader-elect=true; Gardener egress labels (see below); chart-cache emptyDir added in Phase 7.5
     ├── serviceaccount.yaml
     ├── clusterrole.yaml           # broad seed applier grant + CR watch (see below)
     ├── clusterrolebinding.yaml
@@ -1484,6 +1532,18 @@ Scope the grant no broader than the seed render needs, but do not force it names
 - Uncomment `LeaderElectionReleaseOnCancel: true` in `cmd/main.go` (design.md §3.6.6).
 - Ensure chart 1's `deployment.yaml` sets the container's `livenessProbe` (`GET /healthz` on the probe port) and `readinessProbe` (`GET /readyz`), passes `--leader-elect=true` and `--health-probe-bind-address`/`--metrics-bind-address`, and exposes the metrics port (the kubebuilder helm plugin scaffolds these from `config/`; verify they survived and point at the right ports).
 - Chart 1 already includes the metrics `ServiceMonitor`/`metrics-reader` scaffolding via `config/prometheus/` + `config/rbac/`; keep or drop per whether the seed scrapes it, but do not silently lose the probes. A Deployment without probes is the gap this note closes.
+
+> **Chart-cache `emptyDir` volume moved to Phase 7.5.** Phase 7 does NOT cache (both loaders fetch fresh each reconcile), so no cache volume is needed for Phase 9. The `emptyDir` chart-cache mount is a **Phase 7.5** deliverable (see that phase), coupled with the caching implementation it supports.
+
+**Gardener egress labels on the operator Pod (Phase 7 cross-ref — REQUIRED for kustomize/OCI egress).** The operator runs per-shoot in a `shoot--cp--*` namespace **on the seed**, where Gardener enforces a `deny-all` NetworkPolicy plus label-gated allow policies. **Verified on `a-qa-de-200` / `shoot--cp--m-qa-de-200`** (2026-07): a Pod there has **no** egress — not even DNS — unless it carries the Gardener networking labels; the running `-remote` operators (ipam-capi, metal-operator, …) all carry them. A labeled smoke Pod reached `github.com` (git-upload-pack, HTTP 200 with refs advertised), `raw.githubusercontent.com` (HTTP 200), and `keppel.global.cloud.sap` (anonymous token + real chart tag list, HTTP 200); an unlabeled Pod failed DNS resolution entirely. So chart 1's `deployment.yaml` pod template **must** stamp these labels, or both the Helm OCI pull (keppel) and the kustomize root+transitive fetches (github) fail with DNS/connection errors:
+```yaml
+metadata:
+  labels:
+    networking.gardener.cloud/to-dns: allowed              # resolve github.com / keppel via cluster DNS
+    networking.gardener.cloud/to-public-networks: allowed  # reach github.com / raw.githubusercontent.com / keppel
+    networking.gardener.cloud/to-private-networks: allowed  # in-landscape hosts (e.g. an internal mirror), matches the -remote operators
+```
+This resolves `design.md` §9 open question 1 (seed→kustomize-source egress): egress **is** available on the qa landscape, **conditional on these labels** — no in-landscape git mirror is needed for qa-de-200. It is a chart requirement (a networking prerequisite), not operator code. See Phase 7 "Production `RootResolver`" egress note.
 
 **Shoot RBAC bootstrap (install-time prerequisite — the operator cannot self-bootstrap).** The operator applies CRDs/RBAC/ServiceAccounts/WebhookConfigurations to the shoot **as the ServiceAccount its `spec.shootAccess` token-requestor Secret is minted for**. That SA cannot create those resources unless it already holds the rights, and Kubernetes privilege-escalation prevention forbids an applier from creating a ClusterRole granting powers it does not already hold. Therefore a **minimal, static** Gardener `ManagedResource` — applied by the privileged gardener-resource-manager (GRM, effectively cluster-admin on the shoot) — must seed, before the operator runs:
 - the shoot ServiceAccount the operator authenticates as, and

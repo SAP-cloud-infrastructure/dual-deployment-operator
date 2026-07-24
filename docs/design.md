@@ -1592,7 +1592,7 @@ Same pattern per operator. Can parallelize.
 ### Phase 7: Migrate ipam-capi (~2 weeks)
 
 - Restructure `system/kustomize/ipam-capi-remote/` (top-level kustomization, plain kustomize resources)
-- Resolve egress question for kustomize source pull
+- Confirm seed→github egress on the target landscape (resolved for qa in §9.1 — Pod needs the Gardener `to-dns`/`to-public-networks`/`to-private-networks` labels; re-verify per landscape)
 - Delete `system/ipam-capi-remote/` (helmify output)
 - Delete `make build-ipam-capi-remote`
 - Deploy CR
@@ -1675,16 +1675,24 @@ Risk mitigation: postpone Phase 8 until 2 weeks of clean operation post-Phase 7.
 
 ## 9. Open questions
 
-### 9.1 Egress from seeds to kustomize sources
+### 9.1 Egress from seeds to kustomize sources — RESOLVED (qa smoke test, 2026-07)
 
-For ipam-capi migration: operator needs to fetch kustomize source. Currently references `github.com/sapcc/helm-charts` and transitively `github.com/kubernetes-sigs`. Seed network policies may block this.
+For ipam-capi migration the operator must fetch the kustomize source, which references `github.com/sapcc/helm-charts` and transitively `github.com/kubernetes-sigs` (`cluster-api-ipam-provider-in-cluster`) and `raw.githubusercontent.com` (`cluster-api` CRD bases). The seed's Gardener `deny-all` NetworkPolicy could block this.
 
-**Assumed for design**: github.com egress allowed. Fallback options if not:
+**Status: resolved — egress is available, conditional on the operator Pod carrying the Gardener networking labels.** Smoke-tested on **two seed landscapes** — `a-qa-de-200` (namespace `shoot--cp--m-qa-de-200`) and `rt-qa-de-1` (namespace `shoot--cp--m-qa-de-1`) — the exact `shoot--cp--*` namespaces where the `-remote` operators (ipam-capi, metal-operator, boot-operator, argora) already run. Both landscapes gave identical results. Findings:
+
+- An **unlabeled** Pod in that namespace has **no egress and cannot even resolve DNS** — the cluster DNS (`10.43.0.10`) is unreachable. The gate is the Gardener `deny-all` NetworkPolicy plus its label-gated `allow-to-dns` / `allow-to-public-networks` / `allow-to-private-networks` companions, **not** the WAN path.
+- A Pod carrying `networking.gardener.cloud/to-dns=allowed`, `to-public-networks=allowed`, and `to-private-networks=allowed` (the same labels the running `-remote` operators carry) reached every required endpoint:
+  - `git-upload-pack` against `github.com/sapcc/helm-charts` and `github.com/kubernetes-sigs/cluster-api-ipam-provider-in-cluster` → **HTTP 200**, refs advertised (real git fetch capability, not just a TLS handshake).
+  - `raw.githubusercontent.com/kubernetes-sigs/cluster-api/v1.13.4/config/crd/bases/…` → **HTTP 200**.
+  - `keppel.global.cloud.sap` anonymous token + `ccloud-helm/metal-operator-remote` tags/list → **HTTP 200** (Helm OCI baseline, same egress class).
+
+**Consequence (design decision):** no in-landscape git mirror is needed for the qa landscape; the OCI-bundle and ConfigMap fallbacks below are **not** required for v1. The single requirement is that chart 1's Pod template stamp the three Gardener networking labels (a Phase 9 chart requirement — see implementation.md Phase 9 "Gardener egress labels on the operator Pod" and Phase 7 "Production `RootResolver`"). Re-verify per landscape before each operator's production migration, since NetworkPolicy posture can differ across landscapes.
+
+Fallback options retained only if a future landscape blocks github egress outright (not needed for qa):
 - Mirror kustomize sources to keppel-hosted git
 - Bundle as OCI kustomization artifacts in keppel
 - Package as ConfigMap read by operator
-
-To be resolved before Phase 7.
 
 ### 9.2 CRD conversion-webhook caBundle + URL rewrite — RESOLVED (r7)
 
