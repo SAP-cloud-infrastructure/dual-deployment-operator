@@ -105,7 +105,7 @@ git add api/v1alpha1/ config/crd/bases/ config/rbac/
 git commit -m "feat(crd)!: add optional authSecretRef to HelmSource and KustomizeSource"
 ```
 
-- [ ] Task 1 complete
+- [x] Task 1 complete
 
 ---
 
