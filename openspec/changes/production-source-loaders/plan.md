@@ -917,4 +917,4 @@ Expected: `clean`.
 git add -A && git commit -m "chore: regenerate manifests for production-source-loaders" || echo "nothing to commit"
 ```
 
-- [ ] Task 9 complete
+- [x] Task 9 complete
