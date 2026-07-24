@@ -18,12 +18,12 @@ func TestCredentialsFromSecretData(t *testing.T) {
 		"username": []byte("u"), "password": []byte("p"), "token": []byte("tok"),
 	})
 	if c.user != "u" || c.pass != "tok" {
-		t.Fatalf("token must win: got user=%q pass=%q", c.user, c.pass)
+		t.Fatalf("token must win: got user=%q pass=<redacted>", c.user)
 	}
 	// token only => username defaults to "git" (for git HTTPS PAT)
 	c = credsFromSecretData(map[string][]byte{"token": []byte("tok")})
 	if c.user != "git" || c.pass != "tok" {
-		t.Fatalf("token-only: got user=%q pass=%q", c.user, c.pass)
+		t.Fatalf("token-only: got user=%q pass=<redacted>", c.user)
 	}
 	// basic auth
 	c = credsFromSecretData(map[string][]byte{"username": []byte("u"), "password": []byte("p")})
