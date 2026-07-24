@@ -219,7 +219,7 @@ git add internal/source/credentials.go internal/source/credentials_test.go
 git commit -m "feat(source): per-source authSecretRef credential resolution"
 ```
 
-- [ ] Task 2 complete
+- [x] Task 2 complete
 
 ---
 
