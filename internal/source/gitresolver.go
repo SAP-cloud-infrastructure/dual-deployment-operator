@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
@@ -31,7 +32,7 @@ type gitResolver struct {
 
 func (r *gitResolver) Resolve(ctx context.Context, rawURL, subPath string) (fsPath string, cleanup func(), err error) {
 	noop := func() {}
-	base, ref, err := splitRef(rawURL)
+	base, rootSubPath, ref, err := splitRef(rawURL)
 	if err != nil {
 		return "", noop, err
 	}
@@ -50,7 +51,7 @@ func (r *gitResolver) Resolve(ctx context.Context, rawURL, subPath string) (fsPa
 		cleanup()
 		return "", noop, err
 	}
-	return filepath.Join(dir, subPath), cleanup, nil
+	return filepath.Join(dir, rootSubPath, subPath), cleanup, nil
 }
 
 func (r *gitResolver) authFor(ctx context.Context, base string) (transport.AuthMethod, error) {
@@ -67,18 +68,37 @@ func (r *gitResolver) authFor(ctx context.Context, base string) (transport.AuthM
 	return &httpauth.BasicAuth{Username: c.user, Password: c.pass}, nil
 }
 
-// splitRef extracts the base repo URL and the pinned ref from a ?ref= URL.
-func splitRef(rawURL string) (base, ref string, err error) {
+// splitRef parses a kustomize URL with optional git // in-repo root path and mandatory ?ref=.
+//
+// Supported forms:
+//   - https://github.com/org/repo?ref=v1              → cloneURL=https://…/repo, rootSubPath="", ref="v1"
+//   - https://github.com/org/repo//path/to/root?ref=v1 → cloneURL=https://…/repo, rootSubPath="path/to/root", ref="v1"
+//   - file:///tmp/x?ref=v1                             → cloneURL=file:///tmp/x, rootSubPath="", ref="v1"
+//
+// The // separator is detected in the URL path (not the scheme ://). URLs with
+// embedded userinfo (user:token@host) are rejected to prevent credential leakage
+// into error messages; use authSecretRef instead.
+func splitRef(rawURL string) (cloneURL, rootSubPath, ref string, err error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return "", "", fmt.Errorf("source: parse kustomize url: %w", err)
+		return "", "", "", fmt.Errorf("source: parse kustomize url: %w", err)
+	}
+	if u.User != nil {
+		return "", "", "", errors.New("source: kustomize url must not embed credentials in the URL; use authSecretRef")
 	}
 	ref = u.Query().Get("ref")
 	if ref == "" {
-		return "", "", errors.New("source: kustomize url missing pinned ?ref=")
+		return "", "", "", errors.New("source: kustomize url missing pinned ?ref=")
 	}
 	u.RawQuery = ""
-	return u.String(), ref, nil
+
+	path := u.Path
+	if before, after, found := strings.Cut(path, "//"); found {
+		rootSubPath = strings.Trim(after, "/")
+		u.Path = before
+	}
+
+	return u.String(), rootSubPath, ref, nil
 }
 
 // fetchPinned fetches ref (tag/branch OR sha) at Depth 1, fail-closed.

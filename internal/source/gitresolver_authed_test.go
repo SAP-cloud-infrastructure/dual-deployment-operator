@@ -294,7 +294,7 @@ func TestFromThreadsHelmCredsToLoader(t *testing.T) {
 		t.Fatalf("resolve: %v", err)
 	}
 	if got.user != "git" || got.pass != "tok" || !got.ok {
-		t.Fatalf("resolve returned creds{user=%q pass=%q ok=%v}, want {user=git pass=tok ok=true}",
-			got.user, got.pass, got.ok)
+		t.Fatalf("resolve returned creds{user=%q pass=<redacted> ok=%v}, want {user=git pass=<tok> ok=true}",
+			got.user, got.ok)
 	}
 }
