@@ -888,7 +888,7 @@ git add cmd/main.go internal/controller/
 git commit -m "refactor: migrate GetEventRecorderFor to GetEventRecorder (events API)"
 ```
 
-- [ ] Task 8 complete
+- [x] Task 8 complete
 
 ---
 
