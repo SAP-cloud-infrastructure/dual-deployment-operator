@@ -10,7 +10,7 @@ api/<version>/zz_generated.*   Auto-generated (DO NOT EDIT)
 internal/controller/*          Reconciliation logic
 internal/webhook/*             Validation/defaulting (if present)
 internal/manifest/*            Multi-doc YAML parser + origin tagging
-internal/source/*              Helm and kustomize renderers (two-render per reconcile)
+internal/source/*              Production Helm ChartLoader (OCI + HTTP(S) repos) and go-git kustomize RootResolver; two-render per reconcile; per-source authSecretRef credentials
 internal/transform/*           Manifest transformations (patch, rewriteWebhookURL, filterKinds)
 internal/deliver/*             Dual-cluster SSA applier (ForceOwnership, per-kind health, owned-by-guarded prune)
 internal/clients/*             Seed (in-cluster) and shoot (token+CA from Gardener Secret) client factories
