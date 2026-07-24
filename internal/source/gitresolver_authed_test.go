@@ -81,12 +81,12 @@ func TestGitResolverHTTPSBasicAuth(t *testing.T) {
 		t.Fatal("authed resolver: httptest server received NO Authorization header; expected Basic credentials")
 	}
 	if obs != wantToken {
-		t.Fatalf("authed resolver: Authorization header = %q, want %q", obs, wantToken)
+		t.Fatal("authed resolver: Authorization header did not match expected Basic credentials")
 	}
 
 	// no-leak: password must not appear in the error message
 	if strings.Contains(err.Error(), wantPass) {
-		t.Fatalf("credential leak: password %q found in error string %q", wantPass, err.Error())
+		t.Fatal("credential leak: password appeared in the error string")
 	}
 
 	// --- anonymous resolver: no Authorization header ---

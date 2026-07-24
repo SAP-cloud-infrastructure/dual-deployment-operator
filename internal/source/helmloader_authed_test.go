@@ -67,9 +67,9 @@ func TestHelmLoaderOCIAuthed(t *testing.T) {
 		t.Fatal("wrong-password OCI pull: expected an error, got nil")
 	}
 	if strings.Contains(badErr.Error(), ociUser) {
-		t.Fatalf("credential leak: OCI username %q found in error string %q", ociUser, badErr.Error())
+		t.Fatal("credential leak: OCI username appeared in the error string")
 	}
 	if strings.Contains(badErr.Error(), ociPass) {
-		t.Fatalf("credential leak: OCI password found in error string %q", badErr.Error())
+		t.Fatal("credential leak: OCI password appeared in the error string")
 	}
 }
