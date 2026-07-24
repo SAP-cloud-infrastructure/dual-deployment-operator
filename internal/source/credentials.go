@@ -33,7 +33,11 @@ func credsFromSecretData(data map[string][]byte) creds {
 			user = "git"
 		}
 	}
-	return creds{user: user, pass: pass, ok: user != "" || pass != ""}
+	// A usable credential requires a non-empty password/token. A username alone
+	// (no password, no token) is treated as anonymous rather than attempting an
+	// empty-password basic auth (which would silently fall back to a cred-store
+	// on OCI or send an empty password over HTTP).
+	return creds{user: user, pass: pass, ok: pass != ""}
 }
 
 // CredentialResolver reads an authSecretRef Secret from the CR's namespace.
