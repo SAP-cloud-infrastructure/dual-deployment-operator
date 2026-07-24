@@ -835,7 +835,7 @@ git add internal/source/*online_test.go
 git commit -m "test(source): gated online auth integration tests (OCI + git HTTPS)"
 ```
 
-- [ ] Task 7 complete
+- [x] Task 7 complete
 
 ---
 
