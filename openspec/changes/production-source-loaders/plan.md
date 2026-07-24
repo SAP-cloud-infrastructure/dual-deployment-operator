@@ -640,7 +640,7 @@ git add internal/source/gitresolver.go internal/source/gitresolver_test.go
 git commit -m "feat(source): production git RootResolver via go-git (fail-closed pinned ref)"
 ```
 
-- [ ] Task 4 complete
+- [x] Task 4 complete
 
 ---
 
