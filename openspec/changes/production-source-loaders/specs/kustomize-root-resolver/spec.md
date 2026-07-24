@@ -56,3 +56,25 @@ The resolver MUST clone a public repository with no authentication (`Auth: nil`)
 - **WHEN** `Resolve` is called for a public git `url` and no credentials resolve for its host
 - **THEN** the fetch is performed with no auth method
 - **AND** the resolve succeeds
+
+### Requirement: URL parsing separates the clone URL from the in-repo root path
+
+The resolver MUST support the git `//` convention in the source URL, where a double slash in the URL path separates the git clone URL from an in-repo root subpath (e.g. `https://github.com/{org}/{repo}//{root}?ref={sha|tag}`). The resolver MUST clone only `{scheme}://{host}/{repo}` and then resolve the mode subpath under `{checkout}/{root}/{modeSubPath}`. A URL with no `//` in its path MUST clone the whole path and resolve the mode subpath directly under the checkout. The resolver MUST reject a URL that embeds credentials in its userinfo (`user:token@host`) with an error that does not echo the URL, directing the caller to `authSecretRef`.
+
+#### Scenario: URL with an in-repo root path clones the repo and joins the root
+
+- **WHEN** `Resolve` is called with `url = "https://github.com/org/repo//system/kustomize/app?ref=v1"` and `subPath = "seed"`
+- **THEN** the resolver clones `https://github.com/org/repo` at `v1`
+- **AND** returns the path `{checkout}/system/kustomize/app/seed`
+
+#### Scenario: URL without a double slash resolves the subpath directly
+
+- **WHEN** `Resolve` is called with `url = "https://github.com/org/repo?ref=v1"` and `subPath = "examples/overlay"`
+- **THEN** the resolver clones the whole repo at `v1`
+- **AND** returns the path `{checkout}/examples/overlay`
+
+#### Scenario: URL embedding credentials is rejected
+
+- **WHEN** `Resolve` is called with a `url` containing userinfo such as `https://user:token@host/repo?ref=v1`
+- **THEN** `Resolve` returns an error instructing the caller to use `authSecretRef`
+- **AND** the error message does not contain the credential value

@@ -476,7 +476,7 @@ manifestStream = helm template chart with renderValues
 Chart's own `values.yaml` provides defaults for everything not overridden by the CR (image repos/tags, resource limits, default annotations, etc.). Chart's templates use `{{ if eq .Values.mode "seed" }}` / `{{ if eq .Values.mode "shoot" }}` guards to include/exclude resources per mode.
 
 **`spec.source.kustomize`**:
-- `url` — kustomize root URL. Format: `https://github.com/{org}/{repo}//{path}?ref={sha|tag}`. `ref` is required — floating references are rejected at CR admission.
+- `url` — kustomize root URL. Format: `https://github.com/{org}/{repo}//{path}?ref={sha|tag}`. `ref` is required — floating references are rejected at CR admission. Credentials for a private source are supplied via `authSecretRef` (a Secret in the CR's namespace), never embedded in the URL — a URL containing userinfo (`user:token@host`) is rejected so tokens cannot leak into status/error messages.
 - `seedPath` — subpath under `url` for the seed overlay root (required; no default). Must be set explicitly per CR.
 - `shootPath` — subpath under `url` for the shoot overlay root (required; no default). Must be set explicitly per CR.
 

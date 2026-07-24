@@ -102,3 +102,10 @@ All 9 plan tasks marked `- [x]` in `plan.md`; 0 incomplete.
 - `gitResolver.fetchSHA` uses `Depth:1` fetch of branch+tag refs + `Checkout{Hash}`: a non-tip ancestor SHA may not be reachable → fails closed (error, never mis-render). Acceptable for pinned kustomize sources (tags/tips). Deepen only if deep-ancestor SHA pinning is ever needed.
 - Authed OCI online test requires `DDO_TEST_OCI_*` env; skips cleanly otherwise. The anonymous keppel online pull already exercises the real OCI path.
 - Optional: a dedicated branch-ref (vs tag/SHA) gitResolver test could be added for completeness.
+
+## PR review fixes (2026-07 addendum — PR #8 CHANGES_REQUESTED, resolved)
+- **P1: kustomize `//` in-repo root path now parsed.** `splitRef` separates the git clone URL from the in-repo root (`github.com/org/repo//root?ref=v1`), and `Resolve` joins `rootSubPath + modeSubPath` under the checkout — the documented ipam-capi source format (`docs/design.md` §479) now resolves. Regression test `TestGitResolverDoubleSlashRootSubPath`; no-`//` back-compat and the online kustomize test still pass.
+- **P1: URL-embedded credentials rejected.** `splitRef` rejects a URL with userinfo (`user:token@host`) with a non-echoing error directing to `authSecretRef`, so tokens cannot leak into `.status.conditions[].message`. Test `TestSplitRefRejectsUserinfo`.
+- **P1: authenticated classic HTTP(S) Helm repo success now tested.** `TestHelmLoaderAuthedHTTPRepo` (hermetic, Basic-auth `httptest` repo) proves authed pull succeeds, wrong creds fail, and the error carries no secret — backing the previously-unproven source-credentials scenario.
+- **P2: test failure messages redact credential values** (`credentials_test.go`, `gitresolver_authed_test.go`) — `pass=<redacted>` instead of the value.
+- Gate after fixes: `go build` exit 0, `make run-golangci-lint` 0 issues, full envtest suite green (8/8 packages), online tier green (anonymous OCI/HTTP/kustomize + authed git; authed OCI skips without env), `openspec validate` valid.
