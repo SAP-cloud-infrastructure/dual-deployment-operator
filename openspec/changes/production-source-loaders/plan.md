@@ -785,7 +785,7 @@ git add cmd/main.go internal/controller/
 git commit -m "feat: wire production source loaders into manager (remove TODO stub)"
 ```
 
-- [ ] Task 6 complete
+- [x] Task 6 complete
 
 ---
 
