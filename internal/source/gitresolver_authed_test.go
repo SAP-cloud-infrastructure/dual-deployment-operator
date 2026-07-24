@@ -9,7 +9,7 @@ import (
 	"context"
 	"encoding/base64"
 	"net/http"
-	"net/http/cgi" //nolint:gosec // G504: test-only in-process git-http-backend CGI; the Httpoxy CVE concerns production CGI reading HTTP_PROXY, not applicable to a localhost httptest server.
+	"net/http/cgi" //nolint:gosec // G504 Httpoxy (CVE-2016-5386) requires a CGI process to read an attacker's Proxy header into HTTP_PROXY. Mitigated here: this is a localhost-only httptest server, and cgi.Handler runs with an explicit 2-var Env allowlist (GIT_HTTP_EXPORT_ALL, GIT_PROJECT_ROOT) — no Proxy/HTTP_PROXY is ever passed to the CGI. The CVE precondition is therefore absent.
 	"net/http/httptest"
 	"os"
 	"os/exec"
