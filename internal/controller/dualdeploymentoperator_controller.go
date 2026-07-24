@@ -91,7 +91,9 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 	logger.Info("Starting reconciliation", "name", cr.Name, "namespace", cr.Namespace)
 
 	// 1. Build source renderer.
-	src, err := source.From(cr.Spec.Source, r.SourceDeps)
+	deps := r.SourceDeps
+	deps.CredentialResolver = &source.CredentialResolver{Client: r.Client, Namespace: cr.Namespace}
+	src, err := source.From(cr.Spec.Source, deps)
 	if err != nil {
 		return r.errStatus(ctx, cr, "InvalidSource", err)
 	}

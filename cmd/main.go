@@ -192,8 +192,10 @@ func main() {
 			FieldManager: controller.FieldManagerName,
 			Cluster:      "seed",
 		},
-		// TODO(production-loaders): wire real OCI/HTTP ChartLoader + RootResolver; internal/source ships only test fakes, so live source rendering fails until then.
-		SourceDeps: source.Deps{},
+		SourceDeps: source.Deps{
+			ChartLoader:  source.NewHelmLoader(),
+			RootResolver: source.NewGitResolver(),
+		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "dualdeploymentoperator")
 		os.Exit(1)
