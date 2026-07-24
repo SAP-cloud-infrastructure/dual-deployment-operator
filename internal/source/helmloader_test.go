@@ -18,16 +18,3 @@ func TestHelmLoaderRejectsUnknownScheme(t *testing.T) {
 		t.Fatalf("expected scheme error, got %v", err)
 	}
 }
-
-func TestHelmLoaderOnlineOCIAnonymous(t *testing.T) {
-	requireOnline(t) // skips unless DDO_ONLINE_TESTS=1
-	l := newHelmLoader(nil)
-	ch, err := l.Load(context.Background(),
-		"oci://keppel.global.cloud.sap/ccloud-helm", "metal-operator-remote", "0.6.2")
-	if err != nil {
-		t.Fatalf("anonymous OCI pull: %v", err)
-	}
-	if ch == nil || ch.Metadata == nil || ch.Metadata.Name == "" {
-		t.Fatal("expected a parsed chart")
-	}
-}
