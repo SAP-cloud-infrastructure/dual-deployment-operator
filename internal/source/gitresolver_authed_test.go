@@ -5,27 +5,15 @@
 
 package source
 
-// Tests for authenticated git credential threading.
-//
-// TestGitResolverHTTPSBasicAuth: end-to-end approach.
-//   go-git's BasicAuth.SetAuth calls r.SetBasicAuth(user,pass) eagerly on every
-//   outbound HTTP request (common.go:358). An httptest.Server is sufficient to
-//   observe the Authorization header without needing a real git server: the test
-//   records whether the header arrived with the correct credentials, then returns
-//   a 403 to short-circuit the fetch. The key assertion is that the resolver
-//   attached the credentials derived from the resolved creds, proving the chain:
-//     creds{user,pass,ok:true} → authFor → *httpauth.BasicAuth → SetAuth → header.
-//   A no-leak assertion verifies the password does not appear in the returned error.
-//
-// TestFromThreadsHelmCredsToLoader: unit-tests that From() threads credentials all
-//   the way into the concrete *helmLoader so that its .resolve closure returns the
-//   expected creds (not just that From returns nil error).
-
 import (
 	"context"
 	"encoding/base64"
 	"net/http"
+	"net/http/cgi" //nolint:gosec // G504: test-only in-process git-http-backend CGI; the Httpoxy CVE concerns production CGI reading HTTP_PROXY, not applicable to a localhost httptest server.
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -36,15 +24,89 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/SAP-cloud-infrastructure/dual-deployment-operator/api/v1alpha1"
+
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
+
+// makeBareBehindHTTP creates a bare git repo (clone of a working repo) in a temp
+// dir and returns its path. The bare repo is what git-http-backend needs to serve.
+func makeBareBehindHTTP(t *testing.T) string {
+	t.Helper()
+
+	// 1. Build a normal (non-bare) repo with one commit.
+	work := t.TempDir()
+	r, err := git.PlainInit(work, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(work, "seed"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "seed", "kustomization.yaml"), []byte("resources: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w, err := r.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Add("."); err != nil {
+		t.Fatal(err)
+	}
+	h, err := w.Commit("init", &git.CommitOptions{Author: &object.Signature{Name: "t", Email: "t@t"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.CreateTag("v1", h, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Clone it into a bare repo — git-http-backend works against bare repos.
+	bare := t.TempDir()
+	if _, err := git.PlainClone(bare, true, &git.CloneOptions{URL: "file://" + work}); err != nil {
+		t.Fatalf("clone to bare: %v", err)
+	}
+	return bare
+}
+
+// authedGitServer wraps git-http-backend in an httptest.Server with Basic-auth enforcement.
+// parentDir must be the directory CONTAINING the bare repo (git-http-backend uses GIT_PROJECT_ROOT
+// to locate the repo by the request path). Only requests with Authorization: Basic
+// base64(user:pass) are forwarded; others get 401.
+func authedGitServer(t *testing.T, backendBin, parentDir, user, pass string) *httptest.Server {
+	t.Helper()
+
+	wantToken := "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
+
+	cgiHandler := &cgi.Handler{
+		Path: backendBin,
+		Env: []string{
+			"GIT_HTTP_EXPORT_ALL=1",
+			"GIT_PROJECT_ROOT=" + parentDir,
+		},
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != wantToken {
+			w.Header().Set("WWW-Authenticate", `Basic realm="git"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		// Rewrite path so git-http-backend sees /<repoName>/info/refs etc.
+		// The server URL used in tests is srv.URL + "/" + repoName + ".git".
+		cgiHandler.ServeHTTP(w, r)
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
 
 // TestGitResolverHTTPSBasicAuth proves that a gitResolver with resolved credentials
 // attaches them as HTTP Basic auth on every outbound request to the git remote.
-// Strategy: httptest.Server records the Authorization header; returns 403 to
-// short-circuit the fetch without requiring a real git repo. We then assert:
-//  1. The observed Authorization header matches base64("u:pw").
-//  2. The error returned by Resolve does NOT contain the password string.
-//  3. A resolver with no credentials sends NO Authorization header.
+// The server returns 403 to short-circuit the fetch; the test asserts the Authorization
+// header value and that the password is not leaked in the error string.
 func TestGitResolverHTTPSBasicAuth(t *testing.T) {
 	const (
 		wantUser = "u"
@@ -52,8 +114,7 @@ func TestGitResolverHTTPSBasicAuth(t *testing.T) {
 	)
 	wantToken := "Basic " + base64.StdEncoding.EncodeToString([]byte(wantUser+":"+wantPass))
 
-	// --- authed resolver ---
-	var gotAuth atomic.Value // stores string
+	var gotAuth atomic.Value
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth.Store(r.Header.Get("Authorization"))
 		http.Error(w, "not a git server", http.StatusForbidden)
@@ -81,15 +142,14 @@ func TestGitResolverHTTPSBasicAuth(t *testing.T) {
 		t.Fatal("authed resolver: httptest server received NO Authorization header; expected Basic credentials")
 	}
 	if obs != wantToken {
-		t.Fatal("authed resolver: Authorization header did not match expected Basic credentials")
+		t.Fatalf("authed resolver: Authorization header %q, want %q", obs, wantToken)
 	}
 
-	// no-leak: password must not appear in the error message
 	if strings.Contains(err.Error(), wantPass) {
 		t.Fatal("credential leak: password appeared in the error string")
 	}
 
-	// --- anonymous resolver: no Authorization header ---
+	// Anonymous resolver must not send an Authorization header.
 	var anonAuth atomic.Value
 	srvAnon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		anonAuth.Store(r.Header.Get("Authorization"))
@@ -97,7 +157,7 @@ func TestGitResolverHTTPSBasicAuth(t *testing.T) {
 	}))
 	defer srvAnon.Close()
 
-	anonResolver := &gitResolver{} // nil resolve => anonymous
+	anonResolver := &gitResolver{}
 	_, cleanupAnon, errAnon := anonResolver.Resolve(context.Background(), srvAnon.URL+"?ref=v1", "")
 	_ = errAnon // anonymous path: we only assert no Authorization header was sent (checked below)
 	if cleanupAnon != nil {
@@ -109,9 +169,89 @@ func TestGitResolverHTTPSBasicAuth(t *testing.T) {
 	}
 }
 
+// TestGitResolverAuthedCloneSucceeds proves that an authenticated clone against a
+// REAL git-HTTP server succeeds with correct credentials and fails (401) without.
+//
+// Implementation: git-http-backend CGI via net/http/cgi (in-process, hermetic,
+// no external network). The test is NOT build-tagged online; it skips gracefully
+// when git-http-backend is absent (minimal CI runners without git).
+func TestGitResolverAuthedCloneSucceeds(t *testing.T) {
+	backendBin, err := exec.LookPath("git-http-backend")
+	if err != nil {
+		// Locate via `git --exec-path` (e.g. Homebrew installs it there).
+		if out, e := exec.Command("git", "--exec-path").Output(); e == nil {
+			candidate := filepath.Join(strings.TrimSpace(string(out)), "git-http-backend")
+			if _, e2 := os.Stat(candidate); e2 == nil {
+				backendBin = candidate
+			}
+		}
+	}
+	if backendBin == "" {
+		t.Skip("git-http-backend not found; skipping real authed-clone test")
+	}
+
+	const (
+		testUser = "u"
+		testPass = "secret"
+		repoName = "repo.git"
+	)
+
+	// Build a bare repo and stand up an authed git-HTTP server.
+	bare := makeBareBehindHTTP(t)
+
+	// git-http-backend uses GIT_PROJECT_ROOT as the base; the request path
+	// must match /<repoName>/…. We rename the bare dir to repo.git inside a
+	// parent dir so paths align.
+	parentDir := t.TempDir()
+	namedBare := filepath.Join(parentDir, repoName)
+	if err := os.Rename(bare, namedBare); err != nil {
+		// Rename across tmp dirs may fail on some systems; copy instead.
+		if err2 := exec.Command("cp", "-r", bare, namedBare).Run(); err2 != nil {
+			t.Fatalf("could not place bare repo at %s: rename=%v cp=%v", namedBare, err, err2)
+		}
+	}
+
+	srv := authedGitServer(t, backendBin, parentDir, testUser, testPass)
+
+	repoURL := srv.URL + "/" + repoName
+
+	// --- correct credentials: clone must succeed ---
+	goodResolver := &gitResolver{
+		resolve: func(_ context.Context, _ string) (creds, error) {
+			return creds{user: testUser, pass: testPass, ok: true}, nil
+		},
+	}
+	path, cleanup, err := goodResolver.Resolve(context.Background(), repoURL+"?ref=v1", "seed")
+	if err != nil {
+		t.Fatalf("authed clone with correct creds: unexpected error: %v", err)
+	}
+	defer cleanup()
+
+	if _, statErr := os.Stat(filepath.Join(path, "kustomization.yaml")); statErr != nil {
+		t.Fatalf("authed clone: expected seed/kustomization.yaml at %s: %v", path, statErr)
+	}
+
+	// --- wrong credentials: must return an error ---
+	badResolver := &gitResolver{
+		resolve: func(_ context.Context, _ string) (creds, error) {
+			return creds{user: testUser, pass: "wrong-password", ok: true}, nil
+		},
+	}
+	_, cleanupBad, errBad := badResolver.Resolve(context.Background(), repoURL+"?ref=v1", "seed")
+	if cleanupBad != nil {
+		cleanupBad()
+	}
+	if errBad == nil {
+		t.Fatal("wrong-cred clone: expected an error (401), got nil")
+	}
+	if strings.Contains(errBad.Error(), testPass) {
+		t.Fatal("credential leak: password appeared in wrong-cred error string")
+	}
+}
+
 // TestFromThreadsHelmCredsToLoader proves that From() creates a *helmLoader whose
 // resolve closure returns the credentials threaded from the CredentialResolver and
-// the authSecretRef — not merely that From returns nil error.
+// the authSecretRef.
 func TestFromThreadsHelmCredsToLoader(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
@@ -127,7 +267,9 @@ func TestFromThreadsHelmCredsToLoader(t *testing.T) {
 		CredentialResolver: &CredentialResolver{Client: cl, Namespace: "ns"},
 	}
 	spec := v1alpha1.Source{Helm: &v1alpha1.HelmSource{
-		Repo: "oci://r", Name: "n", Version: "1",
+		Repo:          "oci://r",
+		Name:          "n",
+		Version:       "1",
 		AuthSecretRef: &v1alpha1.SecretReference{Name: "mysecret"},
 	}}
 
@@ -151,7 +293,6 @@ func TestFromThreadsHelmCredsToLoader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	// token key => user defaults to "git", pass = token value
 	if got.user != "git" || got.pass != "tok" || !got.ok {
 		t.Fatalf("resolve returned creds{user=%q pass=%q ok=%v}, want {user=git pass=tok ok=true}",
 			got.user, got.pass, got.ok)
