@@ -56,6 +56,12 @@ The kustomize `RootResolver` MUST apply resolved credentials as git HTTPS basic 
 - **THEN** the resolver passes an `http.BasicAuth` auth method to the clone/fetch
 - **AND** the authenticated fetch succeeds against a repo requiring those credentials
 
+#### Scenario: wrong credentials produce an auth failure
+
+- **WHEN** credentials resolve for a git HTTPS source but the credentials are rejected by the server
+- **THEN** the resolver returns an error indicating authentication failure
+- **AND** the error message does not contain the credential values
+
 #### Scenario: SSH credentials are not consumed
 
 - **WHEN** no HTTPS-usable keys are present

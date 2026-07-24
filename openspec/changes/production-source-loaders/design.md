@@ -87,6 +87,30 @@ The operator renders a `DualDeploymentOperator` source twice per reconcile (seed
 - Reason: user directive — either build auth properly or omit it; no half-wired seam. A no-op stub is untestable dead code.
 - Alternatives: anonymous-only with deferred seams (brainstorm Option C, rejected by user).
 
+**Decision: authed git test is offline/hermetic (git-http-backend CGI, not online)**
+- Chosen: `TestGitResolverAuthedCloneSucceeds` stands up an in-process `git-http-backend` CGI handler
+  (via `net/http/cgi`) guarded by Basic-auth inside an `httptest.Server`. No external network.
+  The test is NOT `//go:build online` — it is a normal offline test that skips gracefully when
+  `git-http-backend` is absent (via `git --exec-path`).
+- Reason: a localhost-only server is hermetic and deterministic; the "authed clone succeeds" assertion
+  can be made offline, leaving the online tier for registry/network coverage only.
+- Alternatives: online-tagged test against a hosted git server (rejected — fragile, network-dependent,
+  slower); go-git in-process server (not exposed as an HTTP handler; CGI is simpler and battle-tested).
+
+**Decision: authed OCI test uses TLS registry:2 (not plain-HTTP) in CI**
+- Chosen: CI workflow (`online-tests.yaml`) generates a self-signed cert, runs registry:2 with TLS on
+  port 5443, trusts the cert system-wide via `update-ca-certificates`, and points
+  `DDO_TEST_OCI_URL=oci://localhost:5443/charts` at it.
+- Reason: `pullOCI` uses helm's `registry.NewClient` without `ClientOptPlainHTTP()`. ORAS v2.6.1+
+  (GHSA-vh4v-2xq2-g5cg) refuses to forward credentials across an implicit HTTPS→HTTP downgrade, so
+  plain-HTTP `localhost:5000` fails auth silently. Adding `ClientOptPlainHTTP()` to `pullOCI` is a
+  production code change deferred to a future change; the TLS workaround achieves real authed-success
+  coverage without touching production code.
+- Note: the `TestHelmLoaderOCIAuthed` test is already env-gated (`DDO_TEST_OCI_*`); it works as-is
+  against the TLS registry. No test code change required.
+- Alternatives: add `ClientOptPlainHTTP()` to `pullOCI` (deferred — production code change, distinct
+  scope); self-signed cert with explicit `--ca-file` in helm (TLS trust is simpler system-wide).
+
 **Decision: credentials from a per-source CRD `authSecretRef` (not operator-global)**
 - Chosen: optional `authSecretRef` on `HelmSource` and `KustomizeSource`, naming a Secret in the CR's namespace; single ref per source; fixed multi-key Secret (keys `username`/`password`/`token` — option 1A, no configurable `*Key` fields); resolver picks by what's present (`token` wins over `password` if both set).
 - Reason: mirrors the existing `shootAccess.secretName` convention; keeps the CR as the single config surface (design §3.3); the operator's seed RBAC already reads Secrets.
