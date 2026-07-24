@@ -437,7 +437,7 @@ git add internal/source/helmloader.go internal/source/helmloader_test.go interna
 git commit -m "feat(source): production Helm ChartLoader (OCI + HTTP repo, authed, no cache)"
 ```
 
-- [ ] Task 3 complete
+- [x] Task 3 complete
 
 ---
 
