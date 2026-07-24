@@ -737,7 +737,7 @@ git add internal/source/source.go internal/source/source_test.go
 git commit -m "feat(source): exported loader constructors + authSecretRef credential threading"
 ```
 
-- [ ] Task 5 complete
+- [x] Task 5 complete
 
 ---
 
