@@ -61,6 +61,10 @@ type HelmSource struct {
 	// +kubebuilder:validation:Schemaless
 	// +kubebuilder:pruning:PreserveUnknownFields
 	ShootValues *apiextensionsv1.JSON `json:"shootValues,omitempty"`
+	// AuthSecretRef optionally names a Secret (in the CR's namespace) holding
+	// chart-pull credentials. When unset, the chart is pulled anonymously.
+	// +optional
+	AuthSecretRef *SecretReference `json:"authSecretRef,omitempty"`
 }
 
 // KustomizeSource references a kustomize root plus its two overlay subpaths.
@@ -72,6 +76,18 @@ type KustomizeSource struct {
 	SeedPath string `json:"seedPath"`
 	// +kubebuilder:validation:MinLength=1
 	ShootPath string `json:"shootPath"`
+	// AuthSecretRef optionally names a Secret (in the CR's namespace) holding
+	// git HTTPS credentials. When unset, the root is fetched anonymously.
+	// +optional
+	AuthSecretRef *SecretReference `json:"authSecretRef,omitempty"`
+}
+
+// SecretReference names a Secret in the CR's own namespace holding source-pull
+// credentials (keys: username/password/token). No namespace field — the Secret is
+// always resolved in the CR's namespace, matching the shootAccess convention.
+type SecretReference struct {
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
 }
 
 type ShootAccessRef struct {
