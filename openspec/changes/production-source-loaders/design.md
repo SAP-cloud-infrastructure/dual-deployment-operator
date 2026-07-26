@@ -37,7 +37,7 @@ The operator renders a `DualDeploymentOperator` source twice per reconcile (seed
 - Source credentials from a per-source `authSecretRef` on the CRD (`HelmSource`, `KustomizeSource`), resolved per host.
 - Wire both loaders into `cmd/main.go`, removing the `TODO(production-loaders)` stub.
 - Migrate `GetEventRecorderFor → GetEventRecorder` (deprecation cleanup), as a distinct task.
-- Keep `make test` green offline; run real network + real auth tests behind `DDO_ONLINE_TESTS`.
+- Real network pulls and real-auth tests run in the default test job; authed paths are proven hermetically in-process (no external services, no credentials).
 
 **Non-Goals:**
 - **Any source caching (deferred to Phase 7.5).** Both loaders fetch fresh each reconcile: the Helm loader pulls the chart tgz to a temp dir and cleans it up; the kustomize resolver re-fetches the root (and krusty re-fetches transitive bases). A unified, resolve-then-key, `emptyDir`-backed cache for BOTH loaders (Helm chart artifact keyed by resolved OCI digest; kustomize render keyed by resolved root SHA) is scoped as **Phase 7.5 "Source caching"**, immediately after this change. Deferred because it is a distinct feature with its own soundness design (ref→digest/SHA resolution, transitive-tag immutability), not part of "make the loaders render real sources end-to-end".
@@ -97,19 +97,32 @@ The operator renders a `DualDeploymentOperator` source twice per reconcile (seed
 - Alternatives: online-tagged test against a hosted git server (rejected — fragile, network-dependent,
   slower); go-git in-process server (not exposed as an HTTP handler; CGI is simpler and battle-tested).
 
-**Decision: authed OCI test uses TLS registry:2 (not plain-HTTP) in CI**
-- Chosen: CI workflow (`online-tests.yaml`) generates a self-signed cert, runs registry:2 with TLS on
-  port 5443, trusts the cert system-wide via `update-ca-certificates`, and points
-  `DDO_TEST_OCI_URL=oci://localhost:5443/charts` at it.
-- Reason: `pullOCI` uses helm's `registry.NewClient` without `ClientOptPlainHTTP()`. ORAS v2.6.1+
-  (GHSA-vh4v-2xq2-g5cg) refuses to forward credentials across an implicit HTTPS→HTTP downgrade, so
-  plain-HTTP `localhost:5000` fails auth silently. Adding `ClientOptPlainHTTP()` to `pullOCI` is a
-  production code change deferred to a future change; the TLS workaround achieves real authed-success
-  coverage without touching production code.
-- Note: the `TestHelmLoaderOCIAuthed` test is already env-gated (`DDO_TEST_OCI_*`); it works as-is
-  against the TLS registry. No test code change required.
-- Alternatives: add `ClientOptPlainHTTP()` to `pullOCI` (deferred — production code change, distinct
-  scope); self-signed cert with explicit `--ca-file` in helm (TLS trust is simpler system-wide).
+**Decision: authed OCI test is hermetic/in-process (hand-rolled TLS registry, not online/registry:2)**
+- Chosen: `TestHelmLoaderOCIAuthed` stands up a hand-rolled in-process OCI-distribution registry — a
+  content-addressable byte store (blobs/manifests keyed by digest + tag→digest resolution) gated by
+  HTTP Basic auth — behind a `httptest.NewTLSServer`. The test pushes a fixture chart via helm's own
+  registry client (trusting the server cert + authenticating), then pulls it back through the
+  production `helmLoader`. Runs in the default `Test` job; NOT `//go:build online`, no env gate, no
+  external service, no new module dependency.
+- Reason: `pullOCI` uses helm's `registry.NewClient`; helm/ORAS (GHSA-vh4v-2xq2-g5cg) refuse to forward
+  Basic credentials across an implicit HTTPS→HTTP downgrade, so a plain-HTTP registry fails auth. TLS
+  is therefore required. To trust the self-signed `httptest` cert without a system-wide install, the
+  production `helmLoader` gained an unexported `httpClient` seam (threaded into `registry.NewClient`
+  via `registry.ClientOptHTTPClient`); production leaves it nil (identical default behavior), and only
+  the test injects the server's cert-trusting client. This makes the authed-OCI path hermetic and
+  aligned with the hermetic authed-git (`git-http-backend` CGI) and authed-HTTP-repo tests — all three
+  run in the default job with no external services.
+- Note: the classic HTTP(S) Helm-repo auth path (`TestHelmLoaderAuthedHTTPRepo`) has no such
+  credential-forwarding restriction and uses a plain-HTTP `httptest` server (no TLS needed).
+- Superseded approach: an earlier iteration proved authed OCI via a hand-authored
+  `.github/workflows/online-tests.yaml` running `registry:2` with a self-signed cert + htpasswd on
+  `localhost:5443`, driven by an env-gated `//go:build online` test (`DDO_TEST_OCI_*`). That workflow,
+  the `make test-online` target, and the env/tag gating were all removed in favor of the hermetic
+  in-process registry above.
+- Alternatives: reuse `distribution/distribution/v3` as an in-process registry (rejected — pulled ~30
+  transitive `// indirect` deps into `go.mod` for test-only code); add `ClientOptPlainHTTP()` to
+  `pullOCI` for a plain-HTTP localhost registry (rejected here — a production behavior change, distinct
+  scope; the test-only `httpClient` seam is narrower).
 
 **Decision: credentials from a per-source CRD `authSecretRef` (not operator-global)**
 - Chosen: optional `authSecretRef` on `HelmSource` and `KustomizeSource`, naming a Secret in the CR's namespace; single ref per source; fixed multi-key Secret (keys `username`/`password`/`token` — option 1A, no configurable `*Key` fields); resolver picks by what's present (`token` wins over `password` if both set).
@@ -143,7 +156,7 @@ The operator renders a `DualDeploymentOperator` source twice per reconcile (seed
 - [Live rendering fails without the Phase 9 egress labels] → Documented as an explicit Phase 9 chart requirement (design §9.1, implementation.md Phase 9); egress labels are a chart, not code, gap.
 - [Credential material leaks into logs/errors] → Never log tokens; a dedicated test asserts the auth-failure error string is token-free.
 - [go-git SHA fetch-by-refspec unsupported by some git servers] → github supports it (the only host in scope); fail-closed surfaces a clear error rather than a wrong render; documented per-landscape re-verify.
-- [Online tests flaky/credential-dependent in CI] → Gated behind `DDO_ONLINE_TESTS`; offline tier (fakes + local git server) is the default and always green.
+- [Real-pull tests flaky in CI due to public-source availability] → Accepted dependency (CI has egress); the authed paths are hermetic in-process (no external services/credentials), so credential-dependent flakiness is eliminated.
 
 ## Migration Plan
 

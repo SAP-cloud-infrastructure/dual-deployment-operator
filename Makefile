@@ -87,11 +87,6 @@ test-e2e: FORCE
 	@printf "\e[1;36m>> Running E2E tests\e[0m\n"
 	go test -v -timeout 10m ./test/e2e/...
 
-.PHONY: test-online
-test-online: install-setup-envtest
-	@printf "\e[1;36m>> Running ONLINE integration tests (public OCI + HTTP Helm repos; needs network)\e[0m\n"
-	DDO_ONLINE_TESTS=1 KUBEBUILDER_ASSETS=$$(setup-envtest use 1.36 -p path) go test -tags online -count=1 ./internal/source/...
-
 install-goimports: FORCE
 	@if ! hash goimports 2>/dev/null; then printf "\e[1;36m>> Installing goimports (this may take a while)...\e[0m\n"; go install golang.org/x/tools/cmd/goimports@latest; fi
 

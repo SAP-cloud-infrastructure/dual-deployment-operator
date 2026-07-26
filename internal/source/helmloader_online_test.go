@@ -1,5 +1,3 @@
-//go:build online
-
 // SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company
 // Copyright 2026.
 //
@@ -9,11 +7,8 @@ package source
 
 // TestHelmLoaderOnlineOCIAnonymous exercises the production helmLoader against a
 // real public OCI registry (ghcr.io) without authentication.
-// TestHelmLoaderOnlineHTTPRepo exercises the classic HTTP(S) repo path (pullHTTP).
-//
-// Both tests are gated behind:
-//   - //go:build online  (compile-time: only included under `go test -tags online`)
-//   - requireOnline(t)   (runtime: skips unless DDO_ONLINE_TESTS=1)
+// TestHelmLoaderOnlineHTTPRepo exercises the classic HTTP(S) repo path (pullHTTP)
+// against a real public Helm repo. Both make real network calls on every run.
 
 import (
 	"context"
@@ -21,8 +16,6 @@ import (
 )
 
 func TestHelmLoaderOnlineOCIAnonymous(t *testing.T) {
-	requireOnline(t)
-
 	l := newHelmLoader(nil)
 	ch, err := l.Load(context.Background(),
 		"oci://ghcr.io/stefanprodan/charts", "podinfo", "6.1.0")
@@ -35,8 +28,6 @@ func TestHelmLoaderOnlineOCIAnonymous(t *testing.T) {
 }
 
 func TestHelmLoaderOnlineHTTPRepo(t *testing.T) {
-	requireOnline(t)
-
 	l := newHelmLoader(nil)
 	ch, err := l.Load(context.Background(),
 		"https://prometheus-community.github.io/helm-charts", "kube-state-metrics", "8.0.0")

@@ -4,4 +4,5 @@ goal: Implement production Helm OCI/HTTP ChartLoader and git pinned-ref
   kustomize RootResolver; wire into cmd/main.go (replace
   TODO(production-loaders)); bundle GetEventRecorderFor->GetEventRecorder
   migration. Anonymous auth verified; credential resolvers optional
-  off-by-default. Online tests gated by DDO_ONLINE_TESTS.
+  off-by-default. Real-pull tests run in the default test job; authed
+  paths (OCI, HTTP repo, git) proven hermetically in-process.

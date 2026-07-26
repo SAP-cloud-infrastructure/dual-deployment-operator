@@ -8,6 +8,7 @@ package source
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -26,6 +27,9 @@ import (
 type helmLoader struct {
 	settings *cli.EnvSettings
 	resolve  func(ctx context.Context, host string) (creds, error) // nil => anonymous
+	// httpClient overrides the Helm registry client's HTTP client. Production MUST
+	// leave it nil; only tests set it, to trust an in-process self-signed TLS registry.
+	httpClient *http.Client
 }
 
 func newHelmLoader(resolve func(context.Context, string) (creds, error)) *helmLoader {
@@ -70,6 +74,9 @@ func (l *helmLoader) pullOCI(ctx context.Context, repo, name, version, dest stri
 	opts := []registry.ClientOption{registry.ClientOptEnableCache(true)}
 	if c.ok {
 		opts = append(opts, registry.ClientOptBasicAuth(c.user, c.pass)) // inline, no on-disk Login
+	}
+	if l.httpClient != nil {
+		opts = append(opts, registry.ClientOptHTTPClient(l.httpClient))
 	}
 	rc, err := registry.NewClient(opts...) // MUST be non-nil even anonymously
 	if err != nil {
