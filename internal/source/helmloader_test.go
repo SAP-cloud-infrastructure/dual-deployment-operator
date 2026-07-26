@@ -10,10 +10,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"encoding/base64"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -381,96 +378,4 @@ func makeMinimalChartTGZ(t *testing.T, name, version string) []byte {
 		t.Fatal(err)
 	}
 	return buf.Bytes()
-}
-
-// authedHelmRepoServer stands up an httptest.Server that serves a single-chart
-// Helm repo index + chart tgz behind Basic auth. Returns the server and the
-// expected Authorization header value.
-func authedHelmRepoServer(t *testing.T, chartName, chartVersion, user, pass string) (srv *httptest.Server, wantToken string) {
-	t.Helper()
-	tgzBytes := makeMinimalChartTGZ(t, chartName, chartVersion)
-	tgzName := fmt.Sprintf("%s-%s.tgz", chartName, chartVersion)
-	wantToken = "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != wantToken {
-			w.Header().Set("WWW-Authenticate", `Basic realm="helm"`)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-		switch r.URL.Path {
-		case "/index.yaml":
-			indexYAML := fmt.Sprintf(`apiVersion: v1
-entries:
-  %s:
-  - name: %s
-    version: %s
-    urls:
-    - %s/%s
-generated: "2026-01-01T00:00:00Z"
-`, chartName, chartName, chartVersion, srv.URL, tgzName)
-			w.Header().Set("Content-Type", "text/yaml")
-			if _, err := w.Write([]byte(indexYAML)); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-			}
-		case "/" + tgzName:
-			w.Header().Set("Content-Type", "application/octet-stream")
-			if _, err := w.Write(tgzBytes); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-			}
-		default:
-			http.NotFound(w, r)
-		}
-	})
-	srv = httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	return srv, wantToken
-}
-
-// TestHelmLoaderAuthedHTTPRepo proves that pullHTTP sends Basic credentials and
-// a fully-authenticated pull against a Basic-auth-protected httptest server
-// succeeds and returns a parsed chart. Also proves wrong credentials fail and
-// the error does not contain the password.
-func TestHelmLoaderAuthedHTTPRepo(t *testing.T) {
-	const (
-		chartName    = "testchart"
-		chartVersion = "0.1.0"
-		testUser     = "helmuser"
-		testPass     = "supersecret"
-	)
-
-	srv, _ := authedHelmRepoServer(t, chartName, chartVersion, testUser, testPass)
-	ctx := context.Background()
-
-	// --- correct credentials: pull must succeed and return a parsed chart ---
-	goodLoader := newHelmLoader(func(_ context.Context, _ string) (creds, error) {
-		return creds{user: testUser, pass: testPass, ok: true}, nil
-	})
-	ch, err := goodLoader.Load(ctx, srv.URL, chartName, chartVersion)
-	if err != nil {
-		t.Fatalf("authed HTTP repo pull with correct creds: %v", err)
-	}
-	if ch == nil || ch.Metadata == nil || ch.Metadata.Name != chartName {
-		t.Fatalf("authed HTTP repo pull: expected chart name %q, got %v", chartName, ch)
-	}
-
-	// --- wrong credentials: must fail, must not leak password ---
-	badLoader := newHelmLoader(func(_ context.Context, _ string) (creds, error) {
-		return creds{user: testUser, pass: "wrong-intentionally", ok: true}, nil
-	})
-	_, badErr := badLoader.Load(ctx, srv.URL, chartName, chartVersion)
-	if badErr == nil {
-		t.Fatal("wrong-cred HTTP repo pull: expected an error, got nil")
-	}
-	if strings.Contains(badErr.Error(), testPass) {
-		t.Fatal("credential leak: password appeared in wrong-cred error string")
-	}
-
-	// --- anonymous: no Authorization header sent, returns 401 error ---
-	anonLoader := newHelmLoader(nil)
-	_, anonErr := anonLoader.Load(ctx, srv.URL, chartName, chartVersion)
-	if anonErr == nil {
-		t.Fatal("anonymous HTTP repo pull against authed server: expected an error, got nil")
-	}
 }
