@@ -246,8 +246,9 @@ func TestHelmLoaderOCIAuthed(t *testing.T) {
 		t.Fatalf("authed OCI pull: expected chart %q, got %+v", authedTestChart, ch)
 	}
 
+	const badPass = "wrong-password-intentionally-invalid"
 	bad := newHelmLoader(func(context.Context, string) (creds, error) {
-		return creds{user: authedTestUser, pass: "wrong-password-intentionally-invalid", ok: true}, nil
+		return creds{user: authedTestUser, pass: badPass, ok: true}, nil
 	})
 	bad.httpClient = client
 	_, badErr := bad.Load(ctx, repo, authedTestChart, authedTestVer)
@@ -257,7 +258,7 @@ func TestHelmLoaderOCIAuthed(t *testing.T) {
 	if strings.Contains(badErr.Error(), authedTestUser) {
 		t.Fatal("credential leak: OCI username appeared in the error string")
 	}
-	if strings.Contains(badErr.Error(), authedTestPass) {
+	if strings.Contains(badErr.Error(), authedTestPass) || strings.Contains(badErr.Error(), badPass) {
 		t.Fatal("credential leak: OCI password appeared in the error string")
 	}
 
