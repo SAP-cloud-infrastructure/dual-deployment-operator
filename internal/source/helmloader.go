@@ -7,6 +7,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -37,6 +38,10 @@ func newHelmLoader(resolve func(context.Context, string) (creds, error)) *helmLo
 }
 
 func (l *helmLoader) Load(ctx context.Context, repo, name, version string) (*chart.Chart, error) {
+	if err := rejectURLCredentials(repo); err != nil {
+		return nil, err
+	}
+
 	tmp, err := os.MkdirTemp("", "ddo-helm-")
 	if err != nil {
 		return nil, err
@@ -50,7 +55,7 @@ func (l *helmLoader) Load(ctx context.Context, repo, name, version string) (*cha
 	case strings.HasPrefix(repo, "http://"), strings.HasPrefix(repo, "https://"):
 		chartPath, err = l.pullHTTP(ctx, repo, name, version, tmp)
 	default:
-		return nil, fmt.Errorf("source: unsupported chart repo scheme %q (only oci:// and http(s):// are supported)", repo)
+		return nil, errors.New("source: unsupported chart repo scheme (only oci:// and http(s):// are supported)")
 	}
 	if err != nil {
 		return nil, err
@@ -118,6 +123,20 @@ func (l *helmLoader) pullHTTP(ctx context.Context, repo, name, version, dest str
 		return "", fmt.Errorf("source: http repo pull %s@%s: %w", name, version, err)
 	}
 	return findTGZ(dest)
+}
+
+// rejectURLCredentials rejects a repo URL with embedded userinfo (user:token@host)
+// so credentials can never leak into error strings / status conditions; use
+// authSecretRef instead. Mirrors the kustomize resolver's guard.
+func rejectURLCredentials(repo string) error {
+	u, err := url.Parse(strings.Replace(repo, "oci://", "https://", 1))
+	if err != nil {
+		return errors.New("source: chart repo url is not parseable")
+	}
+	if u.User != nil {
+		return errors.New("source: chart repo url must not embed credentials in the URL; use authSecretRef")
+	}
+	return nil
 }
 
 func ociHost(repo string) string { return hostOf(strings.Replace(repo, "oci://", "https://", 1)) }

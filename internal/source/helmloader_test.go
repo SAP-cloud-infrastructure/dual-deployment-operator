@@ -346,6 +346,22 @@ func TestHelmLoaderRejectsUnknownScheme(t *testing.T) {
 	}
 }
 
+func TestHelmLoaderRejectsURLCredentials(t *testing.T) {
+	l := newHelmLoader(nil)
+	for _, repo := range []string{
+		"https://user:supersecret@charts.example.com",
+		"oci://user:supersecret@registry.example.com/charts",
+	} {
+		_, err := l.Load(context.Background(), repo, "n", "1")
+		if err == nil {
+			t.Fatalf("expected error for URL with embedded credentials %q, got nil", repo)
+		}
+		if strings.Contains(err.Error(), "supersecret") {
+			t.Fatalf("credential leak: password appeared in error for %q", repo)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // authed classic HTTP Helm repo (hermetic, offline)
 // ---------------------------------------------------------------------------
