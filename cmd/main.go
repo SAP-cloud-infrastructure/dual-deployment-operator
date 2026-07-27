@@ -182,7 +182,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	recorder := mgr.GetEventRecorderFor("dual-deployment-operator") //nolint:staticcheck,nolintlint // Keep record.EventRecorder until events.EventRecorder migration (tracked as a future-phase item).
+	recorder := mgr.GetEventRecorder("dual-deployment-operator")
 	if err := (&controller.DualDeploymentOperatorReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
@@ -192,8 +192,10 @@ func main() {
 			FieldManager: controller.FieldManagerName,
 			Cluster:      "seed",
 		},
-		// TODO(production-loaders): wire real OCI/HTTP ChartLoader + RootResolver; internal/source ships only test fakes, so live source rendering fails until then.
-		SourceDeps: source.Deps{},
+		SourceDeps: source.Deps{
+			ChartLoader:  source.NewHelmLoader(),
+			RootResolver: source.NewGitResolver(),
+		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "dualdeploymentoperator")
 		os.Exit(1)

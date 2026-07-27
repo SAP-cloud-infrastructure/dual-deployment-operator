@@ -8,6 +8,11 @@ package source
 import (
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
 	v1alpha1 "github.com/SAP-cloud-infrastructure/dual-deployment-operator/api/v1alpha1"
 )
 
@@ -66,5 +71,29 @@ func TestFromRejectsBoth(t *testing.T) {
 	}
 	if _, err := From(spec, Deps{}); err == nil {
 		t.Error("expected error when both discriminators set")
+	}
+}
+
+func TestFromWiresAuthSecretRefCredentials(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: "ns"},
+		Data:       map[string][]byte{"token": []byte("tok")},
+	}).Build()
+
+	deps := Deps{
+		ChartLoader:        NewHelmLoader(),
+		RootResolver:       NewGitResolver(),
+		CredentialResolver: &CredentialResolver{Client: cl, Namespace: "ns"},
+	}
+	spec := v1alpha1.Source{Helm: &v1alpha1.HelmSource{
+		Repo: "oci://r", Name: "n", Version: "1",
+		AuthSecretRef: &v1alpha1.SecretReference{Name: "creds"},
+	}}
+	if _, err := From(spec, deps); err != nil {
+		t.Fatalf("From with authSecretRef: %v", err)
 	}
 }

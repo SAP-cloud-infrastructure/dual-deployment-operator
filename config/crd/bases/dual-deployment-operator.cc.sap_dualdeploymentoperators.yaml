@@ -88,6 +88,17 @@ spec:
                 properties:
                   helm:
                     properties:
+                      authSecretRef:
+                        description: |-
+                          AuthSecretRef optionally names a Secret (in the CR's namespace) holding
+                          chart-pull credentials. When unset, the chart is pulled anonymously.
+                        properties:
+                          name:
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
                       name:
                         minLength: 1
                         type: string
@@ -112,6 +123,17 @@ spec:
                     description: KustomizeSource references a kustomize root plus
                       its two overlay subpaths.
                     properties:
+                      authSecretRef:
+                        description: |-
+                          AuthSecretRef optionally names a Secret (in the CR's namespace) holding
+                          git HTTPS credentials. When unset, the root is fetched anonymously.
+                        properties:
+                          name:
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
                       seedPath:
                         minLength: 1
                         type: string

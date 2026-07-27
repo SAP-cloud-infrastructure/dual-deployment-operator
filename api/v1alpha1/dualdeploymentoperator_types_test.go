@@ -95,3 +95,41 @@ func TestSpecFieldsRoundTrip(t *testing.T) {
 		t.Errorf("ApplyOrder = %q, want SeedFirst", s.ApplyOrder)
 	}
 }
+
+func TestAuthSecretRefFields(t *testing.T) {
+	hs := HelmSource{
+		Repo: "oci://r", Name: "n", Version: "1",
+		AuthSecretRef: &SecretReference{Name: "creds"},
+	}
+	if hs.AuthSecretRef == nil || hs.AuthSecretRef.Name != "creds" {
+		t.Fatalf("HelmSource.AuthSecretRef not set: %+v", hs.AuthSecretRef)
+	}
+	if hs.Repo != "oci://r" {
+		t.Fatalf("Repo not set: %q", hs.Repo)
+	}
+	if hs.Name != "n" {
+		t.Fatalf("Name not set: %q", hs.Name)
+	}
+	if hs.Version != "1" {
+		t.Fatalf("Version not set: %q", hs.Version)
+	}
+	ks := KustomizeSource{
+		URL: "https://x/y//p?ref=v1", SeedPath: "seed", ShootPath: "shoot",
+		AuthSecretRef: &SecretReference{Name: "git-creds"},
+	}
+	if ks.AuthSecretRef == nil || ks.AuthSecretRef.Name != "git-creds" {
+		t.Fatalf("KustomizeSource.AuthSecretRef not set: %+v", ks.AuthSecretRef)
+	}
+	if ks.URL != "https://x/y//p?ref=v1" {
+		t.Fatalf("URL not set: %q", ks.URL)
+	}
+	if ks.SeedPath != "seed" {
+		t.Fatalf("SeedPath not set: %q", ks.SeedPath)
+	}
+	if ks.ShootPath != "shoot" {
+		t.Fatalf("ShootPath not set: %q", ks.ShootPath)
+	}
+	if (HelmSource{Repo: "oci://r", Name: "n", Version: "1"}).AuthSecretRef != nil {
+		t.Fatal("expected nil AuthSecretRef when unset")
+	}
+}

@@ -17,7 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -48,7 +48,7 @@ type DualDeploymentOperatorReconciler struct {
 	client.Client
 	Scheme      *runtime.Scheme
 	SeedApplier deliver.Applier
-	Recorder    record.EventRecorder
+	Recorder    events.EventRecorder
 	SourceDeps  source.Deps
 
 	// shootApplierFor builds the shoot applier for a CR. Defaults to buildShootApplier;
@@ -68,6 +68,7 @@ func (r *DualDeploymentOperatorReconciler) buildShootApplierOrDefault(ctx contex
 // +kubebuilder:rbac:groups=dual-deployment-operator.cc.sap,resources=dualdeploymentoperators/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -91,7 +92,9 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 	logger.Info("Starting reconciliation", "name", cr.Name, "namespace", cr.Namespace)
 
 	// 1. Build source renderer.
-	src, err := source.From(cr.Spec.Source, r.SourceDeps)
+	deps := r.SourceDeps
+	deps.CredentialResolver = &source.CredentialResolver{Client: r.Client, Namespace: cr.Namespace}
+	src, err := source.From(cr.Spec.Source, deps)
 	if err != nil {
 		return r.errStatus(ctx, cr, "InvalidSource", err)
 	}
@@ -260,8 +263,8 @@ func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, 
 	shootApplier, err := r.buildShootApplierOrDefault(ctx, cr)
 	if err != nil {
 		if r.Recorder != nil {
-			r.Recorder.Event(cr, corev1.EventTypeWarning, "ShootUnreachable",
-				"Shoot API server unreachable during deletion; retaining finalizer and retrying")
+			r.Recorder.Eventf(cr, nil, corev1.EventTypeWarning, "ShootUnreachable",
+				"RetainFinalizer", "%s", "Shoot API server unreachable during deletion; retaining finalizer and retrying")
 		}
 		meta.SetStatusCondition(&cr.Status.Conditions, metav1.Condition{
 			Type:    "Ready",
