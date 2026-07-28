@@ -1375,7 +1375,7 @@ While wiring the production loaders in [`cmd/main.go`](../cmd/main.go), also mig
 
 ---
 
-## Phase 7.5: Source caching (resolve-then-key, emptyDir) (~3-4 days) — NOT STARTED
+## Phase 7.5: Source caching (resolve-then-key, emptyDir) (~3-4 days) — COMPLETE
 
 Phase 7 ships both production loaders **without caching** — every reconcile pulls the Helm chart fresh (temp dir → load → cleanup) and re-fetches the kustomize root (krusty then re-fetches transitive bases). Reconcile is 10-minute-scale and the fleet is small, so this is correct and acceptable; caching was deliberately split out because a *sound* cache has its own design (mutable refs, transitive-tag immutability, Helm/kustomize symmetry) that is bigger than "make the loaders render". This phase adds that cache.
 
