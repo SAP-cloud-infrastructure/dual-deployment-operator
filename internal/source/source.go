@@ -44,6 +44,12 @@ type RootResolver interface {
 	Resolve(ctx context.Context, url, subPath string) (fsPath string, cleanup func(), err error)
 }
 
+// errUnkeyable signals a source cannot be soundly keyed for caching (e.g. an
+// HTTP Helm repo whose index.yaml has neither a digest nor a matched version).
+// The cachingSource decorator treats it like a resolve failure: render fresh,
+// cache nothing.
+var errUnkeyable = errors.New("source: unkeyable (skip caching)")
+
 // Deps holds the injectable fetchers a Source needs.
 type Deps struct {
 	ChartLoader        ChartLoader

@@ -163,3 +163,46 @@ func TestSplitRefRejectsUserinfo(t *testing.T) {
 		t.Fatalf("error should mention authSecretRef, got: %v", err)
 	}
 }
+
+func TestGitResolver_ResolveID_TagToSHA(t *testing.T) {
+	fileURL, wantSHA := makeLocalRepo(t)
+	r := &gitResolver{}
+	got, err := r.ResolveID(context.Background(), fileURL+"?ref=v1", ModeSeed)
+	if err != nil {
+		t.Fatalf("ResolveID: %v", err)
+	}
+	if got != wantSHA {
+		t.Fatalf("ResolveID = %q, want commit SHA %q (never the tag name)", got, wantSHA)
+	}
+}
+
+func TestGitResolver_ResolveID_UnresolvableRefErrors(t *testing.T) {
+	fileURL, _ := makeLocalRepo(t)
+	r := &gitResolver{}
+	if _, err := r.ResolveID(context.Background(), fileURL+"?ref=nope", ModeSeed); err == nil {
+		t.Fatal("expected error for a ref that resolves to no commit SHA (must not return the ref name)")
+	}
+}
+
+func TestGitResolver_ResolveID_BareSHAUsedAsIs(t *testing.T) {
+	r := &gitResolver{}
+	sha := "0123456789abcdef0123456789abcdef01234567"
+	got, err := r.ResolveID(context.Background(), "https://example.com/x/y?ref="+sha, ModeSeed)
+	if err != nil {
+		t.Fatalf("ResolveID: %v", err)
+	}
+	if got != sha {
+		t.Fatalf("bare SHA must be used as-is: got %q want %q", got, sha)
+	}
+}
+
+func TestGitResolver_repoScope(t *testing.T) {
+	r := &gitResolver{}
+	scope, err := r.repoScope("https://github.com/org/repo//root?ref=v1")
+	if err != nil {
+		t.Fatalf("repoScope: %v", err)
+	}
+	if scope != "git:github.com" {
+		t.Fatalf("repoScope = %q, want git:github.com", scope)
+	}
+}
