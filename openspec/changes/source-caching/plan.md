@@ -26,7 +26,7 @@ Expected: a line like `github.com/hashicorp/golang-lru/v2 v2.0.5 h1:...`
 
 - [ ] **Step 2: Note** — the actual `go.mod` promotion happens automatically via `go mod tidy` once `renderCache` (Task 4) imports `github.com/hashicorp/golang-lru/v2`. No manual `go.mod` edit needed. This task is a checkpoint, not a standalone edit.
 
-- [ ] Task 1 complete (verified golang-lru/v2 v2.0.5 is in go.sum; promotion deferred to Task 4 tidy)
+- [x] Task 1 complete (verified golang-lru/v2 v2.0.5 is in go.sum; promotion deferred to Task 4 tidy)
 
 ---
 
@@ -158,7 +158,7 @@ git add internal/source/cachekey.go internal/source/cachekey_test.go
 git commit -m "feat(source): add render cache key builder and canonical values hash"
 ```
 
-- [ ] Task 2 complete
+- [x] Task 2 complete
 
 ---
 
