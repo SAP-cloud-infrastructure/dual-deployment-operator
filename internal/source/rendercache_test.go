@@ -106,3 +106,20 @@ func TestRenderCache_ReturnsIndependentCopy(t *testing.T) {
 		t.Fatalf("cache aliased the caller's pointer: got name %q", got3[0].Unstructured.GetName())
 	}
 }
+
+func TestNewRenderCache_DefaultSize(t *testing.T) {
+	// size <= 0 must default to defaultRenderCacheSize, not error.
+	if c, err := newRenderCache(0); err != nil || c == nil {
+		t.Fatalf("newRenderCache(0): expected default-sized cache, got c=%v err=%v", c, err)
+	}
+	if c, err := newRenderCache(-1); err != nil || c == nil {
+		t.Fatalf("newRenderCache(-1): expected default-sized cache, got c=%v err=%v", c, err)
+	}
+}
+
+func TestCloneManifests_Nil(t *testing.T) {
+	// The nil-input branch of cloneManifests must return nil, not panic.
+	if got := cloneManifests(nil); got != nil {
+		t.Fatalf("cloneManifests(nil) = %v, want nil", got)
+	}
+}

@@ -97,3 +97,11 @@ func TestFromWiresAuthSecretRefCredentials(t *testing.T) {
 		t.Fatalf("From with authSecretRef: %v", err)
 	}
 }
+
+func TestNewRenderCache_Public(t *testing.T) {
+	// The exported constructor MUST return a usable cache under the default cap.
+	// This is the wiring seam used by cmd/main.go.
+	if c := NewRenderCache(); c == nil {
+		t.Fatal("NewRenderCache() returned nil; the operator opts in via cmd/main.go and must always get a cache")
+	}
+}

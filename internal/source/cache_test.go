@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
@@ -221,5 +222,88 @@ func TestCachingSource_UnkeyableWrappedSkipsCache(t *testing.T) {
 	}
 	if inner.calls != 2 {
 		t.Fatalf("wrapped errUnkeyable must be treated same as bare (via errors.Is); expected 2 inner calls, got %d", inner.calls)
+	}
+}
+
+func TestWrapHelm_ResolveClosureRepoScopeError(t *testing.T) {
+	// Bad Repo scheme -> helmLoader.repoScope errors, resolve closure returns that
+	// error, cachingSource.Render falls through to inner (per pure-optimization semantics).
+	cache := mustCache(t, 4)
+	loader := newHelmLoader(nil)
+	inner := &fakeInner{out: []manifest.Manifest{{}}}
+	spec := &v1alpha1.HelmSource{Repo: "gopher://bad-scheme", Name: "demo", Version: "1.0.0"}
+	cs, ok := wrapHelm(inner, loader, spec, cache).(*cachingSource)
+	if !ok {
+		t.Fatal("wrapHelm should return *cachingSource for real *helmLoader + non-nil cache")
+	}
+	if _, err := cs.Render(context.Background(), ModeSeed, "ns"); err != nil {
+		t.Fatalf("repoScope error must fall through (not fail): %v", err)
+	}
+	if _, err := cs.Render(context.Background(), ModeSeed, "ns"); err != nil {
+		t.Fatal(err)
+	}
+	if inner.calls != 2 {
+		t.Fatalf("repoScope error must skip cache; expected 2 inner calls, got %d", inner.calls)
+	}
+}
+
+func TestWrapHelm_ResolveClosureResolveIDError(t *testing.T) {
+	// URL-embedded credentials -> repoScope succeeds but ResolveID's
+	// rejectURLCredentials guard fires -> closure returns that error -> cachingSource
+	// falls through to inner. Covers the ResolveID-error branch of wrapHelm's closure.
+	cache := mustCache(t, 4)
+	loader := newHelmLoader(nil)
+	inner := &fakeInner{out: []manifest.Manifest{{}}}
+	spec := &v1alpha1.HelmSource{Repo: "oci://user:secret@example.com/charts", Name: "demo", Version: "1.0.0"}
+	cs, ok := wrapHelm(inner, loader, spec, cache).(*cachingSource)
+	if !ok {
+		t.Fatal("wrapHelm should return *cachingSource")
+	}
+	_, _ = cs.Render(context.Background(), ModeSeed, "ns")
+	_, _ = cs.Render(context.Background(), ModeSeed, "ns")
+	if inner.calls != 2 {
+		t.Fatalf("ResolveID error must skip cache; expected 2 inner calls, got %d", inner.calls)
+	}
+}
+
+func TestWrapKustomize_ResolveClosureRepoScopeError(t *testing.T) {
+	// Missing ?ref= -> splitRef fails in repoScope inside the resolve closure ->
+	// falls through to inner. Also exercises wrapKustomize's success wrap path.
+	cache := mustCache(t, 4)
+	resolver := &gitResolver{}
+	inner := &fakeInner{out: []manifest.Manifest{{}}}
+	spec := &v1alpha1.KustomizeSource{URL: "https://example.com/repo", SeedPath: "seed", ShootPath: "shoot"}
+	cs, ok := wrapKustomize(inner, resolver, spec, cache).(*cachingSource)
+	if !ok {
+		t.Fatal("wrapKustomize should return *cachingSource for real *gitResolver + non-nil cache")
+	}
+	_, _ = cs.Render(context.Background(), ModeSeed, "ns")
+	_, _ = cs.Render(context.Background(), ModeSeed, "ns")
+	if inner.calls != 2 {
+		t.Fatalf("repoScope error must skip cache; expected 2 inner calls, got %d", inner.calls)
+	}
+}
+
+func TestWrapKustomize_ResolveClosureResolveIDError(t *testing.T) {
+	// Valid ?ref= (repoScope succeeds) but ref cannot be resolved (unreachable host)
+	// -> ResolveID errors inside the closure -> falls through to inner.
+	// This covers the ResolveID-error branch in wrapKustomize.
+	cache := mustCache(t, 4)
+	resolver := &gitResolver{}
+	inner := &fakeInner{out: []manifest.Manifest{{}}}
+	spec := &v1alpha1.KustomizeSource{
+		URL:       "https://127.0.0.1:1/nope?ref=v1", // unreachable port; ls-remote fails
+		SeedPath:  "seed",
+		ShootPath: "shoot",
+	}
+	cs, ok := wrapKustomize(inner, resolver, spec, cache).(*cachingSource)
+	if !ok {
+		t.Fatal("wrapKustomize should return *cachingSource")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, _ = cs.Render(ctx, ModeSeed, "ns")
+	if inner.calls != 1 {
+		t.Fatalf("ResolveID error must fall through to inner; expected 1 inner call, got %d", inner.calls)
 	}
 }
