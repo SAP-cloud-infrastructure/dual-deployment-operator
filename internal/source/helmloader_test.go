@@ -571,3 +571,76 @@ func TestHelmLoader_ResolveID_RejectsURLCredentials_HTTP(t *testing.T) {
 		t.Fatalf("credential leak: password appeared in error: %v", err)
 	}
 }
+
+func TestHelmLoader_ResolveID_UnsupportedScheme(t *testing.T) {
+	// The default branch of ResolveID (non-oci://, non-http(s)://) must return
+	// "unsupported chart repo scheme" — parallel to Load's guard.
+	l := &helmLoader{}
+	_, err := l.ResolveID(context.Background(), "gopher://weird", "demo", "1.0.0")
+	if err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("expected unsupported-scheme error, got %v", err)
+	}
+}
+
+func TestHelmLoader_rejectURLCredentials_Unparsable(t *testing.T) {
+	// Force url.Parse to fail via a control-character in the URL. Covers the
+	// "chart repo url is not parseable" branch that Load and ResolveID share.
+	if err := rejectURLCredentials("http://\x7f/bad"); err == nil {
+		t.Fatal("expected parse error for a malformed URL")
+	}
+}
+
+func TestHelmLoader_resolveHTTPID_HTTP4xx(t *testing.T) {
+	// Index server returns 404 -> resolveHTTPID must surface "HTTP 404", not fall
+	// through to YAML parsing. Covers the 4xx branch.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/index.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		http.NotFound(w, nil)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	l := &helmLoader{settings: cli.New()}
+	_, err := l.ResolveID(context.Background(), srv.URL, "demo", "1.0.0")
+	if err == nil || !strings.Contains(err.Error(), "HTTP 404") {
+		t.Fatalf("expected HTTP 404 error, got %v", err)
+	}
+}
+
+func TestHelmLoader_resolveHTTPID_BasicAuth(t *testing.T) {
+	// Index server requires Basic auth. l.credFor returns creds so
+	// req.SetBasicAuth fires; the served index is otherwise identical to the
+	// existing HTTPIndexDigest test. Covers the c.ok / SetBasicAuth branch.
+	const wantUser, wantPass = "u", "hunter2"
+	wantDigest := "sha256:0000000000000000000000000000000000000000000000000000000000000abc"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/index.yaml", func(w http.ResponseWriter, r *http.Request) {
+		u, p, ok := r.BasicAuth()
+		if !ok || u != wantUser || p != wantPass {
+			w.Header().Set("WWW-Authenticate", `Basic realm="helm"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprintf(w, `apiVersion: v1
+entries:
+  demo:
+  - name: demo
+    version: 1.2.3
+    digest: %s
+generated: "2026-01-01T00:00:00Z"
+`, wantDigest)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	l := newHelmLoader(func(context.Context, string) (creds, error) {
+		return creds{user: wantUser, pass: wantPass, ok: true}, nil
+	})
+	got, err := l.ResolveID(context.Background(), srv.URL, "demo", "1.2.3")
+	if err != nil {
+		t.Fatalf("ResolveID with basic auth: %v", err)
+	}
+	if got != wantDigest {
+		t.Fatalf("ResolveID = %q, want %q", got, wantDigest)
+	}
+}
