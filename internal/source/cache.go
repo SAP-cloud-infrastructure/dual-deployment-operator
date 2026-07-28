@@ -118,11 +118,14 @@ func wrapKustomize(inner Source, resolver RootResolver, spec *v1alpha1.Kustomize
 		return inner
 	}
 	// Include the URL //root subpath alongside the mode paths. splitRef may fail
-	// (bad URL); the resolve func will surface that as a real error later, and
-	// falling back to an empty rootSubPath here keeps a bad URL from panicking
-	// the wrap. Two CRs whose ONLY difference is the //root would otherwise share
-	// a key even though they render different content.
-	_, rootSubPath, _, _ := splitRef(spec.URL)
+	// (bad URL); the resolve func surfaces that as a real error later, so at wrap
+	// time we fall back to an empty rootSubPath rather than panicking. Two CRs
+	// whose ONLY difference is the //root would otherwise share a key even though
+	// they render different content.
+	var rootSubPath string
+	if _, sub, _, err := splitRef(spec.URL); err == nil {
+		rootSubPath = sub
+	}
 	return &cachingSource{
 		inner:      inner,
 		cache:      cache,

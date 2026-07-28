@@ -143,7 +143,7 @@ func TestWrapKustomize_InputHashCoversRootSubPath(t *testing.T) {
 		SeedPath:  "seed",
 		ShootPath: "shoot",
 	}
-	cache, _ := newRenderCache(4)
+	cache := mustCache(t, 4)
 	resolver := &gitResolver{}
 	a := wrapKustomize(&kustomizeSource{spec: specA, resolver: resolver}, resolver, specA, cache).(*cachingSource)
 	b := wrapKustomize(&kustomizeSource{spec: specB, resolver: resolver}, resolver, specB, cache).(*cachingSource)
