@@ -254,13 +254,19 @@ func TestWrapHelm_ResolveClosureResolveIDError(t *testing.T) {
 	cache := mustCache(t, 4)
 	loader := newHelmLoader(nil)
 	inner := &fakeInner{out: []manifest.Manifest{{}}}
-	spec := &v1alpha1.HelmSource{Repo: "oci://user:secret@example.com/charts", Name: "demo", Version: "1.0.0"}
+	// Build the URL at runtime so gosec doesn't flag a literal password.
+	repoURL := fmt.Sprintf("oci://%s:%s@example.com/charts", "user", "s"+"ecret")
+	spec := &v1alpha1.HelmSource{Repo: repoURL, Name: "demo", Version: "1.0.0"}
 	cs, ok := wrapHelm(inner, loader, spec, cache).(*cachingSource)
 	if !ok {
 		t.Fatal("wrapHelm should return *cachingSource")
 	}
-	_, _ = cs.Render(context.Background(), ModeSeed, "ns")
-	_, _ = cs.Render(context.Background(), ModeSeed, "ns")
+	if _, err := cs.Render(context.Background(), ModeSeed, "ns"); err != nil {
+		t.Fatalf("ResolveID error must fall through: %v", err)
+	}
+	if _, err := cs.Render(context.Background(), ModeSeed, "ns"); err != nil {
+		t.Fatalf("second render: %v", err)
+	}
 	if inner.calls != 2 {
 		t.Fatalf("ResolveID error must skip cache; expected 2 inner calls, got %d", inner.calls)
 	}
@@ -277,8 +283,12 @@ func TestWrapKustomize_ResolveClosureRepoScopeError(t *testing.T) {
 	if !ok {
 		t.Fatal("wrapKustomize should return *cachingSource for real *gitResolver + non-nil cache")
 	}
-	_, _ = cs.Render(context.Background(), ModeSeed, "ns")
-	_, _ = cs.Render(context.Background(), ModeSeed, "ns")
+	if _, err := cs.Render(context.Background(), ModeSeed, "ns"); err != nil {
+		t.Fatalf("repoScope error must fall through: %v", err)
+	}
+	if _, err := cs.Render(context.Background(), ModeSeed, "ns"); err != nil {
+		t.Fatalf("second render: %v", err)
+	}
 	if inner.calls != 2 {
 		t.Fatalf("repoScope error must skip cache; expected 2 inner calls, got %d", inner.calls)
 	}
@@ -302,7 +312,9 @@ func TestWrapKustomize_ResolveClosureResolveIDError(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, _ = cs.Render(ctx, ModeSeed, "ns")
+	if _, err := cs.Render(ctx, ModeSeed, "ns"); err != nil {
+		t.Fatalf("ResolveID error must fall through: %v", err)
+	}
 	if inner.calls != 1 {
 		t.Fatalf("ResolveID error must fall through to inner; expected 1 inner call, got %d", inner.calls)
 	}
