@@ -168,7 +168,7 @@ git commit -m "feat(source): add render cache key builder and canonical values h
 - Create: `internal/source/rendercache.go`
 - Test: `internal/source/rendercache_test.go`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 // SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company
@@ -233,12 +233,12 @@ func TestRenderCache_ConcurrentRaceFree(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/source/ -run TestRenderCache -v`
 Expected: FAIL — `undefined: newRenderCache`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```go
 // SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company
@@ -281,24 +281,24 @@ func (c *renderCache) get(key string) ([]manifest.Manifest, bool) { return c.lru
 func (c *renderCache) put(key string, m []manifest.Manifest) { _ = c.lru.Add(key, m) }
 ```
 
-- [ ] **Step 4: Run test to verify it passes (with race detector)**
+- [x] **Step 4: Run test to verify it passes (with race detector)**
 
 Run: `go test ./internal/source/ -run TestRenderCache -race -v`
 Expected: PASS, no race warnings
 
-- [ ] **Step 5: Tidy to promote golang-lru/v2 to direct dep, then verify build**
+- [x] **Step 5: Tidy to promote golang-lru/v2 to direct dep, then verify build**
 
 Run: `go mod tidy && go build ./...`
 Expected: `go.mod` now lists `github.com/hashicorp/golang-lru/v2` as a direct require (no `// indirect`); build exits 0
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add internal/source/rendercache.go internal/source/rendercache_test.go go.mod go.sum
 git commit -m "feat(source): add bounded in-memory LRU render cache"
 ```
 
-- [ ] Task 3 complete
+- [x] Task 3 complete
 
 ---
 
