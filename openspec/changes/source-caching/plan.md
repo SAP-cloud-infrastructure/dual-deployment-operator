@@ -451,7 +451,7 @@ git add internal/source/source.go internal/source/gitresolver.go internal/source
 git commit -m "feat(source): add errUnkeyable sentinel and git ResolveID via ls-remote"
 ```
 
-- [ ] Task 4 complete
+- [x] Task 4 complete
 
 ---
 
