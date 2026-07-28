@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/internal/manifest"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 func TestRenderCache_GetPut(t *testing.T) {
@@ -57,4 +58,47 @@ func TestRenderCache_ConcurrentRaceFree(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestRenderCache_ReturnsIndependentCopy(t *testing.T) {
+	c, _ := newRenderCache(4)
+	m := manifest.Manifest{
+		Unstructured: &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata": map[string]any{
+				"name": "cm1",
+				"annotations": map[string]any{
+					manifest.OriginAnnotation: "upstream",
+				},
+			},
+		}},
+		Origin: manifest.OriginUpstream,
+	}
+	c.put("k", []manifest.Manifest{m})
+
+	// Simulate the apply path mutating the returned manifests.
+	got1, ok := c.get("k")
+	if !ok {
+		t.Fatal("expected hit")
+	}
+	got1[0].StripInternalAnnotations() // real mutation used in delivery
+
+	// A subsequent hit MUST NOT observe the prior mutation.
+	got2, ok := c.get("k")
+	if !ok {
+		t.Fatal("expected second hit")
+	}
+	anns := got2[0].Unstructured.GetAnnotations()
+	if _, present := anns[manifest.OriginAnnotation]; !present {
+		t.Fatalf("cached manifest was mutated across gets: annotations=%v", anns)
+	}
+
+	// Also: mutating the CALLER's original slice/pointer after put() must
+	// not affect what the cache returns.
+	m.Unstructured.SetName("changed-after-put")
+	got3, _ := c.get("k")
+	if got3[0].Unstructured.GetName() != "cm1" {
+		t.Fatalf("cache aliased the caller's pointer: got name %q", got3[0].Unstructured.GetName())
+	}
 }
