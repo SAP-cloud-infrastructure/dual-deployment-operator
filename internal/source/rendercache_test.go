@@ -9,8 +9,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/internal/manifest"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/internal/manifest"
 )
 
 func TestRenderCache_GetPut(t *testing.T) {
@@ -30,7 +31,10 @@ func TestRenderCache_GetPut(t *testing.T) {
 }
 
 func TestRenderCache_EvictsLRU(t *testing.T) {
-	c, _ := newRenderCache(2)
+	c, err := newRenderCache(2)
+	if err != nil {
+		t.Fatalf("newRenderCache: %v", err)
+	}
 	c.put("k1", []manifest.Manifest{{}})
 	c.put("k2", []manifest.Manifest{{}})
 	_, _ = c.get("k1")                   // touch k1 so k2 is LRU
@@ -47,21 +51,25 @@ func TestRenderCache_EvictsLRU(t *testing.T) {
 }
 
 func TestRenderCache_ConcurrentRaceFree(t *testing.T) {
-	c, _ := newRenderCache(8)
+	c, err := newRenderCache(8)
+	if err != nil {
+		t.Fatalf("newRenderCache: %v", err)
+	}
 	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 50 {
+		wg.Go(func() {
 			c.put("k", []manifest.Manifest{{}})
 			_, _ = c.get("k")
-		}()
+		})
 	}
 	wg.Wait()
 }
 
 func TestRenderCache_ReturnsIndependentCopy(t *testing.T) {
-	c, _ := newRenderCache(4)
+	c, err := newRenderCache(4)
+	if err != nil {
+		t.Fatalf("newRenderCache: %v", err)
+	}
 	m := manifest.Manifest{
 		Unstructured: &unstructured.Unstructured{Object: map[string]any{
 			"apiVersion": "v1",
@@ -77,14 +85,12 @@ func TestRenderCache_ReturnsIndependentCopy(t *testing.T) {
 	}
 	c.put("k", []manifest.Manifest{m})
 
-	// Simulate the apply path mutating the returned manifests.
 	got1, ok := c.get("k")
 	if !ok {
 		t.Fatal("expected hit")
 	}
 	got1[0].StripInternalAnnotations() // real mutation used in delivery
 
-	// A subsequent hit MUST NOT observe the prior mutation.
 	got2, ok := c.get("k")
 	if !ok {
 		t.Fatal("expected second hit")
@@ -94,8 +100,6 @@ func TestRenderCache_ReturnsIndependentCopy(t *testing.T) {
 		t.Fatalf("cached manifest was mutated across gets: annotations=%v", anns)
 	}
 
-	// Also: mutating the CALLER's original slice/pointer after put() must
-	// not affect what the cache returns.
 	m.Unstructured.SetName("changed-after-put")
 	got3, _ := c.get("k")
 	if got3[0].Unstructured.GetName() != "cm1" {

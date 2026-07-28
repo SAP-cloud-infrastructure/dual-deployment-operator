@@ -40,8 +40,8 @@ func newHelmLoader(resolve func(context.Context, string) (creds, error)) *helmLo
 	return &helmLoader{settings: cli.New(), resolve: resolve}
 }
 
-func (l *helmLoader) Load(ctx context.Context, repo, name, version string) (*chart.Chart, error) {
-	if err := rejectURLCredentials(repo); err != nil {
+func (l *helmLoader) Load(ctx context.Context, repoURL, name, version string) (*chart.Chart, error) {
+	if err := rejectURLCredentials(repoURL); err != nil {
 		return nil, err
 	}
 
@@ -53,10 +53,10 @@ func (l *helmLoader) Load(ctx context.Context, repo, name, version string) (*cha
 
 	var chartPath string
 	switch {
-	case strings.HasPrefix(repo, "oci://"):
-		chartPath, err = l.pullOCI(ctx, repo, name, version, tmp)
-	case strings.HasPrefix(repo, "http://"), strings.HasPrefix(repo, "https://"):
-		chartPath, err = l.pullHTTP(ctx, repo, name, version, tmp)
+	case strings.HasPrefix(repoURL, "oci://"):
+		chartPath, err = l.pullOCI(ctx, repoURL, name, version, tmp)
+	case strings.HasPrefix(repoURL, "http://"), strings.HasPrefix(repoURL, "https://"):
+		chartPath, err = l.pullHTTP(ctx, repoURL, name, version, tmp)
 	default:
 		return nil, errors.New("source: unsupported chart repo scheme (only oci:// and http(s):// are supported)")
 	}
@@ -73,8 +73,8 @@ func (l *helmLoader) credFor(ctx context.Context, _ string) (creds, error) {
 	return l.resolve(ctx, "")
 }
 
-func (l *helmLoader) pullOCI(ctx context.Context, repo, name, version, dest string) (string, error) {
-	c, err := l.credFor(ctx, ociHost(repo))
+func (l *helmLoader) pullOCI(ctx context.Context, repoURL, name, version, dest string) (string, error) {
+	c, err := l.credFor(ctx, ociHost(repoURL))
 	if err != nil {
 		return "", fmt.Errorf("source: resolve credentials: %w", err)
 	}
@@ -96,15 +96,15 @@ func (l *helmLoader) pullOCI(ctx context.Context, repo, name, version, dest stri
 	pull.Settings = l.settings
 	pull.Version = version
 	pull.DestDir = dest
-	ref := "oci://" + strings.TrimSuffix(strings.TrimPrefix(repo, "oci://"), "/") + "/" + name
+	ref := "oci://" + strings.TrimSuffix(strings.TrimPrefix(repoURL, "oci://"), "/") + "/" + name
 	if _, err := pull.Run(ref); err != nil {
 		return "", fmt.Errorf("source: oci pull %s@%s: %w", name, version, err)
 	}
 	return findTGZ(dest)
 }
 
-func (l *helmLoader) pullHTTP(ctx context.Context, repo, name, version, dest string) (string, error) {
-	c, err := l.credFor(ctx, hostOf(repo))
+func (l *helmLoader) pullHTTP(ctx context.Context, repoURL, name, version, dest string) (string, error) {
+	c, err := l.credFor(ctx, hostOf(repoURL))
 	if err != nil {
 		return "", fmt.Errorf("source: resolve credentials: %w", err)
 	}
@@ -115,7 +115,7 @@ func (l *helmLoader) pullHTTP(ctx context.Context, repo, name, version, dest str
 	cfg := &action.Configuration{RegistryClient: rc}
 	pull := action.NewPullWithOpts(action.WithConfig(cfg))
 	pull.Settings = l.settings
-	pull.RepoURL = repo
+	pull.RepoURL = repoURL
 	pull.Version = version
 	pull.DestDir = dest
 	if c.ok {
@@ -131,8 +131,8 @@ func (l *helmLoader) pullHTTP(ctx context.Context, repo, name, version, dest str
 // rejectURLCredentials rejects a repo URL with embedded userinfo (user:token@host)
 // so credentials can never leak into error strings / status conditions; use
 // authSecretRef instead. Mirrors the kustomize resolver's guard.
-func rejectURLCredentials(repo string) error {
-	u, err := url.Parse(strings.Replace(repo, "oci://", "https://", 1))
+func rejectURLCredentials(repoURL string) error {
+	u, err := url.Parse(strings.Replace(repoURL, "oci://", "https://", 1))
 	if err != nil {
 		return errors.New("source: chart repo url is not parseable")
 	}
@@ -142,7 +142,9 @@ func rejectURLCredentials(repo string) error {
 	return nil
 }
 
-func ociHost(repo string) string { return hostOf(strings.Replace(repo, "oci://", "https://", 1)) }
+func ociHost(repoURL string) string {
+	return hostOf(strings.Replace(repoURL, "oci://", "https://", 1))
+}
 
 func hostOf(raw string) string {
 	if u, err := url.Parse(raw); err == nil && u.Host != "" {
@@ -152,12 +154,12 @@ func hostOf(raw string) string {
 }
 
 // repoScope returns the transport+host scope for the cache key.
-func (l *helmLoader) repoScope(repo string) (string, error) {
+func (l *helmLoader) repoScope(repoURL string) (string, error) {
 	switch {
-	case strings.HasPrefix(repo, "oci://"):
-		return "oci:" + ociHost(repo), nil
-	case strings.HasPrefix(repo, "http://"), strings.HasPrefix(repo, "https://"):
-		return "http:" + hostOf(repo), nil
+	case strings.HasPrefix(repoURL, "oci://"):
+		return "oci:" + ociHost(repoURL), nil
+	case strings.HasPrefix(repoURL, "http://"), strings.HasPrefix(repoURL, "https://"):
+		return "http:" + hostOf(repoURL), nil
 	default:
 		return "", errors.New("source: unsupported chart repo scheme for repoScope")
 	}
@@ -166,20 +168,20 @@ func (l *helmLoader) repoScope(repo string) (string, error) {
 // ResolveID resolves the chart to its immutable id without pulling blob layers.
 // OCI: the manifest digest (sha256:...). HTTP: the index.yaml entry digest, else
 // the exact version string, else errUnkeyable (skip caching).
-func (l *helmLoader) ResolveID(ctx context.Context, repo, name, version string) (string, error) {
+func (l *helmLoader) ResolveID(ctx context.Context, repoURL, name, version string) (string, error) {
 	switch {
-	case strings.HasPrefix(repo, "oci://"):
-		return l.resolveOCIDigest(ctx, repo, name, version)
-	case strings.HasPrefix(repo, "http://"), strings.HasPrefix(repo, "https://"):
-		return l.resolveHTTPID(ctx, repo, name, version)
+	case strings.HasPrefix(repoURL, "oci://"):
+		return l.resolveOCIDigest(ctx, repoURL, name, version)
+	case strings.HasPrefix(repoURL, "http://"), strings.HasPrefix(repoURL, "https://"):
+		return l.resolveHTTPID(ctx, repoURL, name, version)
 	default:
 		return "", errors.New("source: unsupported chart repo scheme")
 	}
 }
 
-func (l *helmLoader) resolveOCIDigest(ctx context.Context, repo, name, version string) (string, error) {
+func (l *helmLoader) resolveOCIDigest(ctx context.Context, repoURL, name, version string) (string, error) {
 	_ = ctx // Helm v3.21.3 registry.Client.Resolve takes no ctx; kept for future cancellation
-	c, err := l.credFor(ctx, ociHost(repo))
+	c, err := l.credFor(ctx, ociHost(repoURL))
 	if err != nil {
 		return "", fmt.Errorf("source: resolve credentials: %w", err)
 	}
@@ -194,7 +196,7 @@ func (l *helmLoader) resolveOCIDigest(ctx context.Context, repo, name, version s
 	if err != nil {
 		return "", err
 	}
-	ref := strings.TrimSuffix(strings.TrimPrefix(repo, "oci://"), "/") + "/" + name + ":" + version
+	ref := strings.TrimSuffix(strings.TrimPrefix(repoURL, "oci://"), "/") + "/" + name + ":" + version
 	desc, err := rc.Resolve(ref)
 	if err != nil {
 		return "", fmt.Errorf("source: resolve oci digest %s:%s: %w", name, version, err)
@@ -208,7 +210,7 @@ func (l *helmLoader) resolveHTTPID(ctx context.Context, repoURL, name, version s
 		return "", fmt.Errorf("source: resolve credentials: %w", err)
 	}
 	idxURL := strings.TrimSuffix(repoURL, "/") + "/index.yaml"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, idxURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, idxURL, http.NoBody)
 	if err != nil {
 		return "", err
 	}

@@ -405,10 +405,18 @@ func TestHelmLoader_ResolveID_OCIDigest(t *testing.T) {
 
 func TestHelmLoader_repoScope(t *testing.T) {
 	l := &helmLoader{}
-	if s, _ := l.repoScope("oci://reg.example.com/charts"); s != "oci:reg.example.com" {
+	s, err := l.repoScope("oci://reg.example.com/charts")
+	if err != nil {
+		t.Fatalf("oci repoScope error: %v", err)
+	}
+	if s != "oci:reg.example.com" {
 		t.Fatalf("oci repoScope = %q", s)
 	}
-	if s, _ := l.repoScope("https://charts.example.com"); s != "http:charts.example.com" {
+	s, err = l.repoScope("https://charts.example.com")
+	if err != nil {
+		t.Fatalf("https repoScope error: %v", err)
+	}
+	if s != "http:charts.example.com" {
 		t.Fatalf("http repoScope = %q", s)
 	}
 }

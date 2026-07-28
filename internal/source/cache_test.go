@@ -39,8 +39,17 @@ func (f *fakeResolver) resolve(_ context.Context, _ Mode) (id, scope string, err
 	return f.id, f.scope, f.err
 }
 
+func mustCache(t *testing.T, size int) *renderCache {
+	t.Helper()
+	c, err := newRenderCache(size)
+	if err != nil {
+		t.Fatalf("newRenderCache(%d): %v", size, err)
+	}
+	return c
+}
+
 func TestCachingSource_HitSkipsInner(t *testing.T) {
-	cache, _ := newRenderCache(8)
+	cache := mustCache(t, 8)
 	inner := &fakeInner{out: []manifest.Manifest{{}}}
 	cs := &cachingSource{
 		inner:      inner,
@@ -61,7 +70,7 @@ func TestCachingSource_HitSkipsInner(t *testing.T) {
 }
 
 func TestCachingSource_ResolveErrorFallsThroughUncached(t *testing.T) {
-	cache, _ := newRenderCache(8)
+	cache := mustCache(t, 8)
 	inner := &fakeInner{out: []manifest.Manifest{{}}}
 	cs := &cachingSource{
 		inner:      inner,
@@ -82,7 +91,7 @@ func TestCachingSource_ResolveErrorFallsThroughUncached(t *testing.T) {
 }
 
 func TestCachingSource_UnkeyableSkipsCache(t *testing.T) {
-	cache, _ := newRenderCache(8)
+	cache := mustCache(t, 8)
 	inner := &fakeInner{out: []manifest.Manifest{{}}}
 	cs := &cachingSource{
 		inner:      inner,
@@ -91,15 +100,19 @@ func TestCachingSource_UnkeyableSkipsCache(t *testing.T) {
 		resolve:    (&fakeResolver{err: errUnkeyable}).resolve,
 		inputHash:  "h1",
 	}
-	_, _ = cs.Render(context.Background(), ModeSeed, "ns")
-	_, _ = cs.Render(context.Background(), ModeSeed, "ns")
+	if _, err := cs.Render(context.Background(), ModeSeed, "ns"); err != nil {
+		t.Fatalf("unexpected error on first render: %v", err)
+	}
+	if _, err := cs.Render(context.Background(), ModeSeed, "ns"); err != nil {
+		t.Fatalf("unexpected error on second render: %v", err)
+	}
 	if inner.calls != 2 {
 		t.Fatalf("unkeyable must skip cache; expected 2 inner calls, got %d", inner.calls)
 	}
 }
 
 func TestCachingSource_RenderErrorNotCached(t *testing.T) {
-	cache, _ := newRenderCache(8)
+	cache := mustCache(t, 8)
 	inner := &fakeInner{err: errors.New("render fail")}
 	cs := &cachingSource{
 		inner:      inner,
@@ -142,7 +155,7 @@ func helmSourceWithValues(t *testing.T, seed, shoot map[string]any) *v1alpha1.He
 
 func wrapHelmInputHash(t *testing.T, spec *v1alpha1.HelmSource) string {
 	t.Helper()
-	cache, _ := newRenderCache(4)
+	cache := mustCache(t, 4)
 	loader := newHelmLoader(nil)
 	inner := &helmSource{spec: spec, loader: loader}
 	s := wrapHelm(inner, loader, spec, cache)
@@ -170,7 +183,7 @@ func TestWrapHelm_InputHashCoversShootValues(t *testing.T) {
 }
 
 func TestCachingSource_UnkeyableWrappedSkipsCache(t *testing.T) {
-	cache, _ := newRenderCache(8)
+	cache := mustCache(t, 8)
 	inner := &fakeInner{out: []manifest.Manifest{{}}}
 	wrapped := fmt.Errorf("wrap: %w", errUnkeyable)
 	cs := &cachingSource{
@@ -180,8 +193,12 @@ func TestCachingSource_UnkeyableWrappedSkipsCache(t *testing.T) {
 		resolve:    (&fakeResolver{err: wrapped}).resolve,
 		inputHash:  "h1",
 	}
-	_, _ = cs.Render(context.Background(), ModeSeed, "ns")
-	_, _ = cs.Render(context.Background(), ModeSeed, "ns")
+	if _, err := cs.Render(context.Background(), ModeSeed, "ns"); err != nil {
+		t.Fatalf("unexpected error on first render: %v", err)
+	}
+	if _, err := cs.Render(context.Background(), ModeSeed, "ns"); err != nil {
+		t.Fatalf("unexpected error on second render: %v", err)
+	}
 	if inner.calls != 2 {
 		t.Fatalf("wrapped errUnkeyable must be treated same as bare (via errors.Is); expected 2 inner calls, got %d", inner.calls)
 	}
