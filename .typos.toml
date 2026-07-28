@@ -10,4 +10,9 @@ mis = "mis"
 [files]
 extend-exclude = [
   "go.mod",
+  # OpenSpec change dirs legitimately contain commit-SHA-shaped tokens (verify.md,
+  # retrospective.md, plan.md reference the commits they document). Short SHAs
+  # collide with English words (092ede4 → "ede" → "edge", 9570daa → "daa" → "data").
+  "openspec/changes/**/verify.md",
+  "openspec/changes/**/retrospective.md",
 ]
