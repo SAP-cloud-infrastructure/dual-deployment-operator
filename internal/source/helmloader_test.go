@@ -530,3 +530,44 @@ generated: "2026-01-01T00:00:00Z"
 		t.Fatalf("expected errUnkeyable, got %v", err)
 	}
 }
+
+func TestHelmLoader_repoScope_HTTPPathDistinguishes(t *testing.T) {
+	l := &helmLoader{}
+	a, err := l.repoScope("https://charts.example.com/a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := l.repoScope("https://charts.example.com/b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatalf("http repoScope must include URL path so same-host different-path repos don't collide when no index digest is present; got both %q", a)
+	}
+}
+
+func TestHelmLoader_ResolveID_RejectsURLCredentials_OCI(t *testing.T) {
+	l := &helmLoader{}
+	const secret = "secret"
+	repoURL := "oci://user:" + secret + "@example.com/charts"
+	_, err := l.ResolveID(context.Background(), repoURL, "demo", "1.0.0")
+	if err == nil {
+		t.Fatal("ResolveID must reject an OCI repo URL with embedded userinfo")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("credential leak: password appeared in error: %v", err)
+	}
+}
+
+func TestHelmLoader_ResolveID_RejectsURLCredentials_HTTP(t *testing.T) {
+	l := &helmLoader{}
+	const secret = "secret"
+	repoURL := "https://user:" + secret + "@example.com/charts"
+	_, err := l.ResolveID(context.Background(), repoURL, "demo", "1.0.0")
+	if err == nil {
+		t.Fatal("ResolveID must reject an HTTP repo URL with embedded userinfo")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("credential leak: password appeared in error: %v", err)
+	}
+}

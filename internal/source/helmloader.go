@@ -153,13 +153,17 @@ func hostOf(raw string) string {
 	return raw
 }
 
-// repoScope returns the transport+host scope for the cache key.
+// repoScope returns the transport+host+path scope for the cache key.
 func (l *helmLoader) repoScope(repoURL string) (string, error) {
 	switch {
 	case strings.HasPrefix(repoURL, "oci://"):
 		return "oci:" + ociHost(repoURL), nil
 	case strings.HasPrefix(repoURL, "http://"), strings.HasPrefix(repoURL, "https://"):
-		return "http:" + hostOf(repoURL), nil
+		u, err := url.Parse(repoURL)
+		if err != nil {
+			return "", fmt.Errorf("source: parse http repo url: %w", err)
+		}
+		return "http:" + u.Host + strings.TrimSuffix(u.Path, "/"), nil
 	default:
 		return "", errors.New("source: unsupported chart repo scheme for repoScope")
 	}
@@ -169,6 +173,9 @@ func (l *helmLoader) repoScope(repoURL string) (string, error) {
 // OCI: the manifest digest (sha256:...). HTTP: the index.yaml entry digest, else
 // the exact version string, else errUnkeyable (skip caching).
 func (l *helmLoader) ResolveID(ctx context.Context, repoURL, name, version string) (string, error) {
+	if err := rejectURLCredentials(repoURL); err != nil {
+		return "", err
+	}
 	switch {
 	case strings.HasPrefix(repoURL, "oci://"):
 		return l.resolveOCIDigest(ctx, repoURL, name, version)

@@ -117,11 +117,17 @@ func wrapKustomize(inner Source, resolver RootResolver, spec *v1alpha1.Kustomize
 	if !ok || cache == nil {
 		return inner
 	}
+	// Include the URL //root subpath alongside the mode paths. splitRef may fail
+	// (bad URL); the resolve func will surface that as a real error later, and
+	// falling back to an empty rootSubPath here keeps a bad URL from panicking
+	// the wrap. Two CRs whose ONLY difference is the //root would otherwise share
+	// a key even though they render different content.
+	_, rootSubPath, _, _ := splitRef(spec.URL)
 	return &cachingSource{
 		inner:      inner,
 		cache:      cache,
 		sourceKind: "kustomize",
-		inputHash:  hashValues(map[string]any{"seedPath": spec.SeedPath, "shootPath": spec.ShootPath}),
+		inputHash:  hashValues(map[string]any{"rootSubPath": rootSubPath, "seedPath": spec.SeedPath, "shootPath": spec.ShootPath}),
 		resolve: func(ctx context.Context, _ Mode) (string, string, error) {
 			scope, err := gr.repoScope(spec.URL)
 			if err != nil {

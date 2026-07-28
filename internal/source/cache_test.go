@@ -132,6 +132,26 @@ func TestCachingSource_RenderErrorNotCached(t *testing.T) {
 	}
 }
 
+func TestWrapKustomize_InputHashCoversRootSubPath(t *testing.T) {
+	specA := &v1alpha1.KustomizeSource{
+		URL:       "https://github.com/org/repo//path/A?ref=v1",
+		SeedPath:  "seed",
+		ShootPath: "shoot",
+	}
+	specB := &v1alpha1.KustomizeSource{
+		URL:       "https://github.com/org/repo//path/B?ref=v1", // only // root differs
+		SeedPath:  "seed",
+		ShootPath: "shoot",
+	}
+	cache, _ := newRenderCache(4)
+	resolver := &gitResolver{}
+	a := wrapKustomize(&kustomizeSource{spec: specA, resolver: resolver}, resolver, specA, cache).(*cachingSource)
+	b := wrapKustomize(&kustomizeSource{spec: specB, resolver: resolver}, resolver, specB, cache).(*cachingSource)
+	if a.inputHash == b.inputHash {
+		t.Fatal("different //root subpath must change inputHash (otherwise CRs pointing to different sub-roots would share a cache key)")
+	}
+}
+
 // helmSourceWithValues builds a v1alpha1.HelmSource with optional seed/shoot values encoded as JSON.
 func helmSourceWithValues(t *testing.T, seed, shoot map[string]any) *v1alpha1.HelmSource {
 	t.Helper()
