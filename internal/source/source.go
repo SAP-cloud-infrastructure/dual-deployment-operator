@@ -115,3 +115,14 @@ func From(spec v1alpha1.Source, deps Deps) (Source, error) {
 		return nil, errors.New("source: exactly one of source.helm or source.kustomize must be set")
 	}
 }
+
+// NewRenderCache returns a shared render cache with the default capacity, or nil
+// (uncached) if construction fails — the operator MUST still run without a cache.
+// Passed into source.Deps.RenderCache to enable render-result caching.
+func NewRenderCache() *renderCache {
+	c, err := newRenderCache(defaultRenderCacheSize)
+	if err != nil {
+		return nil
+	}
+	return c
+}
