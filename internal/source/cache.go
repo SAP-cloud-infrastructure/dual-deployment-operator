@@ -75,12 +75,20 @@ func wrapHelm(inner Source, loader ChartLoader, spec *v1alpha1.HelmSource, cache
 	if !ok || cache == nil {
 		return inner
 	}
-	// inputHash covers the static portion: chart name+version + common values.
-	// Mode-specific values are captured by mode+namespace in the key; the resolved
-	// id covers chart *content* (OCI digest / HTTP index digest-or-version).
+	// inputHash covers static (name, version) + BOTH mode-specific merged values.
+	// mode is a key dimension separately, but its 4-byte value ("seed"/"shoot")
+	// cannot carry actual values content, so mode-specific values MUST also enter
+	// inputHash — otherwise a CR that changes seedValues (all other dimensions
+	// stable) would key identically and serve a stale render. Folding both modes
+	// in at wrap time is intentional: a change to shootValues bumps the seed key
+	// too (one wasted re-render on next seed reconcile), a harmless correctness
+	// margin over per-mode hashing.
 	base := map[string]any{"name": spec.Name, "version": spec.Version}
-	if common, err := mergeValues(spec.Values, nil); err == nil {
-		base["values"] = common
+	if seed, err := mergeValues(spec.Values, spec.SeedValues); err == nil {
+		base["seedValues"] = seed
+	}
+	if shoot, err := mergeValues(spec.Values, spec.ShootValues); err == nil {
+		base["shootValues"] = shoot
 	}
 	return &cachingSource{
 		inner:      inner,

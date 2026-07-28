@@ -7,9 +7,14 @@ package source
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+
+	v1alpha1 "github.com/SAP-cloud-infrastructure/dual-deployment-operator/api/v1alpha1"
 	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/internal/manifest"
 )
 
@@ -111,5 +116,73 @@ func TestCachingSource_RenderErrorNotCached(t *testing.T) {
 	}
 	if inner.calls != 2 {
 		t.Fatalf("render error must not cache; expected 2 inner calls, got %d", inner.calls)
+	}
+}
+
+// helmSourceWithValues builds a v1alpha1.HelmSource with optional seed/shoot values encoded as JSON.
+func helmSourceWithValues(t *testing.T, seed, shoot map[string]any) *v1alpha1.HelmSource {
+	t.Helper()
+	src := &v1alpha1.HelmSource{Repo: "oci://example/charts", Name: "demo", Version: "1.0.0"}
+	if seed != nil {
+		b, err := json.Marshal(seed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		src.SeedValues = &apiextensionsv1.JSON{Raw: b}
+	}
+	if shoot != nil {
+		b, err := json.Marshal(shoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		src.ShootValues = &apiextensionsv1.JSON{Raw: b}
+	}
+	return src
+}
+
+func wrapHelmInputHash(t *testing.T, spec *v1alpha1.HelmSource) string {
+	t.Helper()
+	cache, _ := newRenderCache(4)
+	loader := newHelmLoader(nil)
+	inner := &helmSource{spec: spec, loader: loader}
+	s := wrapHelm(inner, loader, spec, cache)
+	cs, ok := s.(*cachingSource)
+	if !ok {
+		t.Fatalf("wrapHelm returned %T, want *cachingSource", s)
+	}
+	return cs.inputHash
+}
+
+func TestWrapHelm_InputHashCoversSeedValues(t *testing.T) {
+	a := helmSourceWithValues(t, map[string]any{"replicas": 1}, nil)
+	b := helmSourceWithValues(t, map[string]any{"replicas": 2}, nil)
+	if wrapHelmInputHash(t, a) == wrapHelmInputHash(t, b) {
+		t.Fatal("changing SeedValues must change inputHash (otherwise stale renders are served)")
+	}
+}
+
+func TestWrapHelm_InputHashCoversShootValues(t *testing.T) {
+	a := helmSourceWithValues(t, nil, map[string]any{"image": "v1"})
+	b := helmSourceWithValues(t, nil, map[string]any{"image": "v2"})
+	if wrapHelmInputHash(t, a) == wrapHelmInputHash(t, b) {
+		t.Fatal("changing ShootValues must change inputHash (otherwise stale renders are served)")
+	}
+}
+
+func TestCachingSource_UnkeyableWrappedSkipsCache(t *testing.T) {
+	cache, _ := newRenderCache(8)
+	inner := &fakeInner{out: []manifest.Manifest{{}}}
+	wrapped := fmt.Errorf("wrap: %w", errUnkeyable)
+	cs := &cachingSource{
+		inner:      inner,
+		cache:      cache,
+		sourceKind: "helm",
+		resolve:    (&fakeResolver{err: wrapped}).resolve,
+		inputHash:  "h1",
+	}
+	_, _ = cs.Render(context.Background(), ModeSeed, "ns")
+	_, _ = cs.Render(context.Background(), ModeSeed, "ns")
+	if inner.calls != 2 {
+		t.Fatalf("wrapped errUnkeyable must be treated same as bare (via errors.Is); expected 2 inner calls, got %d", inner.calls)
 	}
 }
