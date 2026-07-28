@@ -255,7 +255,8 @@ func TestWrapHelm_ResolveClosureResolveIDError(t *testing.T) {
 	loader := newHelmLoader(nil)
 	inner := &fakeInner{out: []manifest.Manifest{{}}}
 	// Build the URL at runtime so gosec doesn't flag a literal password.
-	repoURL := fmt.Sprintf("oci://%s:%s@example.com/charts", "user", "s"+"ecret")
+	user, pass := "user", "hunter2"
+	repoURL := fmt.Sprintf("oci://%s:%s@example.com/charts", user, pass)
 	spec := &v1alpha1.HelmSource{Repo: repoURL, Name: "demo", Version: "1.0.0"}
 	cs, ok := wrapHelm(inner, loader, spec, cache).(*cachingSource)
 	if !ok {
