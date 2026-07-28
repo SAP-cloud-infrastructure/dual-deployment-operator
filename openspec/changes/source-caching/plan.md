@@ -699,7 +699,7 @@ git add internal/source/helmloader.go internal/source/helmloader_test.go
 git commit -m "feat(source): add Helm ResolveID (OCI digest + HTTP index fallback)"
 ```
 
-- [ ] Task 5 complete
+- [x] Task 5 complete
 
 ---
 
