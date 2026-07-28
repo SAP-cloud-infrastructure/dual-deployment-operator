@@ -10,12 +10,16 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"helm.sh/helm/v3/pkg/cli"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -371,6 +375,44 @@ func TestHelmLoaderRejectsURLCredentials(t *testing.T) {
 // authed classic HTTP Helm repo (hermetic, offline)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// helmLoader.ResolveID – OCI digest + repoScope
+// ---------------------------------------------------------------------------
+
+func TestHelmLoader_ResolveID_OCIDigest(t *testing.T) {
+	host, client := startAuthedOCIRegistry(t)
+	pushFixtureChart(t, host, client)
+
+	l := newHelmLoader(func(context.Context, string) (creds, error) {
+		return creds{user: authedTestUser, pass: authedTestPass, ok: true}, nil
+	})
+	l.httpClient = client
+	repo := "oci://" + host + "/charts"
+
+	got, err := l.ResolveID(context.Background(), repo, authedTestChart, authedTestVer)
+	if err != nil {
+		t.Fatalf("ResolveID: %v", err)
+	}
+	if !strings.HasPrefix(got, "sha256:") {
+		t.Fatalf("expected a sha256: manifest digest, got %q", got)
+	}
+	// Stable across calls (immutable digest).
+	again, err := l.ResolveID(context.Background(), repo, authedTestChart, authedTestVer)
+	if err != nil || again != got {
+		t.Fatalf("digest not stable: got %q then %q (err=%v)", got, again, err)
+	}
+}
+
+func TestHelmLoader_repoScope(t *testing.T) {
+	l := &helmLoader{}
+	if s, _ := l.repoScope("oci://reg.example.com/charts"); s != "oci:reg.example.com" {
+		t.Fatalf("oci repoScope = %q", s)
+	}
+	if s, _ := l.repoScope("https://charts.example.com"); s != "http:charts.example.com" {
+		t.Fatalf("http repoScope = %q", s)
+	}
+}
+
 // makeMinimalChartTGZ builds a minimal valid Helm chart tgz (Chart.yaml only)
 // in memory and returns its bytes and the digest string for index.yaml.
 func makeMinimalChartTGZ(t *testing.T, name, version string) []byte {
@@ -399,4 +441,84 @@ func makeMinimalChartTGZ(t *testing.T, name, version string) []byte {
 		t.Fatal(err)
 	}
 	return buf.Bytes()
+}
+
+func TestHelmLoader_ResolveID_HTTPIndexDigest(t *testing.T) {
+	const name, version = "demo", "1.2.3"
+	wantDigest := "sha256:0000000000000000000000000000000000000000000000000000000000000abc"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/index.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `apiVersion: v1
+entries:
+  %s:
+  - name: %s
+    version: %s
+    digest: %s
+    urls:
+    - http://example.invalid/%s-%s.tgz
+generated: "2026-01-01T00:00:00Z"
+`, name, name, version, wantDigest, name, version)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	l := &helmLoader{settings: cli.New()}
+	got, err := l.ResolveID(context.Background(), srv.URL, name, version)
+	if err != nil {
+		t.Fatalf("ResolveID: %v", err)
+	}
+	if got != wantDigest {
+		t.Fatalf("ResolveID = %q, want index digest %q", got, wantDigest)
+	}
+}
+
+func TestHelmLoader_ResolveID_HTTPVersionFallback(t *testing.T) {
+	const name, version = "demo", "1.2.3"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/index.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `apiVersion: v1
+entries:
+  %s:
+  - name: %s
+    version: %s
+    urls:
+    - http://example.invalid/%s-%s.tgz
+generated: "2026-01-01T00:00:00Z"
+`, name, name, version, name, version)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	l := &helmLoader{settings: cli.New()}
+	got, err := l.ResolveID(context.Background(), srv.URL, name, version)
+	if err != nil {
+		t.Fatalf("ResolveID: %v", err)
+	}
+	if got != version {
+		t.Fatalf("ResolveID = %q, want version fallback %q", got, version)
+	}
+}
+
+func TestHelmLoader_ResolveID_HTTPUnkeyable(t *testing.T) {
+	const name, version = "demo", "1.2.3"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/index.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `apiVersion: v1
+entries:
+  %s:
+  - name: %s
+    version: 9.9.9
+    urls:
+    - http://example.invalid/other.tgz
+generated: "2026-01-01T00:00:00Z"
+`, name, name)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	l := &helmLoader{settings: cli.New()}
+	_, err := l.ResolveID(context.Background(), srv.URL, name, version)
+	if !errors.Is(err, errUnkeyable) {
+		t.Fatalf("expected errUnkeyable, got %v", err)
+	}
 }

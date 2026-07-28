@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,6 +21,8 @@ import (
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/registry"
+	"helm.sh/helm/v3/pkg/repo"
+	"sigs.k8s.io/yaml"
 )
 
 // helmLoader is the production ChartLoader. It pulls charts from OCI (oci://) and
@@ -146,6 +149,126 @@ func hostOf(raw string) string {
 		return u.Host
 	}
 	return raw
+}
+
+// repoScope returns the transport+host scope for the cache key.
+func (l *helmLoader) repoScope(repo string) (string, error) {
+	switch {
+	case strings.HasPrefix(repo, "oci://"):
+		return "oci:" + ociHost(repo), nil
+	case strings.HasPrefix(repo, "http://"), strings.HasPrefix(repo, "https://"):
+		return "http:" + hostOf(repo), nil
+	default:
+		return "", errors.New("source: unsupported chart repo scheme for repoScope")
+	}
+}
+
+// ResolveID resolves the chart to its immutable id without pulling blob layers.
+// OCI: the manifest digest (sha256:...). HTTP: the index.yaml entry digest, else
+// the exact version string, else errUnkeyable (skip caching).
+func (l *helmLoader) ResolveID(ctx context.Context, repo, name, version string) (string, error) {
+	switch {
+	case strings.HasPrefix(repo, "oci://"):
+		return l.resolveOCIDigest(ctx, repo, name, version)
+	case strings.HasPrefix(repo, "http://"), strings.HasPrefix(repo, "https://"):
+		return l.resolveHTTPID(ctx, repo, name, version)
+	default:
+		return "", errors.New("source: unsupported chart repo scheme")
+	}
+}
+
+func (l *helmLoader) resolveOCIDigest(ctx context.Context, repo, name, version string) (string, error) {
+	c, err := l.credFor(ctx, ociHost(repo))
+	if err != nil {
+		return "", fmt.Errorf("source: resolve credentials: %w", err)
+	}
+	// repo is "oci://host/path"; strip scheme, extract host+path prefix, then
+	// build the OCI distribution manifest URL: https://host/v2/<path>/<name>/manifests/<version>
+	withoutScheme := strings.TrimPrefix(repo, "oci://")
+	u, err := url.Parse("https://" + withoutScheme)
+	if err != nil {
+		return "", fmt.Errorf("source: parse oci repo url: %w", err)
+	}
+	repoPath := strings.Trim(u.Path, "/")
+	var nameInRegistry string
+	if repoPath == "" {
+		nameInRegistry = name
+	} else {
+		nameInRegistry = repoPath + "/" + name
+	}
+	manifestURL := "https://" + u.Host + "/v2/" + nameInRegistry + "/manifests/" + version
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, manifestURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json")
+	if c.ok {
+		req.SetBasicAuth(c.user, c.pass)
+	}
+	hc := l.httpClient
+	if hc == nil {
+		hc = http.DefaultClient
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("source: resolve oci digest %s:%s: %w", name, version, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("source: resolve oci digest %s:%s: HTTP %d", name, version, resp.StatusCode)
+	}
+	dg := resp.Header.Get("Docker-Content-Digest")
+	if dg == "" {
+		return "", fmt.Errorf("source: resolve oci digest %s:%s: no Docker-Content-Digest header", name, version)
+	}
+	if !strings.HasPrefix(dg, "sha256:") {
+		return "", fmt.Errorf("source: resolve oci digest %s:%s: unexpected digest format %q", name, version, dg)
+	}
+	return dg, nil
+}
+
+func (l *helmLoader) resolveHTTPID(ctx context.Context, repoURL, name, version string) (string, error) {
+	c, err := l.credFor(ctx, hostOf(repoURL))
+	if err != nil {
+		return "", fmt.Errorf("source: resolve credentials: %w", err)
+	}
+	idxURL := strings.TrimSuffix(repoURL, "/") + "/index.yaml"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, idxURL, nil)
+	if err != nil {
+		return "", err
+	}
+	if c.ok {
+		req.SetBasicAuth(c.user, c.pass)
+	}
+	hc := l.httpClient
+	if hc == nil {
+		hc = http.DefaultClient
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("source: fetch index.yaml: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("source: fetch index.yaml: HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	var idx repo.IndexFile
+	if err := yaml.Unmarshal(body, &idx); err != nil {
+		return "", fmt.Errorf("source: parse index.yaml: %w", err)
+	}
+	for _, e := range idx.Entries[name] {
+		if e.Version == version {
+			if e.Digest != "" {
+				return e.Digest, nil
+			}
+			return version, nil
+		}
+	}
+	return "", errUnkeyable
 }
 
 // findTGZ locates the pulled chart tgz in dest (helm writes <name>-<version>.tgz).
