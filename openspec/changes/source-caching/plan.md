@@ -1077,7 +1077,7 @@ git add internal/source/source.go cmd/main.go
 git commit -m "feat: construct shared render cache in manager wiring"
 ```
 
-- [ ] Task 7 complete
+- [x] Task 7 complete
 
 ---
 
