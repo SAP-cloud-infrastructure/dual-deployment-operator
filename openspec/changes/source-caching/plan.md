@@ -1023,7 +1023,7 @@ git add internal/source/cache.go internal/source/source.go internal/source/cache
 git commit -m "feat(source): add cachingSource decorator and wire render cache into From/Deps"
 ```
 
-- [ ] Task 6 complete
+- [x] Task 6 complete
 
 ---
 
