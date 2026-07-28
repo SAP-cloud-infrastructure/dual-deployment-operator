@@ -178,53 +178,28 @@ func (l *helmLoader) ResolveID(ctx context.Context, repo, name, version string) 
 }
 
 func (l *helmLoader) resolveOCIDigest(ctx context.Context, repo, name, version string) (string, error) {
+	_ = ctx // Helm v3.21.3 registry.Client.Resolve takes no ctx; kept for future cancellation
 	c, err := l.credFor(ctx, ociHost(repo))
 	if err != nil {
 		return "", fmt.Errorf("source: resolve credentials: %w", err)
 	}
-	// repo is "oci://host/path"; strip scheme, extract host+path prefix, then
-	// build the OCI distribution manifest URL: https://host/v2/<path>/<name>/manifests/<version>
-	withoutScheme := strings.TrimPrefix(repo, "oci://")
-	u, err := url.Parse("https://" + withoutScheme)
-	if err != nil {
-		return "", fmt.Errorf("source: parse oci repo url: %w", err)
+	opts := []registry.ClientOption{registry.ClientOptEnableCache(true)}
+	if c.ok {
+		opts = append(opts, registry.ClientOptBasicAuth(c.user, c.pass))
 	}
-	repoPath := strings.Trim(u.Path, "/")
-	var nameInRegistry string
-	if repoPath == "" {
-		nameInRegistry = name
-	} else {
-		nameInRegistry = repoPath + "/" + name
+	if l.httpClient != nil {
+		opts = append(opts, registry.ClientOptHTTPClient(l.httpClient))
 	}
-	manifestURL := "https://" + u.Host + "/v2/" + nameInRegistry + "/manifests/" + version
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, manifestURL, nil)
+	rc, err := registry.NewClient(opts...)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json")
-	if c.ok {
-		req.SetBasicAuth(c.user, c.pass)
-	}
-	hc := l.httpClient
-	if hc == nil {
-		hc = http.DefaultClient
-	}
-	resp, err := hc.Do(req)
+	ref := strings.TrimSuffix(strings.TrimPrefix(repo, "oci://"), "/") + "/" + name + ":" + version
+	desc, err := rc.Resolve(ref)
 	if err != nil {
 		return "", fmt.Errorf("source: resolve oci digest %s:%s: %w", name, version, err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("source: resolve oci digest %s:%s: HTTP %d", name, version, resp.StatusCode)
-	}
-	dg := resp.Header.Get("Docker-Content-Digest")
-	if dg == "" {
-		return "", fmt.Errorf("source: resolve oci digest %s:%s: no Docker-Content-Digest header", name, version)
-	}
-	if !strings.HasPrefix(dg, "sha256:") {
-		return "", fmt.Errorf("source: resolve oci digest %s:%s: unexpected digest format %q", name, version, dg)
-	}
-	return dg, nil
+	return desc.Digest.String(), nil
 }
 
 func (l *helmLoader) resolveHTTPID(ctx context.Context, repoURL, name, version string) (string, error) {

@@ -30,6 +30,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -148,6 +149,7 @@ func (r *ociRegistry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", ct)
 		w.Header().Set("Docker-Content-Digest", dg)
 		if req.Method == http.MethodHead {
+			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 			w.WriteHeader(http.StatusOK)
 			return
 		}
