@@ -1,3 +1,8 @@
+// SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company
+// Copyright 2026.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 package equivalence
 
 import "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
