@@ -132,6 +132,14 @@ New package `internal/equivalence/` with four concerns:
 - Real source fetch still happens here (keppel anonymous chart pull / github public
   kustomize) — both already proven in Phase 7.
 - Delivery (SSA/prune/health) is intentionally out of scope: covered by Phase 5/6.
+- **Production resolver fix (found here).** Wiring the ipam-capi kustomize fixture
+  (which pins a historical git SHA) exposed a bug in the Phase-7 git `RootResolver`:
+  `fetchSHA` used a `Depth: 1` shallow fetch of branch/tag tips, so an arbitrary
+  historical commit SHA (not a ref tip) was never downloaded and the checkout
+  failed with "object not found (fail-closed)". Fixed by fetching advertised refs
+  to full depth, still fail-closed if the hash is genuinely absent. See the
+  `kustomize-root-resolver` spec delta in this change and the regression test
+  `TestGitResolverResolvesHistoricalSHA`.
 
 ## Comparison
 
