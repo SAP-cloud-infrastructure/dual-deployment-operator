@@ -3,6 +3,7 @@ package equivalence
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -39,6 +40,69 @@ func displayKey(u *unstructured.Unstructured) string {
 	return fmt.Sprintf("%s/%s/%s/%s", u.GetAPIVersion(), u.GetKind(), u.GetNamespace(), u.GetName())
 }
 
+// diffPaths recursively walks two normalized values and returns dotted paths where they differ.
+func diffPaths(a, b interface{}, prefix string) []string {
+	var paths []string
+
+	nextPath := func(key string) string {
+		if prefix == "" {
+			return key
+		}
+		return prefix + "." + key
+	}
+
+	switch ta := a.(type) {
+	case map[string]interface{}:
+		tb, ok := b.(map[string]interface{})
+		if !ok {
+			return []string{prefix}
+		}
+		allKeys := make(map[string]struct{})
+		for k := range ta {
+			allKeys[k] = struct{}{}
+		}
+		for k := range tb {
+			allKeys[k] = struct{}{}
+		}
+
+		var sortedKeys []string
+		for k := range allKeys {
+			sortedKeys = append(sortedKeys, k)
+		}
+		sort.Strings(sortedKeys)
+
+		for _, k := range sortedKeys {
+			va, okA := ta[k]
+			vb, okB := tb[k]
+			if !okA || !okB {
+				paths = append(paths, nextPath(k))
+			} else {
+				paths = append(paths, diffPaths(va, vb, nextPath(k))...)
+			}
+		}
+
+	case []interface{}:
+		tb, ok := b.([]interface{})
+		if !ok {
+			return []string{prefix}
+		}
+		if len(ta) != len(tb) {
+			return []string{prefix}
+		}
+		for i := range ta {
+			idxPath := fmt.Sprintf("%s[%d]", prefix, i)
+			paths = append(paths, diffPaths(ta[i], tb[i], idxPath)...)
+		}
+
+	default:
+		if !reflect.DeepEqual(a, b) {
+			return []string{prefix}
+		}
+	}
+
+	return paths
+}
+
 // Compare normalizes + allowlist-strips both sides and deep-equals per resource.
 func Compare(golden, op ObjectSet) Report {
 	var r Report
@@ -53,8 +117,11 @@ func Compare(golden, op ObjectSet) Report {
 			r.MissingOp = append(r.MissingOp, displayKey(gobj))
 			continue
 		}
-		if !reflect.DeepEqual(prep(gobj).Object, prep(oobj).Object) {
-			r.Mismatched = append(r.Mismatched, fmt.Sprintf("%s (fields differ)", displayKey(gobj)))
+		gPrep := prep(gobj)
+		oPrep := prep(oobj)
+		if !reflect.DeepEqual(gPrep.Object, oPrep.Object) {
+			paths := diffPaths(gPrep.Object, oPrep.Object, "")
+			r.Mismatched = append(r.Mismatched, fmt.Sprintf("%s (fields differ: %s)", displayKey(gobj), strings.Join(paths, ", ")))
 		}
 	}
 	for k, oobj := range op {
@@ -62,5 +129,10 @@ func Compare(golden, op ObjectSet) Report {
 			r.ExtraOp = append(r.ExtraOp, displayKey(oobj))
 		}
 	}
+
+	sort.Strings(r.Mismatched)
+	sort.Strings(r.MissingOp)
+	sort.Strings(r.ExtraOp)
+
 	return r
 }

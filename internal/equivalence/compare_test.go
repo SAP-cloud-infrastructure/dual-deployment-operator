@@ -61,3 +61,18 @@ func TestCompareCABundleAbsentBothSidesEqual(t *testing.T) {
 		t.Fatalf("caBundle-absent VWCs must compare equal; got:\n%s", r.String())
 	}
 }
+
+func TestCompareReportsDifferingFieldPath(t *testing.T) {
+	golden := ObjectSet{}
+	op := ObjectSet{}
+	g := cm("a", "k", "v1")
+	o := cm("a", "k", "v2")
+	golden[KeyOf(g)] = g
+	op[KeyOf(o)] = o
+
+	r := Compare(golden, op)
+	s := r.String()
+	if !strings.Contains(s, "data.k") {
+		t.Errorf("expected differing field path 'data.k' in report; got:\n%s", s)
+	}
+}
