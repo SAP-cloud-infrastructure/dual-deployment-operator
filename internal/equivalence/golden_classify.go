@@ -2,6 +2,7 @@ package equivalence
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -107,6 +108,64 @@ func splitYAMLDocs(b []byte) ([]*unstructured.Unstructured, error) {
 			continue
 		}
 		out = append(out, &unstructured.Unstructured{Object: m})
+	}
+	return out, nil
+}
+
+// UnwrapManagedResources replaces each ManagedResource + its paired Secret(s)
+// with the bare objects encoded in Secret.data["objects.yaml"]. Docs that are
+// neither MRs nor MR-referenced Secrets pass through unchanged (identity-gated).
+// Errors from base64 or YAML decoding are surfaced, never silently dropped.
+func UnwrapManagedResources(docs []*unstructured.Unstructured) ([]*unstructured.Unstructured, error) {
+	secretsByName := map[string]*unstructured.Unstructured{}
+	for _, d := range docs {
+		if d.GetKind() == "Secret" {
+			secretsByName[d.GetName()] = d
+		}
+	}
+	referenced := map[string]bool{}
+	var out []*unstructured.Unstructured
+
+	// First pass: expand each ManagedResource's referenced Secret payloads.
+	for _, d := range docs {
+		if !isManagedResource(d) {
+			continue
+		}
+		refs, _, _ := unstructured.NestedSlice(d.Object, "spec", "secretRefs")
+		for _, r := range refs {
+			m, ok := r.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			name, _ := m["name"].(string)
+			sec, ok := secretsByName[name]
+			if !ok {
+				continue
+			}
+			referenced[name] = true
+			enc, _, _ := unstructured.NestedString(sec.Object, "data", "objects.yaml")
+			raw, err := base64.StdEncoding.DecodeString(enc)
+			if err != nil {
+				return nil, fmt.Errorf("equivalence: decode MR secret %q objects.yaml: %w", name, err)
+			}
+			objs, err := splitYAMLDocs(raw)
+			if err != nil {
+				return nil, fmt.Errorf("equivalence: split MR secret %q payload: %w", name, err)
+			}
+			out = append(out, objs...)
+		}
+	}
+
+	// Second pass: pass through everything that is neither an MR nor an
+	// MR-referenced Secret.
+	for _, d := range docs {
+		if isManagedResource(d) {
+			continue
+		}
+		if d.GetKind() == "Secret" && referenced[d.GetName()] {
+			continue
+		}
+		out = append(out, d)
 	}
 	return out, nil
 }
