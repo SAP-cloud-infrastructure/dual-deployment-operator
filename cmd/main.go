@@ -195,6 +195,7 @@ func main() {
 		SourceDeps: source.Deps{
 			ChartLoader:  source.NewHelmLoader(),
 			RootResolver: source.NewGitResolver(),
+			RenderCache:  source.NewRenderCache(),
 		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "dualdeploymentoperator")

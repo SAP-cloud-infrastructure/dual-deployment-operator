@@ -44,11 +44,21 @@ type RootResolver interface {
 	Resolve(ctx context.Context, url, subPath string) (fsPath string, cleanup func(), err error)
 }
 
+// errUnkeyable signals a source cannot be soundly keyed for caching (e.g. an
+// HTTP Helm repo whose index.yaml has neither a digest nor a matched version).
+// The cachingSource decorator treats it like a resolve failure: render fresh,
+// cache nothing.
+var errUnkeyable = errors.New("source: unkeyable (skip caching)")
+
 // Deps holds the injectable fetchers a Source needs.
 type Deps struct {
 	ChartLoader        ChartLoader
 	RootResolver       RootResolver
 	CredentialResolver *CredentialResolver // optional; nil => anonymous
+	// RenderCache, when non-nil, enables the render-result cache. When nil the
+	// source is returned unwrapped (uncached behavior preserved, matching
+	// pre-Phase-7.5 semantics).
+	RenderCache *renderCache
 }
 
 // NewHelmLoader returns a production OCI+HTTP ChartLoader (no cache). The
@@ -92,14 +102,27 @@ func From(spec v1alpha1.Source, deps Deps) (Source, error) {
 			return nil, errors.New("source: helm source requires a ChartLoader (none configured)")
 		}
 		loader := withHelmCreds(deps.ChartLoader, deps.CredentialResolver, spec.Helm.AuthSecretRef)
-		return &helmSource{spec: spec.Helm, loader: loader}, nil
+		inner := &helmSource{spec: spec.Helm, loader: loader}
+		return wrapHelm(inner, loader, spec.Helm, deps.RenderCache), nil
 	case spec.Kustomize != nil && spec.Helm == nil:
 		if deps.RootResolver == nil {
 			return nil, errors.New("source: kustomize source requires a RootResolver (none configured)")
 		}
 		resolver := withGitCreds(deps.RootResolver, deps.CredentialResolver, spec.Kustomize.AuthSecretRef)
-		return &kustomizeSource{spec: spec.Kustomize, resolver: resolver}, nil
+		inner := &kustomizeSource{spec: spec.Kustomize, resolver: resolver}
+		return wrapKustomize(inner, resolver, spec.Kustomize, deps.RenderCache), nil
 	default:
 		return nil, errors.New("source: exactly one of source.helm or source.kustomize must be set")
 	}
+}
+
+// NewRenderCache returns a shared render cache with the default capacity, or nil
+// (uncached) if construction fails — the operator MUST still run without a cache.
+// Passed into source.Deps.RenderCache to enable render-result caching.
+func NewRenderCache() *renderCache {
+	c, err := newRenderCache(defaultRenderCacheSize)
+	if err != nil {
+		return nil
+	}
+	return c
 }

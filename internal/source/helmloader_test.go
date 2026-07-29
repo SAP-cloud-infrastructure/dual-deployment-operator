@@ -10,12 +10,16 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"helm.sh/helm/v3/pkg/cli"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -371,6 +375,52 @@ func TestHelmLoaderRejectsURLCredentials(t *testing.T) {
 // authed classic HTTP Helm repo (hermetic, offline)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// helmLoader.ResolveID – OCI digest + repoScope
+// ---------------------------------------------------------------------------
+
+func TestHelmLoader_ResolveID_OCIDigest(t *testing.T) {
+	host, client := startAuthedOCIRegistry(t)
+	pushFixtureChart(t, host, client)
+
+	l := newHelmLoader(func(context.Context, string) (creds, error) {
+		return creds{user: authedTestUser, pass: authedTestPass, ok: true}, nil
+	})
+	l.httpClient = client
+	repo := "oci://" + host + "/charts"
+
+	got, err := l.ResolveID(context.Background(), repo, authedTestChart, authedTestVer)
+	if err != nil {
+		t.Fatalf("ResolveID: %v", err)
+	}
+	if !strings.HasPrefix(got, "sha256:") {
+		t.Fatalf("expected a sha256: manifest digest, got %q", got)
+	}
+	// Stable across calls (immutable digest).
+	again, err := l.ResolveID(context.Background(), repo, authedTestChart, authedTestVer)
+	if err != nil || again != got {
+		t.Fatalf("digest not stable: got %q then %q (err=%v)", got, again, err)
+	}
+}
+
+func TestHelmLoader_repoScope(t *testing.T) {
+	l := &helmLoader{}
+	s, err := l.repoScope("oci://reg.example.com/charts")
+	if err != nil {
+		t.Fatalf("oci repoScope error: %v", err)
+	}
+	if s != "oci:reg.example.com" {
+		t.Fatalf("oci repoScope = %q", s)
+	}
+	s, err = l.repoScope("https://charts.example.com")
+	if err != nil {
+		t.Fatalf("https repoScope error: %v", err)
+	}
+	if s != "http:charts.example.com" {
+		t.Fatalf("http repoScope = %q", s)
+	}
+}
+
 // makeMinimalChartTGZ builds a minimal valid Helm chart tgz (Chart.yaml only)
 // in memory and returns its bytes and the digest string for index.yaml.
 func makeMinimalChartTGZ(t *testing.T, name, version string) []byte {
@@ -399,4 +449,198 @@ func makeMinimalChartTGZ(t *testing.T, name, version string) []byte {
 		t.Fatal(err)
 	}
 	return buf.Bytes()
+}
+
+func TestHelmLoader_ResolveID_HTTPIndexDigest(t *testing.T) {
+	const name, version = "demo", "1.2.3"
+	wantDigest := "sha256:0000000000000000000000000000000000000000000000000000000000000abc"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/index.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `apiVersion: v1
+entries:
+  %s:
+  - name: %s
+    version: %s
+    digest: %s
+    urls:
+    - http://example.invalid/%s-%s.tgz
+generated: "2026-01-01T00:00:00Z"
+`, name, name, version, wantDigest, name, version)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	l := &helmLoader{settings: cli.New()}
+	got, err := l.ResolveID(context.Background(), srv.URL, name, version)
+	if err != nil {
+		t.Fatalf("ResolveID: %v", err)
+	}
+	if got != wantDigest {
+		t.Fatalf("ResolveID = %q, want index digest %q", got, wantDigest)
+	}
+}
+
+func TestHelmLoader_ResolveID_HTTPVersionFallback(t *testing.T) {
+	const name, version = "demo", "1.2.3"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/index.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `apiVersion: v1
+entries:
+  %s:
+  - name: %s
+    version: %s
+    urls:
+    - http://example.invalid/%s-%s.tgz
+generated: "2026-01-01T00:00:00Z"
+`, name, name, version, name, version)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	l := &helmLoader{settings: cli.New()}
+	got, err := l.ResolveID(context.Background(), srv.URL, name, version)
+	if err != nil {
+		t.Fatalf("ResolveID: %v", err)
+	}
+	if got != version {
+		t.Fatalf("ResolveID = %q, want version fallback %q", got, version)
+	}
+}
+
+func TestHelmLoader_ResolveID_HTTPUnkeyable(t *testing.T) {
+	const name, version = "demo", "1.2.3"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/index.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `apiVersion: v1
+entries:
+  %s:
+  - name: %s
+    version: 9.9.9
+    urls:
+    - http://example.invalid/other.tgz
+generated: "2026-01-01T00:00:00Z"
+`, name, name)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	l := &helmLoader{settings: cli.New()}
+	_, err := l.ResolveID(context.Background(), srv.URL, name, version)
+	if !errors.Is(err, errUnkeyable) {
+		t.Fatalf("expected errUnkeyable, got %v", err)
+	}
+}
+
+func TestHelmLoader_repoScope_HTTPPathDistinguishes(t *testing.T) {
+	l := &helmLoader{}
+	a, err := l.repoScope("https://charts.example.com/a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := l.repoScope("https://charts.example.com/b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatalf("http repoScope must include URL path so same-host different-path repos don't collide when no index digest is present; got both %q", a)
+	}
+}
+
+func TestHelmLoader_ResolveID_RejectsURLCredentials_OCI(t *testing.T) {
+	l := &helmLoader{}
+	const secret = "secret"
+	repoURL := "oci://user:" + secret + "@example.com/charts"
+	_, err := l.ResolveID(context.Background(), repoURL, "demo", "1.0.0")
+	if err == nil {
+		t.Fatal("ResolveID must reject an OCI repo URL with embedded userinfo")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("credential leak: password appeared in error: %v", err)
+	}
+}
+
+func TestHelmLoader_ResolveID_RejectsURLCredentials_HTTP(t *testing.T) {
+	l := &helmLoader{}
+	const secret = "secret"
+	repoURL := "https://user:" + secret + "@example.com/charts"
+	_, err := l.ResolveID(context.Background(), repoURL, "demo", "1.0.0")
+	if err == nil {
+		t.Fatal("ResolveID must reject an HTTP repo URL with embedded userinfo")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("credential leak: password appeared in error: %v", err)
+	}
+}
+
+func TestHelmLoader_ResolveID_UnsupportedScheme(t *testing.T) {
+	// The default branch of ResolveID (non-oci://, non-http(s)://) must return
+	// "unsupported chart repo scheme" — parallel to Load's guard.
+	l := &helmLoader{}
+	_, err := l.ResolveID(context.Background(), "gopher://weird", "demo", "1.0.0")
+	if err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("expected unsupported-scheme error, got %v", err)
+	}
+}
+
+func TestHelmLoader_rejectURLCredentials_Unparsable(t *testing.T) {
+	// Force url.Parse to fail via a control-character in the URL. Covers the
+	// "chart repo url is not parseable" branch that Load and ResolveID share.
+	if err := rejectURLCredentials("http://\x7f/bad"); err == nil {
+		t.Fatal("expected parse error for a malformed URL")
+	}
+}
+
+func TestHelmLoader_resolveHTTPID_HTTP4xx(t *testing.T) {
+	// Index server returns 404 -> resolveHTTPID must surface "HTTP 404", not fall
+	// through to YAML parsing. Covers the 4xx branch.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/index.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		http.NotFound(w, nil)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	l := &helmLoader{settings: cli.New()}
+	_, err := l.ResolveID(context.Background(), srv.URL, "demo", "1.0.0")
+	if err == nil || !strings.Contains(err.Error(), "HTTP 404") {
+		t.Fatalf("expected HTTP 404 error, got %v", err)
+	}
+}
+
+func TestHelmLoader_resolveHTTPID_BasicAuth(t *testing.T) {
+	// Index server requires Basic auth. l.credFor returns creds so
+	// req.SetBasicAuth fires; the served index is otherwise identical to the
+	// existing HTTPIndexDigest test. Covers the c.ok / SetBasicAuth branch.
+	const wantUser, wantPass = "u", "hunter2"
+	wantDigest := "sha256:0000000000000000000000000000000000000000000000000000000000000abc"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/index.yaml", func(w http.ResponseWriter, r *http.Request) {
+		u, p, ok := r.BasicAuth()
+		if !ok || u != wantUser || p != wantPass {
+			w.Header().Set("WWW-Authenticate", `Basic realm="helm"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprintf(w, `apiVersion: v1
+entries:
+  demo:
+  - name: demo
+    version: 1.2.3
+    digest: %s
+generated: "2026-01-01T00:00:00Z"
+`, wantDigest)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	l := newHelmLoader(func(context.Context, string) (creds, error) {
+		return creds{user: wantUser, pass: wantPass, ok: true}, nil
+	})
+	got, err := l.ResolveID(context.Background(), srv.URL, "demo", "1.2.3")
+	if err != nil {
+		t.Fatalf("ResolveID with basic auth: %v", err)
+	}
+	if got != wantDigest {
+		t.Fatalf("ResolveID = %q, want %q", got, wantDigest)
+	}
 }

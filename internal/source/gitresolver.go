@@ -20,6 +20,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	httpauth "github.com/go-git/go-git/v5/plumbing/transport/http"
+	"github.com/go-git/go-git/v5/storage/memory"
 )
 
 var shaRe = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
@@ -149,4 +150,50 @@ func fetchSHA(ctx context.Context, dir, base, sha string, auth transport.AuthMet
 		return fmt.Errorf("source: checkout sha %s: %w (fail-closed)", sha, err)
 	}
 	return nil
+}
+
+// repoScope returns the transport+host scope for the cache key: "git:<host>".
+func (r *gitResolver) repoScope(rawURL string) (string, error) {
+	base, _, _, err := splitRef(rawURL)
+	if err != nil {
+		return "", err
+	}
+	return "git:" + hostOf(base), nil
+}
+
+// ResolveID resolves the pinned ?ref= to its immutable commit SHA without cloning.
+// A bare SHA is returned as-is. A tag or branch ref is resolved via ls-remote and
+// MUST map to a commit SHA — never the ref name — or an error is returned.
+func (r *gitResolver) ResolveID(ctx context.Context, rawURL string, _ Mode) (string, error) {
+	base, _, ref, err := splitRef(rawURL)
+	if err != nil {
+		return "", err
+	}
+	if shaRe.MatchString(ref) {
+		return ref, nil
+	}
+	auth, err := r.authFor(ctx, base)
+	if err != nil {
+		return "", fmt.Errorf("source: resolve credentials: %w", err)
+	}
+	rem := git.NewRemote(memory.NewStorage(), &config.RemoteConfig{Name: "origin", URLs: []string{base}})
+	refs, err := rem.ListContext(ctx, &git.ListOptions{Auth: auth, PeelingOption: git.AppendPeeled})
+	if err != nil {
+		return "", fmt.Errorf("source: ls-remote %s: %w", base, err)
+	}
+	byName := make(map[string]*plumbing.Reference, len(refs))
+	for _, rr := range refs {
+		byName[rr.Name().String()] = rr
+	}
+	// Prefer peeled annotated-tag commit, then lightweight tag, then branch.
+	for _, cand := range []string{
+		"refs/tags/" + ref + "^{}",
+		"refs/tags/" + ref,
+		"refs/heads/" + ref,
+	} {
+		if rr, ok := byName[cand]; ok {
+			return rr.Hash().String(), nil
+		}
+	}
+	return "", fmt.Errorf("source: could not resolve ref %q on %s to a commit SHA", ref, base)
 }
