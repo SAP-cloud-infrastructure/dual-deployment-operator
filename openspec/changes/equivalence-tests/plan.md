@@ -118,7 +118,7 @@ git add internal/equivalence/set.go internal/equivalence/set_test.go
 git commit -m "test(equivalence): resource identity key model"
 ```
 
-- [ ] Task 1 complete
+- [x] Task 1 complete
 
 ---
 
@@ -224,7 +224,7 @@ git add internal/equivalence/normalize.go internal/equivalence/normalize_test.go
 git commit -m "test(equivalence): canonical object normalization"
 ```
 
-- [ ] Task 2 complete
+- [x] Task 2 complete
 
 ---
 
@@ -336,7 +336,7 @@ git add internal/equivalence/allowlist.go internal/equivalence/allowlist_test.go
 git commit -m "test(equivalence): provenance/internal-label allowlist"
 ```
 
-- [ ] Task 3 complete
+- [x] Task 3 complete
 
 ---
 
@@ -510,7 +510,7 @@ git add internal/equivalence/compare.go internal/equivalence/compare_test.go
 git commit -m "test(equivalence): per-resource deep-equal comparator + report + caBundle parity"
 ```
 
-- [ ] Task 4 complete
+- [x] Task 4 complete
 
 ---
 
@@ -703,7 +703,7 @@ git add internal/equivalence/golden_classify.go internal/equivalence/golden_clas
 git commit -m "test(equivalence): identity-gated golden classify/unwrap/exclude"
 ```
 
-- [ ] Task 5 complete
+- [x] Task 5 complete
 
 ---
 
@@ -821,7 +821,7 @@ git add internal/equivalence/golden_classify.go internal/equivalence/golden_mr_t
 git commit -m "test(equivalence): unwrap ManagedResource+Secret payloads to bare objects"
 ```
 
-- [ ] Task 6 complete
+- [x] Task 6 complete
 
 ---
 
