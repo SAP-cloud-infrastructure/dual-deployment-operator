@@ -67,7 +67,7 @@ func TestEquivalence(t *testing.T) {
 
 			// Scoped equivalence (Decision B): compare only the delivered kinds both
 			// sides are expected to produce, dropping per-fixture known divergences.
-			scope := Scope{ComparedKinds: f.ComparedKinds, KnownDivergences: f.KnownDivergences}
+			scope := Scope{ComparedKinds: f.ComparedKinds, KnownDivergences: f.KnownDivergences, IgnoreLabels: f.IgnoreLabels}
 			seedReport := Compare(scope.Apply(golden.Seed), scope.Apply(opSeed))
 			shootReport := Compare(scope.Apply(golden.Shoot), scope.Apply(opShoot))
 			if !seedReport.Equal() {

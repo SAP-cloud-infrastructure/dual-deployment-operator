@@ -12,6 +12,7 @@ import "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 // contain any transformation-produced key (e.g. the injector --target-label).
 var allowlistedLabelKeys = []string{
 	"helm.sh/chart",
+	"helm.sh/resource-policy",
 	"app.kubernetes.io/managed-by",
 	"app.kubernetes.io/version",
 	"dual-deployment-operator.cc.sap/origin",

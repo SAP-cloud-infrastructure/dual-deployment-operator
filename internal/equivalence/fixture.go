@@ -28,6 +28,7 @@ type Fixture struct {
 
 	ComparedKinds    []string         `json:"comparedKinds"`
 	KnownDivergences []ExclusionEntry `json:"knownDivergences"`
+	IgnoreLabels     []string         `json:"ignoreLabels"`
 
 	CR         *v1alpha1.DualDeploymentOperator `json:"-"`
 	OverlayRaw []byte                           `json:"-"`

@@ -21,3 +21,78 @@ exclusions:
   - kind: ConfigMap
     name: owner-info
     reason: "owner-info subchart output; operator render emits no equivalent"
+# ignoreLabels: legacy delivery-mechanism labels baked into today's committed
+# managedresources/ pre-render that the operator's r7 clean render does not
+# reproduce (the old MR-template CRD labels + clusterctl-move marker).
+ignoreLabels:
+  - metal-operator-remote-webhook-injector
+  - clusterctl.cluster.x-k8s.io
+# knownDivergences: in-scope objects present on exactly one side that are
+# expected and must not be reported as missing/extra (kind+name, justified).
+knownDivergences:
+  - kind: ClusterRole
+    name: metal-operator-webhook-injector
+    reason: "sapcc addition (webhook-injector RBAC); upstream chart emits no equivalent"
+  - kind: ClusterRoleBinding
+    name: metal-operator-webhook-injector
+    reason: "sapcc addition (webhook-injector RBAC binding); upstream emits none"
+  - kind: ClusterRoleBinding
+    name: metal-operator-webhook-injector-rolebinding
+    reason: "sapcc addition (webhook-injector RBAC binding); upstream emits none"
+  - kind: Role
+    name: metal-operator-webhook-injector
+    reason: "sapcc addition (webhook-injector RBAC); upstream emits none"
+  - kind: RoleBinding
+    name: metal-operator-webhook-injector
+    reason: "sapcc addition (webhook-injector RBAC binding); upstream emits none"
+  - kind: ServiceAccount
+    name: metal-operator-webhook-injector
+    reason: "sapcc addition (webhook-injector SA); upstream emits none"
+  - kind: ClusterRole
+    name: metal-api-viewer
+    reason: "sapcc addition (oidc-ias viewer role); upstream emits none"
+  - kind: ClusterRole
+    name: metal-operator-dns-records
+    reason: "sapcc addition (disco dns-records role); upstream emits none"
+  - kind: ClusterRole
+    name: metal-token-rotate
+    reason: "sapcc addition (token-rotate role); upstream emits none"
+  - kind: ClusterRoleBinding
+    name: metal-operator-dns-records-rolebinding
+    reason: "sapcc addition (dns-records binding); upstream emits none"
+  - kind: ClusterRoleBinding
+    name: metal-token-rotate
+    reason: "sapcc addition (token-rotate binding); upstream emits none"
+  - kind: "ClusterRoleBinding"
+    name: "cc:oidc-ias-admin"
+    reason: "sapcc addition (oidc-ias group binding); upstream emits none"
+  - kind: "ClusterRoleBinding"
+    name: "cc:oidc-ias-viewer"
+    reason: "sapcc addition (oidc-ias group binding); upstream emits none"
+  - kind: "ClusterRoleBinding"
+    name: "cc:oidc-ias-metal-viewer"
+    reason: "sapcc addition (oidc-ias group binding); upstream emits none"
+  - kind: "ClusterRoleBinding"
+    name: "cc:oidc-ias-servermaintenance-editor"
+    reason: "sapcc addition (oidc-ias group binding); upstream emits none"
+  - kind: ServiceAccount
+    name: metal-token-rotate
+    reason: "sapcc addition (token-rotate SA); upstream emits none"
+  - kind: Role
+    name: metal-token-rotate
+    reason: "sapcc addition (token-rotate Role); upstream emits none"
+  - kind: RoleBinding
+    name: metal-token-rotate
+    reason: "sapcc addition (token-rotate binding); upstream emits none"
+  - kind: ClusterRole
+    name: metal-operator-leader-election-role
+    reason: "wrapper delivers leader-election as ClusterRole; operator (r7, no renameKind) keeps it a Role — divergent kind pair"
+  - kind: ClusterRoleBinding
+    name: metal-operator-leader-election-rolebinding
+    reason: "wrapper delivers leader-election binding as ClusterRoleBinding; operator keeps RoleBinding — divergent kind pair"
+  - kind: Role
+    name: metal-operator-leader-election-role
+    reason: "operator (r7) keeps leader-election as Role; wrapper delivers ClusterRole — divergent kind pair"
+  - kind: RoleBinding
+    name: metal-operator-leader-election-rolebinding
+    reason: "operator (r7) keeps leader-election binding as RoleBinding; wrapper delivers ClusterRoleBinding — divergent kind pair"

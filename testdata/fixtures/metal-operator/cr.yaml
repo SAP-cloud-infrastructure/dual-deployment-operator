@@ -25,4 +25,6 @@ spec:
   shootAccess:
     secretName: metal-operator-remote-kubeconfig
     server: https://api.m-qa-de-1.internal
-  transformations: []
+  transformations:
+    - rewriteWebhookURL:
+        urlPrefix: "https://metal-operator-remote-webhook-service:443"
