@@ -84,11 +84,16 @@ New package `internal/equivalence/` with four concerns:
      (e.g. metal-operator's `dns-record-template`, ipam-capi's `manager-config`).
      These are compared object-for-object against the operator render.
 
-  After bucketing, bucket 1 (unwrapped bare objects) + bucket 3 (kept objects) form
-  the golden set that lines up 1:1 with the operator's render. This is the concrete
-  realization of "compare resolved end-state objects, not delivery wrapper". The
-  bucket-2 exclusion list is enumerated per operator in the fixture and is itself a
-  reviewable artifact (adding an entry needs a one-line justification).
+  After bucketing: bucket-1 injector-ConfigMap webhooks AND the ManagedResource-
+  unwrapped payloads are **shoot**-destined (today's chart delivers `managedresources/*`
+  to the shoot); bucket-3 kept chart-template objects are **seed**-destined. Together
+  they form the golden seed/shoot sets compared against the operator's two renders.
+  This is the concrete realization of "compare resolved end-state objects, not
+  delivery wrapper". `ClassifyGolden(passthrough, shootFromMR, opts)` takes the MR
+  payloads as a separate shoot-destined input; `UnwrapManagedResources` returns
+  `(fromMR, passthrough)`. The bucket-2 exclusion list is enumerated per operator in
+  the fixture and is itself a reviewable artifact (adding an entry needs a one-line
+  justification).
 - **INVARIANT — every golden-side manipulation is identity-gated and no-op-safe on a
   generic chart.** The bucketing/unwrap/exclude logic MUST NOT assume any wrapper
   exists. Each transform triggers ONLY on a positively-matched identity and is a
@@ -130,7 +135,29 @@ New package `internal/equivalence/` with four concerns:
 
 ## Comparison
 
-Canonical normalize + allowlisted ignores, deep-equal per resource.
+Canonical normalize + allowlisted ignores, deep-equal per resource, applied within
+a **scoped equivalence** (Decision B).
+
+**Scoped equivalence (Decision B).** The operator renders the UPSTREAM chart
+directly; the golden side renders the `<operator>-remote` WRAPPER, which disables
+most of upstream and substitutes pre-rendered `managedresources/*` + sapcc
+additions. The two legitimately emit different object sets (verified in triage:
+operator emits per-CRD `*-admin/editor/viewer` ClusterRoles, cert-manager
+Issuer/Certificate, metrics services; golden emits Ingress, NetworkPolicies,
+webhook-injector RBAC, remote-kubeconfig, macdb, token-rotate). So the assertion is
+scoped, not full-object-set:
+
+- **Compared kinds** (per fixture): the delivered kinds both sides are expected to
+  produce — `CustomResourceDefinition`, `ClusterRole`, `ClusterRoleBinding`, `Role`,
+  `RoleBinding`, `ServiceAccount`, `Validating`/`MutatingWebhookConfiguration`.
+  Objects of other kinds are ignored by the comparison.
+- **Known divergences** (per fixture, kind+name + justification): specific in-scope
+  objects expected on exactly one side, not reported as missing/extra.
+- Within scope and after removing known divergences, FULL per-resource deep-equal
+  still applies. Scoping narrows WHICH objects are compared; it never weakens
+  field-level rigor on in-scope objects and never hides a transformation-output
+  difference. A known-divergence entry only suppresses single-sided missing/extra —
+  it cannot suppress a field mismatch on an object present on both sides.
 
 **Scope boundary — this phase does NOT re-test the transformations.** The three
 transformations (`patch`, `rewriteWebhookURL`, `filterKinds`) are already

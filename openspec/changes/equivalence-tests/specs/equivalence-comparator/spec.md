@@ -1,5 +1,58 @@
 ## ADDED Requirements
 
+### Requirement: Scoped equivalence over delivered kinds with known divergences
+
+The equivalence assertion SHALL be SCOPED, not full-object-set equality. The
+operator renders the UPSTREAM chart directly while today's golden side renders the
+`<operator>-remote` WRAPPER chart (which disables most of upstream and substitutes
+pre-rendered `managedresources/*` plus sapcc additions); the two therefore
+legitimately emit different object sets. The comparator MUST support:
+
+- a per-fixture set of **compared kinds** — the delivered resource kinds both sides
+  are expected to produce (e.g. `CustomResourceDefinition`, `ClusterRole`,
+  `ClusterRoleBinding`, `Role`, `RoleBinding`, `ServiceAccount`,
+  `ValidatingWebhookConfiguration`, `MutatingWebhookConfiguration`). Resources whose
+  kind is not in this set are ignored by the comparison; and
+- a per-fixture **known-divergence** list of specific objects (by kind + name) that
+  are expected on exactly one side and MUST NOT be reported as missing/extra. Each
+  entry MUST carry a justification in the fixture.
+
+Within the compared-kinds scope and after removing known divergences, the comparator
+MUST still perform full per-resource deep-equal (see the per-resource requirement)
+and MUST report any residual mismatch, missing, or extra as a failure. Scoping
+narrows WHICH objects are compared; it MUST NOT weaken the field-level rigor applied
+to the objects that ARE in scope, and MUST NOT be used to hide a transformation-output
+difference.
+
+#### Scenario: Out-of-scope kinds are ignored
+
+- **WHEN** the golden or operator render contains a resource whose kind is not in the
+  fixture's compared-kinds set (e.g. a cert-manager `Issuer` the upstream chart emits
+  but the wrapper does not)
+- **THEN** the comparator neither compares it nor reports it as missing/extra
+
+#### Scenario: Known divergence is not reported
+
+- **WHEN** an object listed in the fixture's known-divergence list (by kind + name)
+  is present on only one side
+- **THEN** the comparator does not report it as missing or extra
+
+#### Scenario: In-scope objects still compared with full rigor
+
+- **WHEN** a resource is of a compared kind and is not a known divergence
+- **THEN** the comparator applies full per-resource deep-equal (allowlist for
+  provenance only; transformation outputs are never suppressed) and fails on any
+  residual difference
+
+#### Scenario: Known-divergence entry cannot hide an in-scope mismatch
+
+- **WHEN** a fixture attempts to use a known-divergence entry to suppress a
+  field-level difference on an object that exists on BOTH sides
+- **THEN** the entry has no effect (known-divergence only suppresses missing/extra
+  for single-sided objects); the field mismatch is still reported
+
+---
+
 ### Requirement: Canonical normalization and per-resource comparison
 
 The equivalence comparator SHALL compare the golden set (after unwrap/exclude) and
