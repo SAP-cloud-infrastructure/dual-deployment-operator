@@ -1118,7 +1118,7 @@ git add internal/equivalence/operator_capture.go internal/equivalence/operator_c
 git commit -m "test(equivalence): operator render+transform capture (no delivery)"
 ```
 
-- [ ] Task 8 complete
+- [x] Task 8 complete
 
 ---
 
