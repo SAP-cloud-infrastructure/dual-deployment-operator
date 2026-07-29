@@ -26,6 +26,9 @@ type Fixture struct {
 	CRFile        string           `json:"cr"`
 	Exclusions    []ExclusionEntry `json:"exclusions"`
 
+	ComparedKinds    []string         `json:"comparedKinds"`
+	KnownDivergences []ExclusionEntry `json:"knownDivergences"`
+
 	CR         *v1alpha1.DualDeploymentOperator `json:"-"`
 	OverlayRaw []byte                           `json:"-"`
 	Dir        string                           `json:"-"`

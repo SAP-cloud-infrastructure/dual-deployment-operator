@@ -11,11 +11,17 @@ spec:
       name: metal-operator
       version: 0.6.2-crds
       shootValues:
+        controllerManager: {enable: false}
         rbac: {enable: true}
         crd: {enable: true}
         webhook: {enable: true}
+        certmanager: {enable: false}
       seedValues:
         controllerManager: {enable: true}
+        rbac: {enable: false}
+        crd: {enable: false}
+        webhook: {enable: false}
+        certmanager: {enable: false}
   shootAccess:
     secretName: metal-operator-remote-kubeconfig
     server: https://api.m-qa-de-1.internal

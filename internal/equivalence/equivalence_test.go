@@ -65,8 +65,11 @@ func TestEquivalence(t *testing.T) {
 				t.Fatalf("operator capture: %v", err)
 			}
 
-			seedReport := Compare(golden.Seed, opSeed)
-			shootReport := Compare(golden.Shoot, opShoot)
+			// Scoped equivalence (Decision B): compare only the delivered kinds both
+			// sides are expected to produce, dropping per-fixture known divergences.
+			scope := Scope{ComparedKinds: f.ComparedKinds, KnownDivergences: f.KnownDivergences}
+			seedReport := Compare(scope.Apply(golden.Seed), scope.Apply(opSeed))
+			shootReport := Compare(scope.Apply(golden.Shoot), scope.Apply(opShoot))
 			if !seedReport.Equal() {
 				t.Errorf("seed render mismatch:\n%s", seedReport.String())
 			}
