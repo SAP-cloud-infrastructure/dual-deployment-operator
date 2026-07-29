@@ -1,0 +1,3 @@
+# Representative per-cluster overlay (cc/kube-secrets shape for one chosen shoot).
+global:
+  region: qa-de-1

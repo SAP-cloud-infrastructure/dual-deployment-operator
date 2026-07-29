@@ -1,0 +1,20 @@
+operator: argora-operator
+chartFullname: argora-operator-remote
+repoURL: https://github.com/sapcc/helm-charts.git
+sha: 33e68278ace26fe23e0c2b36a9266a58c9b47707
+chartPath: system/argora-operator-remote
+overlayValues: overlay-values.yaml
+cr: cr.yaml
+# comparedKinds scopes the equivalence assertion (Decision B) to the resource
+# kinds both the operator (upstream chart) and today's -remote wrapper deliver.
+comparedKinds:
+  - CustomResourceDefinition
+  - ClusterRole
+  - ClusterRoleBinding
+  - Role
+  - RoleBinding
+  - ServiceAccount
+exclusions:
+  - kind: ConfigMap
+    name: owner-info
+    reason: "owner-info subchart output; operator render emits no equivalent"

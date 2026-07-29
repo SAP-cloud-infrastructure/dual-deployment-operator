@@ -15,6 +15,7 @@ var allowlistedLabelKeys = []string{
 	"helm.sh/resource-policy",
 	"app.kubernetes.io/managed-by",
 	"app.kubernetes.io/version",
+	"app.kubernetes.io/instance",
 	"dual-deployment-operator.cc.sap/origin",
 	"dual-deployment-operator.cc.sap/owned-by",
 }

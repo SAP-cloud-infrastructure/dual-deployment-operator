@@ -19,6 +19,7 @@ var operators = []string{
 	"metal-operator",
 	"khalkeon",
 	"boot-operator",
+	"argora-operator",
 }
 
 // TestEquivalence proves the operator's rendered output matches today's
