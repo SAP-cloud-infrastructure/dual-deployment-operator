@@ -21,6 +21,26 @@
 
 Offline suite (Tasks 1-6): **11 tests PASS**. Full build/gofmt/vet clean.
 
+## ⛔ ESCALATION (2026-07-29 resume): GHCR golden-source assumption is FALSE
+
+Investigated the Task 7 `not found` conclusively. The brainstorm/design decision
+"pull the published `<op>-remote` wrapper chart from GHCR at a pinned chart version"
+**does not hold against reality**:
+
+- SDK sanity check PASSES: `oci://ghcr.io/ironcore-dev/charts/metal-operator@0.6.2-crds` pulls fine — so the helm-SDK code + egress work.
+- ALL `sapcc/helm-charts` `-remote` charts fail across every path/tag variant tried:
+  - `oci://ghcr.io/sapcc/helm-charts/charts/metal-operator-remote@0.6.30` → not found
+  - `@v0.6.30` → not found; `.../charts/khalkeon-remote@0.1.1` → not found; `.../charts/boot-operator-remote@0.4.21` → not found
+  - `.../charts/metal-operator-remote/tags/list` → HTTP 404 "repository name not known to registry"
+- `helm-push.yaml` only publishes charts `ct list-changed` detects in that push, under the Chart.yaml version at push time. Last run: 2026-07-15. metal-operator-remote bumped 2026-07-24 (9 days later, so 0.6.30 was never published). The published tag for any given chart is whatever version it had the last time it happened to be in a changed-set — NOT a stable, predictable pin.
+
+**Conclusion:** GHCR is not a reliable golden source for these wrapper charts (unpredictable/absent tags; possibly private repos too). This is a DESIGN-LEVEL decision to revisit with the user, not an implementer fix. Options presented to user (awaiting decision):
+- A. Golden source = render the wrapper chart from `sapcc/helm-charts` git **source** at a pinned SHA (git clone + `helm dependency build` + `helm template`). Robust, but needs git egress + transitive dep pulls (owner-info from keppel, upstream subchart from ghcr).
+- B. Golden source = vendor a pinned snapshot of each `-remote` chart into `testdata/` and `helm template` the vendored copy. Fully offline/deterministic; re-vendor is a deliberate step. (This is brainstorm Option A, originally deprioritized.)
+- C. Keep GHCR but drop the per-PR gate: resolve each chart's actually-published tag dynamically (list tags, pick latest) — fragile, and tags may still be absent.
+
+Task 7 `golden_render.go` (GHCR `helm pull`) stays uncommitted pending this decision. If B is chosen, `RenderGolden` changes from pull-by-ref to load-from-vendored-path; if A, it becomes clone+depbuild+template.
+
 ## Task 7 — where it stopped and the ONE blocker to resolve
 
 The implementer timed out (30m — it was a network task on the experimental model). It left **uncommitted, buildable, gofmt-clean** files:
