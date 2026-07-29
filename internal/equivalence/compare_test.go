@@ -1,0 +1,63 @@
+package equivalence
+
+import (
+	"strings"
+	"testing"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+)
+
+func cm(name, key, val string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1", "kind": "ConfigMap",
+		"metadata": map[string]interface{}{"name": name, "namespace": "ns"},
+		"data":     map[string]interface{}{key: val},
+	}}
+}
+
+func TestCompareReportsFieldDiffAndMissing(t *testing.T) {
+	golden := ObjectSet{}
+	op := ObjectSet{}
+	g1 := cm("a", "k", "v1")
+	o1 := cm("a", "k", "v2") // field diff
+	g2 := cm("b", "k", "v")  // only in golden -> missing on operator side
+	golden[KeyOf(g1)] = g1
+	golden[KeyOf(g2)] = g2
+	op[KeyOf(o1)] = o1
+
+	report := Compare(golden, op)
+	if report.Equal() {
+		t.Fatal("expected mismatches")
+	}
+	s := report.String()
+	if !strings.Contains(s, "v1/ConfigMap/ns/a") {
+		t.Errorf("expected field-diff for a; got:\n%s", s)
+	}
+	if !strings.Contains(s, "v1/ConfigMap/ns/b") || !strings.Contains(strings.ToLower(s), "missing") {
+		t.Errorf("expected missing-on-operator for b; got:\n%s", s)
+	}
+}
+
+func vwc(name string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "admissionregistration.k8s.io/v1",
+		"kind":       "ValidatingWebhookConfiguration",
+		"metadata":   map[string]interface{}{"name": name},
+		"webhooks": []interface{}{map[string]interface{}{
+			"name":         "w",
+			"clientConfig": map[string]interface{}{"url": "https://x/y"}, // no caBundle on either side
+		}},
+	}}
+}
+
+func TestCompareCABundleAbsentBothSidesEqual(t *testing.T) {
+	golden := ObjectSet{}
+	op := ObjectSet{}
+	g := vwc("vwc")
+	o := vwc("vwc")
+	golden[KeyOf(g)] = g
+	op[KeyOf(o)] = o
+	if r := Compare(golden, op); !r.Equal() {
+		t.Fatalf("caBundle-absent VWCs must compare equal; got:\n%s", r.String())
+	}
+}
