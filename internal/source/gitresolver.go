@@ -129,16 +129,18 @@ func fetchSHA(ctx context.Context, dir, base, sha string, auth transport.AuthMet
 	if err != nil {
 		return err
 	}
-	// Fetch all branch + tag refs (shallow). Bare-SHA refspecs are not universally
-	// supported (e.g. git's file:// dumb transport rejects them), so we fetch all
-	// refs and resolve the SHA from what was advertised — still fail-closed because
-	// Checkout will error if the hash is absent.
+	// Fetch all branch + tag refs to full depth. Bare-SHA refspecs are not
+	// universally supported (e.g. git's file:// dumb transport rejects them), so we
+	// fetch the advertised refs and resolve the SHA from history. A shallow
+	// (Depth:1) fetch would only download each ref's tip commit, so an arbitrary
+	// historical SHA (not a branch/tag tip) would be absent — hence full depth.
+	// Still fail-closed: Checkout errors if the hash is genuinely absent.
 	if err := remote.FetchContext(ctx, &git.FetchOptions{
 		RefSpecs: []config.RefSpec{
 			"+refs/heads/*:refs/heads/*",
 			"+refs/tags/*:refs/tags/*",
 		},
-		Depth: 1, Auth: auth,
+		Auth: auth,
 	}); err != nil {
 		return fmt.Errorf("source: fetch sha %s: %w (fail-closed)", sha, err)
 	}
