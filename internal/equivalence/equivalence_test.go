@@ -17,6 +17,7 @@ import (
 // gate) so equivalence gates every PR.
 var operators = []string{
 	"metal-operator",
+	"khalkeon",
 }
 
 // TestEquivalence proves the operator's rendered output matches today's
@@ -67,7 +68,7 @@ func TestEquivalence(t *testing.T) {
 
 			// Scoped equivalence (Decision B): compare only the delivered kinds both
 			// sides are expected to produce, dropping per-fixture known divergences.
-			scope := Scope{ComparedKinds: f.ComparedKinds, KnownDivergences: f.KnownDivergences, IgnoreLabels: f.IgnoreLabels}
+			scope := Scope{ComparedKinds: f.ComparedKinds, KnownDivergences: f.KnownDivergences, IgnoreLabels: f.IgnoreLabels, CanonicalNamespace: f.CanonicalNamespace}
 			seedReport := Compare(scope.Apply(golden.Seed), scope.Apply(opSeed))
 			shootReport := Compare(scope.Apply(golden.Shoot), scope.Apply(opShoot))
 			if !seedReport.Equal() {
