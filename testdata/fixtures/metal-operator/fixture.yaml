@@ -1,0 +1,12 @@
+operator: metal-operator
+chartFullname: metal-operator-remote
+repoURL: https://github.com/sapcc/helm-charts.git
+sha: 33e68278ace26fe23e0c2b36a9266a58c9b47707
+chartPath: system/metal-operator-remote
+overlayValues: overlay-values.yaml
+cr: cr.yaml
+# Objects the operator render emits no equivalent for (kind+name, justified).
+exclusions:
+  - kind: ConfigMap
+    name: owner-info
+    reason: "owner-info subchart output; operator render emits no equivalent"

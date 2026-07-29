@@ -1,0 +1,5 @@
+# Representative per-cluster overlay (cc/kube-secrets shape for one chosen shoot).
+controllerManager:
+  manager:
+    env:
+      KUBERNETES_SERVICE_HOST: "api.m-qa-de-1.internal"
