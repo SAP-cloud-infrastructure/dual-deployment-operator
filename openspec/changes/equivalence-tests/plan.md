@@ -1286,7 +1286,7 @@ git add internal/equivalence/fixture.go internal/equivalence/fixture_test.go tes
 git commit -m "test(equivalence): fixture model + metal-operator fixture"
 ```
 
-- [ ] Task 9 complete
+- [x] Task 9 complete
 
 ---
 
