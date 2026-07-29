@@ -1,9 +1,24 @@
-# Apply Handoff — equivalence-tests (paused mid-Task 7)
+# Apply Handoff — equivalence-tests
 
 **Branch:** `feat/equivalence-tests`
 **Worktree:** `/Users/D065300/IdeaProjects/sapcc/dual-deployment-operator/.worktrees/equivalence-tests`
 **Schema:** `sdd-plus-superpowers` — apply sequence (Step 2a subagent-driven-development).
-**Paused:** 2026-07-29, mid Task 7.
+
+## UPDATE 2026-07-29 (resume 2): Tasks 7-9 done (option A), Task 10 in progress
+
+Decision A adopted: golden = render wrapper chart from git@SHA (clone + `helm dependency build` + `helm template`). VERIFIED working (82s network run).
+- Task 7 `golden_render.go` (git-source render) — commit `31822a4`, reviewed APPROVED.
+- SPDX headers added to all internal/equivalence/*.go — commits `cd1e9a8` + `9eb8378`.
+- Task 8 `operator_capture.go` — commit `2b97ddd`, verified.
+- Task 9 fixture model + metal-operator fixture (git-source shape) — commit `d4ceed4`, verified.
+- Task 10 harness `equivalence_test.go` WIP: fixed a STRUCTURAL bug found in triage — MR-unwrapped payloads were routed to SEED but must be SHOOT (design §3.5: managedresources/* = shoot-destined). `ClassifyGolden(docs, shootFromMR, opts)` + `UnwrapManagedResources -> (fromMR, passthrough, err)` now route MR payloads to shoot. Offline suite green; network TestEquivalence/metal-operator NOT yet green — needs fixture CALIBRATION (see below).
+
+### ⚠️ Task 10 calibration finding (needs decision)
+Triage pass 3 (seed/shoot inversion fixed) shows the operator (renders UPSTREAM metal-operator-core chart directly) and the golden (renders the -remote WRAPPER which disables most of upstream + substitutes pre-rendered managedresources/ + sapcc additions) emit substantially different object sets:
+- Operator EXTRA (upstream-only, not in wrapper): per-CRD `*-admin/editor/viewer-role` ClusterRoles, cert-manager Issuer/Certificate, metrics services/roles, upstream manager-role — all in shoot--cp--m-qa-de-1 ns.
+- Golden MISSING-on-operator (wrapper additions upstream doesn't emit): Ingress, NetworkPolicies, metal-registry Service, webhook-injector RBAC, remote-kubeconfig ConfigMap, macdb Secret, owner-info, token-rotate SA/RBAC.
+- Namespace mismatch: operator emits in shoot--cp--m-qa-de-1; golden additions are namespace-less or kube-system.
+Calibrating this to green = reproducing the wrapper's exact enable/disable value matrix + additions in the fixture CR, per operator. This is large and is the crux of the equivalence work — needs a decision on approach before burning more 90s network cycles.
 
 ## Progress: 6 of 12 tasks complete (committed + independently verified)
 

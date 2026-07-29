@@ -34,12 +34,21 @@ type Classified struct {
 	Shoot ObjectSet
 }
 
-// ClassifyGolden buckets rendered docs. Every manipulation is identity-gated:
-// unrecognized docs default to keep-and-compare (seed) and are never silently dropped.
-// NOTE: ManagedResource docs are discarded here; their Secret payloads are unwrapped
-// by UnwrapManagedResources (Task 6), which runs on the doc stream BEFORE this.
-func ClassifyGolden(docs []*unstructured.Unstructured, opts GoldenOpts) (Classified, error) {
+// ClassifyGolden buckets rendered docs into seed vs shoot sets, mirroring today's
+// chart delivery: ManagedResource-wrapped content (managedresources/*) and the
+// injector webhook-config are shoot-destined; chart templates are seed-destined.
+// shootFromMR carries the bare objects already unwrapped from ManagedResource
+// Secrets by UnwrapManagedResources — those are shoot-destined by construction.
+// Every manipulation is identity-gated; unrecognized docs default to seed
+// (keep-and-compare) and are never silently dropped.
+func ClassifyGolden(docs, shootFromMR []*unstructured.Unstructured, opts GoldenOpts) (Classified, error) {
 	out := Classified{Seed: ObjectSet{}, Shoot: ObjectSet{}}
+	for _, d := range shootFromMR {
+		if isExcluded(d, opts.Exclusions) {
+			continue
+		}
+		out.Shoot[KeyOf(d)] = d
+	}
 	for _, d := range docs {
 		switch {
 		case isExcluded(d, opts.Exclusions):
@@ -117,11 +126,12 @@ func splitYAMLDocs(b []byte) ([]*unstructured.Unstructured, error) {
 	return out, nil
 }
 
-// UnwrapManagedResources replaces each ManagedResource + its paired Secret(s)
-// with the bare objects encoded in Secret.data["objects.yaml"]. Docs that are
-// neither MRs nor MR-referenced Secrets pass through unchanged (identity-gated).
-// Errors from base64 or YAML decoding are surfaced, never silently dropped.
-func UnwrapManagedResources(docs []*unstructured.Unstructured) ([]*unstructured.Unstructured, error) {
+// UnwrapManagedResources separates a rendered doc stream into the bare objects
+// carried inside ManagedResource Secrets (fromMR — shoot-destined by
+// construction) and the remaining pass-through docs (chart templates). The
+// wrapper ManagedResource + its referenced Secret(s) are dropped. Errors from
+// base64 or YAML decoding are surfaced, never silently dropped.
+func UnwrapManagedResources(docs []*unstructured.Unstructured) (fromMR, passthrough []*unstructured.Unstructured, err error) {
 	secretsByName := map[string]*unstructured.Unstructured{}
 	for _, d := range docs {
 		if d.GetKind() == "Secret" {
@@ -129,9 +139,7 @@ func UnwrapManagedResources(docs []*unstructured.Unstructured) ([]*unstructured.
 		}
 	}
 	referenced := map[string]bool{}
-	var out []*unstructured.Unstructured
 
-	// First pass: expand each ManagedResource's referenced Secret payloads.
 	for _, d := range docs {
 		if !isManagedResource(d) {
 			continue
@@ -149,20 +157,18 @@ func UnwrapManagedResources(docs []*unstructured.Unstructured) ([]*unstructured.
 			}
 			referenced[name] = true
 			enc, _, _ := unstructured.NestedString(sec.Object, "data", "objects.yaml")
-			raw, err := base64.StdEncoding.DecodeString(enc)
-			if err != nil {
-				return nil, fmt.Errorf("equivalence: decode MR secret %q objects.yaml: %w", name, err)
+			raw, decErr := base64.StdEncoding.DecodeString(enc)
+			if decErr != nil {
+				return nil, nil, fmt.Errorf("equivalence: decode MR secret %q objects.yaml: %w", name, decErr)
 			}
-			objs, err := splitYAMLDocs(raw)
-			if err != nil {
-				return nil, fmt.Errorf("equivalence: split MR secret %q payload: %w", name, err)
+			objs, splitErr := splitYAMLDocs(raw)
+			if splitErr != nil {
+				return nil, nil, fmt.Errorf("equivalence: split MR secret %q payload: %w", name, splitErr)
 			}
-			out = append(out, objs...)
+			fromMR = append(fromMR, objs...)
 		}
 	}
 
-	// Second pass: pass through everything that is neither an MR nor an
-	// MR-referenced Secret.
 	for _, d := range docs {
 		if isManagedResource(d) {
 			continue
@@ -170,7 +176,7 @@ func UnwrapManagedResources(docs []*unstructured.Unstructured) ([]*unstructured.
 		if d.GetKind() == "Secret" && referenced[d.GetName()] {
 			continue
 		}
-		out = append(out, d)
+		passthrough = append(passthrough, d)
 	}
-	return out, nil
+	return fromMR, passthrough, nil
 }

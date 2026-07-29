@@ -19,33 +19,38 @@ func TestUnwrapManagedResourcesEmitsBareObjects(t *testing.T) {
 	mr := obj("resources.gardener.cloud/v1alpha1", "ManagedResource", "mr-crd-endpoints")
 	_ = unstructured.SetNestedSlice(mr.Object, []interface{}{map[string]interface{}{"name": "mr-crd-endpoints"}}, "spec", "secretRefs")
 
-	docs, err := UnwrapManagedResources([]*unstructured.Unstructured{mr, sec})
+	fromMR, passthrough, err := UnwrapManagedResources([]*unstructured.Unstructured{mr, sec})
 	if err != nil {
 		t.Fatalf("UnwrapManagedResources: %v", err)
 	}
 
 	var foundCRD bool
-	for _, d := range docs {
+	for _, d := range fromMR {
 		if d.GetKind() == "CustomResourceDefinition" && d.GetName() == "endpoints.metal" {
 			foundCRD = true
 		}
+	}
+	if !foundCRD {
+		t.Error("bare CRD must be emitted from the MR's paired Secret into fromMR")
+	}
+	for _, d := range append(fromMR, passthrough...) {
 		if d.GetKind() == "ManagedResource" || (d.GetKind() == "Secret" && d.GetName() == "mr-crd-endpoints") {
 			t.Errorf("wrapper %s/%s must be discarded", d.GetKind(), d.GetName())
 		}
-	}
-	if !foundCRD {
-		t.Error("bare CRD must be emitted from the MR's paired Secret")
 	}
 }
 
 func TestUnwrapManagedResourcesPassesThroughUnrelated(t *testing.T) {
 	// A plain object with no MR present must pass through untouched (identity-gated no-op).
 	dep := obj("apps/v1", "Deployment", "controller-manager")
-	docs, err := UnwrapManagedResources([]*unstructured.Unstructured{dep})
+	fromMR, passthrough, err := UnwrapManagedResources([]*unstructured.Unstructured{dep})
 	if err != nil {
 		t.Fatalf("UnwrapManagedResources: %v", err)
 	}
-	if len(docs) != 1 || docs[0].GetName() != "controller-manager" {
-		t.Errorf("unrelated doc must pass through unchanged; got %d docs", len(docs))
+	if len(fromMR) != 0 {
+		t.Errorf("no MR present, so fromMR must be empty; got %d", len(fromMR))
+	}
+	if len(passthrough) != 1 || passthrough[0].GetName() != "controller-manager" {
+		t.Errorf("unrelated doc must pass through unchanged; got %d docs", len(passthrough))
 	}
 }

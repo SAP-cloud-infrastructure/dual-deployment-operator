@@ -27,7 +27,7 @@ func TestClassifyUnwrapsInjectorConfigMapOnly(t *testing.T) {
 	appCM := obj("v1", "ConfigMap", "dns-record-template") // non-injector, must pass through
 
 	docs := []*unstructured.Unstructured{injector, appCM}
-	res, err := ClassifyGolden(docs, GoldenOpts{ChartFullname: "metal-operator-remote"})
+	res, err := ClassifyGolden(docs, nil, GoldenOpts{ChartFullname: "metal-operator-remote"})
 	if err != nil {
 		t.Fatalf("ClassifyGolden: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestClassifyUnwrapsInjectorConfigMapOnly(t *testing.T) {
 func TestClassifyNoInjectorConfigMapIsNoOp(t *testing.T) {
 	// A ConfigMap that is NOT the injector one (wrong sole-key) must be untouched.
 	appCM := obj("v1", "ConfigMap", "boot-operator-remote-webhook-config-lookalike")
-	res, err := ClassifyGolden([]*unstructured.Unstructured{appCM}, GoldenOpts{ChartFullname: "boot-operator-remote"})
+	res, err := ClassifyGolden([]*unstructured.Unstructured{appCM}, nil, GoldenOpts{ChartFullname: "boot-operator-remote"})
 	if err != nil {
 		t.Fatalf("ClassifyGolden: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestClassifyNoInjectorConfigMapIsNoOp(t *testing.T) {
 
 func TestClassifyExcludesByKindAndName(t *testing.T) {
 	owner := obj("v1", "ConfigMap", "owner-info")
-	res, err := ClassifyGolden([]*unstructured.Unstructured{owner}, GoldenOpts{
+	res, err := ClassifyGolden([]*unstructured.Unstructured{owner}, nil, GoldenOpts{
 		ChartFullname: "metal-operator-remote",
 		Exclusions:    []ExclusionEntry{{Kind: "ConfigMap", Name: "owner-info"}},
 	})
@@ -75,7 +75,7 @@ func TestClassifyInjectorConfigMapLeadingSeparatorAndCRLF(t *testing.T) {
 	payload := "---\r\napiVersion: admissionregistration.k8s.io/v1\r\nkind: ValidatingWebhookConfiguration\r\nmetadata:\r\n  name: vwc1\r\n---\r\napiVersion: admissionregistration.k8s.io/v1\r\nkind: MutatingWebhookConfiguration\r\nmetadata:\r\n  name: mwc1\r\n"
 	_ = unstructured.SetNestedField(injector.Object, payload, "data", "webhooks.yaml")
 
-	res, err := ClassifyGolden([]*unstructured.Unstructured{injector}, GoldenOpts{ChartFullname: "metal-operator-remote"})
+	res, err := ClassifyGolden([]*unstructured.Unstructured{injector}, nil, GoldenOpts{ChartFullname: "metal-operator-remote"})
 	if err != nil {
 		t.Fatalf("ClassifyGolden: %v", err)
 	}

@@ -1,4 +1,9 @@
 # Representative per-cluster overlay (cc/kube-secrets shape for one chosen shoot).
+# global.region is required by the wrapper chart's managedresources/*.yaml
+# templates (RBAC group selection via `contains "qa-de-" .Values.global.region`);
+# the deploy-time cc/kube-secrets overlay always supplies it.
+global:
+  region: qa-de-1
 controllerManager:
   manager:
     env:
