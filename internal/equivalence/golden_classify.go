@@ -2,9 +2,12 @@ package equivalence
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
+	"io"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"sigs.k8s.io/yaml"
+	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 )
 
 // GoldenOpts drives identity-gated classification.
@@ -29,7 +32,7 @@ type Classified struct {
 // unrecognized docs default to keep-and-compare (seed) and are never silently dropped.
 // NOTE: ManagedResource docs are discarded here; their Secret payloads are unwrapped
 // by UnwrapManagedResources (Task 6), which runs on the doc stream BEFORE this.
-func ClassifyGolden(docs []*unstructured.Unstructured, opts GoldenOpts) Classified {
+func ClassifyGolden(docs []*unstructured.Unstructured, opts GoldenOpts) (Classified, error) {
 	out := Classified{Seed: ObjectSet{}, Shoot: ObjectSet{}}
 	for _, d := range docs {
 		switch {
@@ -38,14 +41,18 @@ func ClassifyGolden(docs []*unstructured.Unstructured, opts GoldenOpts) Classifi
 		case isManagedResource(d):
 			continue
 		case isInjectorConfigMap(d, opts.ChartFullname):
-			for _, wh := range decodeWebhooks(d) {
+			whs, err := decodeWebhooks(d)
+			if err != nil {
+				return Classified{}, fmt.Errorf("equivalence: unwrap injector ConfigMap %q: %w", d.GetName(), err)
+			}
+			for _, wh := range whs {
 				out.Shoot[KeyOf(wh)] = wh
 			}
 		default:
 			out.Seed[KeyOf(d)] = d
 		}
 	}
-	return out
+	return out, nil
 }
 
 func isExcluded(u *unstructured.Unstructured, ex []ExclusionEntry) bool {
@@ -76,23 +83,30 @@ func isInjectorConfigMap(u *unstructured.Unstructured, fullname string) bool {
 	return ok
 }
 
-func decodeWebhooks(u *unstructured.Unstructured) []*unstructured.Unstructured {
+func decodeWebhooks(u *unstructured.Unstructured) ([]*unstructured.Unstructured, error) {
 	raw, _, _ := unstructured.NestedString(u.Object, "data", "webhooks.yaml")
 	return splitYAMLDocs([]byte(raw))
 }
 
-// splitYAMLDocs parses a multi-doc YAML string into objects.
-func splitYAMLDocs(b []byte) []*unstructured.Unstructured {
+// splitYAMLDocs parses a multi-doc YAML stream into objects. It handles leading
+// "---", CRLF, and trailing-space separators via a real streaming decoder, and
+// surfaces decode errors rather than silently dropping documents.
+func splitYAMLDocs(b []byte) ([]*unstructured.Unstructured, error) {
+	dec := utilyaml.NewYAMLOrJSONDecoder(bytes.NewReader(b), 4096)
 	var out []*unstructured.Unstructured
-	for _, doc := range bytes.Split(b, []byte("\n---\n")) {
-		if len(bytes.TrimSpace(doc)) == 0 {
-			continue
-		}
+	for {
 		m := map[string]interface{}{}
-		if err := yaml.Unmarshal(doc, &m); err != nil || len(m) == 0 {
+		err := dec.Decode(&m)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("equivalence: decode YAML doc: %w", err)
+		}
+		if len(m) == 0 { // skip empty documents (e.g. leading ---, trailing ---)
 			continue
 		}
 		out = append(out, &unstructured.Unstructured{Object: m})
 	}
-	return out
+	return out, nil
 }
