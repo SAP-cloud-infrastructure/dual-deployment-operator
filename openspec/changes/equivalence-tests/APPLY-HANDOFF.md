@@ -4,6 +4,24 @@
 **Worktree:** `/Users/D065300/IdeaProjects/sapcc/dual-deployment-operator/.worktrees/equivalence-tests`
 **Schema:** `sdd-plus-superpowers` — apply sequence (Step 2a subagent-driven-development).
 
+## UPDATE 2026-07-29 (resume 3): 4/5 operators green; resolver fixed; ipam-capi blocked on a 2nd finding
+
+Decision B taken (fix production resolver). Progress:
+- gitresolver historical-SHA bug FIXED + regression test — commit `476bbb5`; documented (spec delta + design note) — commit `3019b6f`. `fetchSHA` no longer shallow; arbitrary historical SHAs resolve.
+- 4 of 5 operators GREEN + committed: metal-operator (`f6c0187`), khalkeon (`5c1077e`), boot-operator (`0f08b7f`), argora-operator (`7b8f88d`). Offline suite clean; full 4-op network suite passed (191s).
+- Scoped-equivalence machinery complete: `Scope{ComparedKinds, KnownDivergences, IgnoreLabels, CanonicalNamespace}`; global allowlist incl. helm.sh/resource-policy + app.kubernetes.io/instance.
+
+### ⛔ ipam-capi SECOND blocker (kustomize root-vs-subpath) — needs decision
+With the resolver fixed, the ipam feasibility probe got further and hit a NEW structural incompatibility: ipam-capi's kustomize overlays reference patch files by **repo-root-relative** paths, e.g. `manager/kustomization.yaml`:
+```
+patches:
+- path: kustomize/ipam-capi-remote/manager/manager-remote-patch.yaml
+```
+Today's `make build-ipam-capi-remote` runs kustomize **from the repo root**. But the operator's `KustomizeSource` model resolves the root to the `seedPath`/`shootPath` SUBDIR, so krusty looks for the patch at `<subpath>/kustomize/ipam-capi-remote/manager/...` — a doubled path → `no such file or directory`.
+- The `managedresources` (shoot) overlay IS self-contained (only remote `resources:` URLs, no local paths) — the shoot side alone would likely render.
+- The `manager` (seed) overlay is the blocker (repo-root-relative `patches[].path`).
+This is a design-level incompatibility between ipam-capi's kustomize layout and the operator's `KustomizeSource` `url`+`seedPath`/`shootPath` contract (design §9.4) — NOT a fixture-tuning or quick-fix item. Options: (i) extend KustomizeSource so the clone root and the kustomize-build dir can differ (build from repo root, target overlay dir) — a CRD/source change, real scope; (ii) shoot-only ipam equivalence (skip the seed/manager overlay) with a documented divergence; (iii) defer ipam-capi as a scoped follow-up and ship 4 operators now.
+
 ## UPDATE 2026-07-29 (resume 2): Tasks 7-9 done (option A), Task 10 in progress
 
 Decision A adopted: golden = render wrapper chart from git@SHA (clone + `helm dependency build` + `helm template`). VERIFIED working (82s network run).
