@@ -1373,7 +1373,7 @@ git add internal/equivalence/equivalence_test.go internal/equivalence/allowlist.
 git commit -m "test(equivalence): metal-operator end-to-end equivalence subtest (green)"
 ```
 
-- [ ] Task 10 complete
+- [x] Task 10 complete
 
 ---
 
