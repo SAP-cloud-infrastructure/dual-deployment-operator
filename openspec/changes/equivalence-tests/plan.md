@@ -997,7 +997,7 @@ git add internal/equivalence/golden_render.go internal/equivalence/golden_render
 git commit -m "test(equivalence): golden GHCR pull + helm template render"
 ```
 
-- [ ] Task 7 complete
+- [x] Task 7 complete
 
 ---
 
