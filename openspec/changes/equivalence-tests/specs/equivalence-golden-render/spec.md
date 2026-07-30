@@ -1,24 +1,27 @@
 ## ADDED Requirements
 
-### Requirement: Golden chart render from GHCR
+### Requirement: Golden chart render from git at a pinned SHA
 
 The equivalence harness SHALL produce the "golden" (today's chart) manifest stream
-for an operator by pulling the published `<operator>-remote` wrapper chart from GHCR
-(`oci://ghcr.io/sapcc/helm-charts/charts/<operator>-remote`) at a chart version
-pinned per fixture, and rendering it with `helm template` supplied with the
-per-operator **value baseline**: the wrapper chart's own `values.yaml` plus one
-named, representative per-cluster overlay (the `cc/kube-secrets`-shaped values for a
-single chosen shoot), recorded in the fixture. The pull MUST use the packaged chart
-(subchart dependencies vendored) so the golden render does not transitively pull any
-other registry (e.g. keppel for the `owner-info` dependency).
+for an operator by cloning the `sapcc/helm-charts` repository at a commit SHA pinned
+per fixture, running `helm dependency build` on the `<operator>-remote` wrapper chart
+subdirectory (resolving its subchart dependencies), and rendering it with
+`helm template` supplied with the per-operator **value baseline**: the wrapper
+chart's own `values.yaml` plus one named, representative per-cluster overlay (the
+`cc/kube-secrets`-shaped values for a single chosen shoot), recorded in the fixture.
 
-#### Scenario: Pull and render a pinned wrapper chart with the value baseline
+Rationale for git-source rather than a published OCI/GHCR chart: the `<operator>-remote`
+wrapper charts are not reliably published to / anonymously pullable from GHCR (tags
+are absent or unpredictable because the publish workflow only pushes charts changed in
+a given run), so a pinned git SHA is the immutable, reproducible golden source.
 
-- **WHEN** the harness renders the golden stream for an operator whose fixture pins
-  chart version `V` and a representative per-cluster overlay
-- **THEN** it pulls `oci://ghcr.io/sapcc/helm-charts/charts/<operator>-remote` at
-  version `V`, runs `helm template` with the wrapper `values.yaml` plus the overlay,
-  and returns the rendered multi-document stream
+#### Scenario: Clone and render a pinned wrapper chart with the value baseline
+
+- **WHEN** the harness renders the golden stream for an operator whose fixture pins a
+  commit SHA and a representative per-cluster overlay
+- **THEN** it clones `sapcc/helm-charts` at that SHA, runs `helm dependency build` on
+  the `<operator>-remote` subdirectory, runs `helm template` with the wrapper
+  `values.yaml` plus the overlay, and returns the rendered multi-document stream
 
 #### Scenario: Per-cluster placeholders resolve via the overlay
 
@@ -28,17 +31,12 @@ other registry (e.g. keppel for the `owner-info` dependency).
   the same value carried into the operator render, rather than an unresolved
   placeholder
 
-#### Scenario: Missing or unreachable chart fails loudly
+#### Scenario: Missing or unresolvable pinned SHA fails loudly
 
-- **WHEN** the pinned chart version is absent from GHCR, or GHCR is unreachable
-- **THEN** the harness returns an error naming the chart and version, and the test
-  FAILS (it MUST NOT skip, silently pass, or fall back to a stale render)
-
-#### Scenario: Golden render is registry-isolated to GHCR
-
-- **WHEN** rendering the packaged chart
-- **THEN** no transitive pull to a non-GHCR registry is required to complete the
-  render (subchart dependencies are already vendored in the packaged chart)
+- **WHEN** the pinned commit SHA cannot be resolved on the remote, or the clone /
+  `helm dependency build` / `helm template` fails
+- **THEN** the harness returns an error identifying the operator and the failing step,
+  and the test FAILS (it MUST NOT skip, silently pass, or fall back to a stale render)
 
 ---
 
