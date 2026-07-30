@@ -21,9 +21,12 @@ func obj(apiVersion, kind, name string) *unstructured.Unstructured {
 
 func TestClassifyUnwrapsInjectorConfigMapOnly(t *testing.T) {
 	injector := obj("v1", "ConfigMap", "metal-operator-remote-webhook-config")
-	_ = unstructured.SetNestedField(injector.Object,
+	err := unstructured.SetNestedField(injector.Object,
 		"apiVersion: admissionregistration.k8s.io/v1\nkind: ValidatingWebhookConfiguration\nmetadata:\n  name: vwc\n",
 		"data", "webhooks.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
 	appCM := obj("v1", "ConfigMap", "dns-record-template") // non-injector, must pass through
 
 	docs := []*unstructured.Unstructured{injector, appCM}
@@ -73,7 +76,10 @@ func TestClassifyInjectorConfigMapLeadingSeparatorAndCRLF(t *testing.T) {
 	injector := obj("v1", "ConfigMap", "metal-operator-remote-webhook-config")
 	// Leading "---", CRLF endings, and two docs — the brittle splitter would drop the first.
 	payload := "---\r\napiVersion: admissionregistration.k8s.io/v1\r\nkind: ValidatingWebhookConfiguration\r\nmetadata:\r\n  name: vwc1\r\n---\r\napiVersion: admissionregistration.k8s.io/v1\r\nkind: MutatingWebhookConfiguration\r\nmetadata:\r\n  name: mwc1\r\n"
-	_ = unstructured.SetNestedField(injector.Object, payload, "data", "webhooks.yaml")
+	err := unstructured.SetNestedField(injector.Object, payload, "data", "webhooks.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	res, err := ClassifyGolden([]*unstructured.Unstructured{injector}, nil, GoldenOpts{ChartFullname: "metal-operator-remote"})
 	if err != nil {

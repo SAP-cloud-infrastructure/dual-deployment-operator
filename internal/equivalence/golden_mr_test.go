@@ -15,9 +15,15 @@ import (
 func TestUnwrapManagedResourcesEmitsBareObjects(t *testing.T) {
 	crdYAML := "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: endpoints.metal\n"
 	sec := obj("v1", "Secret", "mr-crd-endpoints")
-	_ = unstructured.SetNestedField(sec.Object, base64.StdEncoding.EncodeToString([]byte(crdYAML)), "data", "objects.yaml")
+	err := unstructured.SetNestedField(sec.Object, base64.StdEncoding.EncodeToString([]byte(crdYAML)), "data", "objects.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
 	mr := obj("resources.gardener.cloud/v1alpha1", "ManagedResource", "mr-crd-endpoints")
-	_ = unstructured.SetNestedSlice(mr.Object, []any{map[string]any{"name": "mr-crd-endpoints"}}, "spec", "secretRefs")
+	err = unstructured.SetNestedSlice(mr.Object, []any{map[string]any{"name": "mr-crd-endpoints"}}, "spec", "secretRefs")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	fromMR, passthrough, err := UnwrapManagedResources([]*unstructured.Unstructured{mr, sec})
 	if err != nil {

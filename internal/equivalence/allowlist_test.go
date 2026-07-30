@@ -26,7 +26,10 @@ func TestStripAllowlistRemovesProvenanceAndInternalLabels(t *testing.T) {
 		},
 	}}
 	StripAllowlist(u)
-	labels, _, _ := unstructured.NestedStringMap(u.Object, "metadata", "labels")
+	labels, _, err := unstructured.NestedStringMap(u.Object, "metadata", "labels")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := labels["helm.sh/chart"]; ok {
 		t.Error("helm.sh/chart should be stripped")
 	}

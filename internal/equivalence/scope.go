@@ -77,13 +77,16 @@ func (s Scope) canonicalizeNamespace(u *unstructured.Unstructured) *unstructured
 		c = u.DeepCopy()
 		c.SetNamespace(s.CanonicalNamespace)
 	}
-	subjects, found, _ := unstructured.NestedSlice(c.Object, "subjects")
-	if !found {
+	subjects, found, err := unstructured.NestedSlice(c.Object, "subjects")
+	if err != nil || !found {
 		return c
 	}
 	if c == u {
 		c = u.DeepCopy()
-		subjects, _, _ = unstructured.NestedSlice(c.Object, "subjects")
+		subjects, _, err = unstructured.NestedSlice(c.Object, "subjects")
+		if err != nil {
+			return c
+		}
 	}
 	changed := false
 	for i, raw := range subjects {
@@ -98,7 +101,9 @@ func (s Scope) canonicalizeNamespace(u *unstructured.Unstructured) *unstructured
 		}
 	}
 	if changed {
-		_ = unstructured.SetNestedSlice(c.Object, subjects, "subjects")
+		if err := unstructured.SetNestedSlice(c.Object, subjects, "subjects"); err != nil {
+			return c
+		}
 	}
 	return c
 }
@@ -107,8 +112,8 @@ func (s Scope) stripIgnoredLabels(u *unstructured.Unstructured) *unstructured.Un
 	if len(s.IgnoreLabels) == 0 {
 		return u
 	}
-	labels, found, _ := unstructured.NestedMap(u.Object, "metadata", "labels")
-	if !found {
+	labels, found, err := unstructured.NestedMap(u.Object, "metadata", "labels")
+	if err != nil || !found {
 		return u
 	}
 	c := u.DeepCopy()
@@ -118,7 +123,9 @@ func (s Scope) stripIgnoredLabels(u *unstructured.Unstructured) *unstructured.Un
 	if len(labels) == 0 {
 		unstructured.RemoveNestedField(c.Object, "metadata", "labels")
 	} else {
-		_ = unstructured.SetNestedMap(c.Object, labels, "metadata", "labels")
+		if err := unstructured.SetNestedMap(c.Object, labels, "metadata", "labels"); err != nil {
+			return u
+		}
 	}
 	return c
 }

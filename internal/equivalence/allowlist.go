@@ -28,8 +28,8 @@ func StripAllowlist(u *unstructured.Unstructured) {
 }
 
 func stripKeys(u *unstructured.Unstructured, path ...string) {
-	m, found, _ := unstructured.NestedMap(u.Object, path...)
-	if !found {
+	m, found, err := unstructured.NestedMap(u.Object, path...)
+	if err != nil || !found {
 		return
 	}
 	for _, k := range allowlistedLabelKeys {
@@ -39,5 +39,7 @@ func stripKeys(u *unstructured.Unstructured, path ...string) {
 		unstructured.RemoveNestedField(u.Object, path...)
 		return
 	}
-	_ = unstructured.SetNestedMap(u.Object, m, path...)
+	if err := unstructured.SetNestedMap(u.Object, m, path...); err != nil {
+		return
+	}
 }

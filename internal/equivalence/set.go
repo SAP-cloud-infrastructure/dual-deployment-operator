@@ -26,7 +26,10 @@ func KeyOf(u *unstructured.Unstructured) ResourceKey {
 
 // schemaGVK parses an apiVersion+kind into a GroupVersionKind.
 func schemaGVK(apiVersion, kind string) schema.GroupVersionKind {
-	gv, _ := schema.ParseGroupVersion(apiVersion)
+	gv, err := schema.ParseGroupVersion(apiVersion)
+	if err != nil {
+		return schema.GroupVersionKind{}
+	}
 	return gv.WithKind(kind)
 }
 

@@ -21,7 +21,10 @@ func TestNormalizeDropsEmptyAnnotationsMap(t *testing.T) {
 		},
 	}}
 	Normalize(u)
-	md, _, _ := unstructured.NestedMap(u.Object, "metadata")
+	md, _, err := unstructured.NestedMap(u.Object, "metadata")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := md["annotations"]; ok {
 		t.Fatal("empty annotations map should be dropped by Normalize")
 	}

@@ -17,7 +17,7 @@ import (
 // CaptureOperator drives the operator's render+transform pipeline for both modes
 // and returns the seed and shoot object sets, captured before the delivery layer.
 // It runs NO reconciler, envtest, or delivery applier.
-func CaptureOperator(ctx context.Context, cr *v1alpha1.DualDeploymentOperator, deps source.Deps) (ObjectSet, ObjectSet, error) {
+func CaptureOperator(ctx context.Context, cr *v1alpha1.DualDeploymentOperator, deps source.Deps) (seedSet, shootSet ObjectSet, err error) {
 	src, err := source.From(cr.Spec.Source, deps)
 	if err != nil {
 		return nil, nil, fmt.Errorf("capture: source.From: %w", err)

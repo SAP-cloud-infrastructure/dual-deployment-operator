@@ -12,20 +12,20 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-func cm(name, key, val string) *unstructured.Unstructured {
+func cm(name, val string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1", "kind": "ConfigMap",
 		"metadata": map[string]any{"name": name, "namespace": "ns"},
-		"data":     map[string]any{key: val},
+		"data":     map[string]any{"k": val},
 	}}
 }
 
 func TestCompareReportsFieldDiffAndMissing(t *testing.T) {
 	golden := ObjectSet{}
 	op := ObjectSet{}
-	g1 := cm("a", "k", "v1")
-	o1 := cm("a", "k", "v2") // field diff
-	g2 := cm("b", "k", "v")  // only in golden -> missing on operator side
+	g1 := cm("a", "v1")
+	o1 := cm("a", "v2") // field diff
+	g2 := cm("b", "v")  // only in golden -> missing on operator side
 	golden[KeyOf(g1)] = g1
 	golden[KeyOf(g2)] = g2
 	op[KeyOf(o1)] = o1
@@ -70,8 +70,8 @@ func TestCompareCABundleAbsentBothSidesEqual(t *testing.T) {
 func TestCompareReportsDifferingFieldPath(t *testing.T) {
 	golden := ObjectSet{}
 	op := ObjectSet{}
-	g := cm("a", "k", "v1")
-	o := cm("a", "k", "v2")
+	g := cm("a", "v1")
+	o := cm("a", "v2")
 	golden[KeyOf(g)] = g
 	op[KeyOf(o)] = o
 

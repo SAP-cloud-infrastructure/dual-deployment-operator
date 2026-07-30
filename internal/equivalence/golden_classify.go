@@ -90,8 +90,8 @@ func isInjectorConfigMap(u *unstructured.Unstructured, fullname string) bool {
 	if u.GetKind() != "ConfigMap" || u.GetName() != fullname+"-webhook-config" {
 		return false
 	}
-	data, found, _ := unstructured.NestedMap(u.Object, "data")
-	if !found || len(data) != 1 {
+	data, found, err := unstructured.NestedMap(u.Object, "data")
+	if err != nil || !found || len(data) != 1 {
 		return false
 	}
 	_, ok := data["webhooks.yaml"]
@@ -99,7 +99,10 @@ func isInjectorConfigMap(u *unstructured.Unstructured, fullname string) bool {
 }
 
 func decodeWebhooks(u *unstructured.Unstructured) ([]*unstructured.Unstructured, error) {
-	raw, _, _ := unstructured.NestedString(u.Object, "data", "webhooks.yaml")
+	raw, _, err := unstructured.NestedString(u.Object, "data", "webhooks.yaml")
+	if err != nil {
+		return nil, err
+	}
 	return splitYAMLDocs([]byte(raw))
 }
 
@@ -144,7 +147,10 @@ func UnwrapManagedResources(docs []*unstructured.Unstructured) (fromMR, passthro
 		if !isManagedResource(d) {
 			continue
 		}
-		refs, _, _ := unstructured.NestedSlice(d.Object, "spec", "secretRefs")
+		refs, _, err := unstructured.NestedSlice(d.Object, "spec", "secretRefs")
+		if err != nil {
+			return nil, nil, err
+		}
 		for _, r := range refs {
 			m, ok := r.(map[string]any)
 			if !ok {
@@ -156,7 +162,10 @@ func UnwrapManagedResources(docs []*unstructured.Unstructured) (fromMR, passthro
 				continue
 			}
 			referenced[name] = true
-			enc, _, _ := unstructured.NestedString(sec.Object, "data", "objects.yaml")
+			enc, _, err := unstructured.NestedString(sec.Object, "data", "objects.yaml")
+			if err != nil {
+				return nil, nil, err
+			}
 			raw, decErr := base64.StdEncoding.DecodeString(enc)
 			if decErr != nil {
 				return nil, nil, fmt.Errorf("equivalence: decode MR secret %q objects.yaml: %w", name, decErr)
