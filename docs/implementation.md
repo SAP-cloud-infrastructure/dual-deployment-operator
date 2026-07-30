@@ -1430,7 +1430,12 @@ The `--chart-cache-dir` / `--chart-cache-cap-mb` (or unified `--source-cache-*`)
 > side renders the disabling `-remote` wrapper). Golden side renders the wrapper from
 > `sapcc/helm-charts` git at a pinned SHA (`git clone` + `helm dependency build` +
 > `helm template`); operator side drives `source.From → Render → transform.Build → Apply`.
-> Harness + fixtures in `internal/equivalence/` and `testdata/fixtures/<op>/`.
+> Harness + fixtures in `internal/equivalence/` and `testdata/fixtures/<op>/`. The
+> per-operator subtests are **opt-in behind `RUN_EQUIVALENCE=1`** — the golden render's
+> `helm dependency build` pulls subcharts from the internal-only keppel OCI registry, which
+> public CI runners cannot reach, so they skip on public CI and run wherever that registry
+> is reachable (local dev, internal runners). The comparator's normalization/allowlist unit
+> tests always run offline.
 >
 > **`ipam-capi` equivalence is DEFERRED to a standalone future follow-up (not tied to any
 > phase).** It is not sequenced within the phase plan because closing it depends on a

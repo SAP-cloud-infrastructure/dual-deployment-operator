@@ -140,16 +140,21 @@ only and MUST NOT mask a real difference in any other field.
 ### Requirement: Per-operator equivalence subtests gate CI
 
 The equivalence suite SHALL run one subtest per operator (`metal-operator`,
-`boot-operator`, `argora-operator`, `khalkeon`, `ipam-capi`) as ordinary tests in the
-default test job — no build tag or environment gate — so equivalence gates every PR.
-The comparator's normalization and allowlist logic MUST additionally have offline
-unit tests that verify the machinery independent of network access.
+`boot-operator`, `argora-operator`, `khalkeon`, `ipam-capi`), each opt-in behind the
+`RUN_EQUIVALENCE` environment variable. When `RUN_EQUIVALENCE` is set, every subtest
+runs and a failure fails the run; when it is unset the suite skips. The gate is required
+because the golden render runs `helm dependency build`, which pulls subcharts from the
+internal-only keppel OCI registry that public CI runners cannot reach — so the suite gates
+CI wherever that registry is reachable (local dev, internal runners). The comparator's
+normalization and allowlist logic MUST additionally have offline unit tests that verify the
+machinery independent of network access (these always run).
 
 #### Scenario: Each operator runs as its own gating subtest
 
-- **WHEN** the equivalence suite runs in CI
-- **THEN** there is one subtest per operator, each executes in the default test job
-  without a build tag or env gate, and a failure in any subtest fails the PR
+- **WHEN** the equivalence suite runs with `RUN_EQUIVALENCE` set
+- **THEN** there is one subtest per operator, each executes and a failure in any subtest
+  fails the run
+- **AND WHEN** `RUN_EQUIVALENCE` is unset, the suite skips instead of failing
 
 #### Scenario: Comparator machinery is unit-tested offline
 
