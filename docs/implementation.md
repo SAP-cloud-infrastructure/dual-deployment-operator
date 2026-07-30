@@ -1423,6 +1423,33 @@ The `--chart-cache-dir` / `--chart-cache-cap-mb` (or unified `--source-cache-*`)
 
 ## Phase 8: Equivalence tests (~1 week)
 
+> **Status (2026-07):** SHIPPED for the four Helm-sourced operators — `metal-operator`,
+> `boot-operator`, `argora-operator`, `khalkeon` — via scoped equivalence (Decision B:
+> compare the delivered kinds — CRDs/RBAC/WebhookConfigs — with a per-fixture
+> known-divergence list, since the operator renders the upstream chart while the golden
+> side renders the disabling `-remote` wrapper). Golden side renders the wrapper from
+> `sapcc/helm-charts` git at a pinned SHA (`git clone` + `helm dependency build` +
+> `helm template`); operator side drives `source.From → Render → transform.Build → Apply`.
+> Harness + fixtures in `internal/equivalence/` and `testdata/fixtures/<op>/`.
+>
+> **`ipam-capi` equivalence is DEFERRED to a scoped follow-up, sequenced AFTER Phase 9
+> (Helm chart phase).** Two ipam-capi-specific blockers surfaced (the first fixed here,
+> the second deferred):
+> 1. *Fixed in this change:* the production git `RootResolver` (`fetchSHA`) used a
+>    `Depth: 1` shallow fetch and could not check out an arbitrary historical commit
+>    SHA — see the `kustomize-root-resolver` spec delta + `TestGitResolverResolvesHistoricalSHA`.
+> 2. *Deferred:* ipam-capi's kustomize overlays reference patch files by
+>    **repo-root-relative** paths (`patches[].path: kustomize/ipam-capi-remote/manager/…`),
+>    so today's `make build-` runs kustomize from the repo root. The operator's
+>    `KustomizeSource` (`url` + `seedPath`/`shootPath`) resolves the build dir to the
+>    overlay **subdir**, so those relative patch paths double and the seed/`manager`
+>    overlay fails to build (`no such file`). Closing ipam-capi equivalence requires
+>    extending `KustomizeSource` so the clone root and the kustomize-build dir can differ
+>    (build from the repo root, target the overlay) — a CRD + source change (design §9.4),
+>    hence its own follow-up rather than part of the equivalence-tests change. The
+>    `managedresources`/shoot overlay is self-contained and would render; only the
+>    seed overlay is blocked.
+
 Fixtures directory:
 
 ```
