@@ -11,6 +11,7 @@ import (
 )
 
 func TestGoldenRenderMetalOperatorFromGit(t *testing.T) {
+	requireEquivalenceEnabled(t)
 	docs, err := RenderGolden(context.Background(), GoldenRenderReq{
 		RepoURL:   "https://github.com/sapcc/helm-charts.git",
 		SHA:       "33e68278ace26fe23e0c2b36a9266a58c9b47707",

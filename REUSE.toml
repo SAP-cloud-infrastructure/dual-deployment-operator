@@ -54,6 +54,7 @@ path = [
   "docs/**",
   "hack/**",
   "internal/source/testdata/**",
+  "testdata/**",
   "openspec/**",
   "qodana.yaml",
   ".devcontainer/**",
