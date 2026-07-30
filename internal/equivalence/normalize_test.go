@@ -1,0 +1,31 @@
+// SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company
+// Copyright 2026.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package equivalence
+
+import (
+	"testing"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+)
+
+func TestNormalizeDropsEmptyAnnotationsMap(t *testing.T) {
+	u := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]any{
+			"name":        "x",
+			"annotations": map[string]any{},
+		},
+	}}
+	Normalize(u)
+	md, _, err := unstructured.NestedMap(u.Object, "metadata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := md["annotations"]; ok {
+		t.Fatal("empty annotations map should be dropped by Normalize")
+	}
+}

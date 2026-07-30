@@ -1,0 +1,30 @@
+apiVersion: dual-deployment-operator.cc.sap/v1alpha1
+kind: DualDeploymentOperator
+metadata:
+  name: metal-operator-remote
+  namespace: shoot--cp--m-qa-de-1
+spec:
+  shootNamespace: kube-system
+  source:
+    helm:
+      repo: oci://ghcr.io/ironcore-dev/charts
+      name: metal-operator
+      version: 0.6.2-crds
+      shootValues:
+        controllerManager: {enable: false}
+        rbac: {enable: true}
+        crd: {enable: true}
+        webhook: {enable: true}
+        certmanager: {enable: false}
+      seedValues:
+        controllerManager: {enable: true}
+        rbac: {enable: false}
+        crd: {enable: false}
+        webhook: {enable: false}
+        certmanager: {enable: false}
+  shootAccess:
+    secretName: metal-operator-remote-kubeconfig
+    server: https://api.m-qa-de-1.internal
+  transformations:
+    - rewriteWebhookURL:
+        urlPrefix: "https://metal-operator-remote-webhook-service:443"

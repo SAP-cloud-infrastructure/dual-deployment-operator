@@ -1,0 +1,41 @@
+operator: khalkeon
+chartFullname: khalkeon-remote
+repoURL: https://github.com/sapcc/helm-charts.git
+sha: 33e68278ace26fe23e0c2b36a9266a58c9b47707
+chartPath: system/khalkeon-remote
+overlayValues: overlay-values.yaml
+cr: cr.yaml
+# canonicalNamespace neutralizes a namespace-only divergence: khalkeon's committed
+# managedresources/ pre-render hardcodes namespace "default" on the SA + RBAC
+# subjects, but the real shoot (per the token-requestor annotation) and the
+# operator both use kube-system. Canonicalize placement to kube-system so this
+# stale-golden namespace does not mask genuine drift.
+canonicalNamespace: kube-system
+# comparedKinds scopes the equivalence assertion (Decision B) to the resource
+# kinds both the operator (upstream chart) and today's -remote wrapper deliver.
+comparedKinds:
+  - CustomResourceDefinition
+  - ClusterRole
+  - ClusterRoleBinding
+  - Role
+  - RoleBinding
+  - ServiceAccount
+exclusions:
+  - kind: ConfigMap
+    name: owner-info
+    reason: "owner-info subchart output; operator render emits no equivalent"
+# knownDivergences: leader-election is delivered by the wrapper as a ClusterRole
+# but the operator (r7, no renameKind) keeps it a Role — a divergent kind pair.
+knownDivergences:
+  - kind: ClusterRole
+    name: khalkeon-leader-election-role
+    reason: "wrapper delivers leader-election as ClusterRole; operator keeps Role — divergent kind pair"
+  - kind: ClusterRoleBinding
+    name: khalkeon-leader-election-rolebinding
+    reason: "wrapper delivers leader-election binding as ClusterRoleBinding; operator keeps RoleBinding — divergent kind pair"
+  - kind: Role
+    name: khalkeon-leader-election-role
+    reason: "operator (r7) keeps leader-election as Role; wrapper delivers ClusterRole — divergent kind pair"
+  - kind: RoleBinding
+    name: khalkeon-leader-election-rolebinding
+    reason: "operator (r7) keeps leader-election binding as RoleBinding; wrapper delivers ClusterRoleBinding — divergent kind pair"

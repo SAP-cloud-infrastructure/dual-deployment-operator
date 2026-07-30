@@ -1,0 +1,30 @@
+apiVersion: dual-deployment-operator.cc.sap/v1alpha1
+kind: DualDeploymentOperator
+metadata:
+  name: argora-operator-remote
+  namespace: shoot--cp--m-qa-de-1
+spec:
+  shootNamespace: kube-system
+  source:
+    helm:
+      repo: oci://ghcr.io/sapcc/charts
+      name: argora
+      version: 0.0.1-20260713134824-2c3573c-crds
+      values:
+        fullnameOverride: argora-operator
+      shootValues:
+        manager: {enable: false}
+        rbac: {enable: true}
+        crd: {enable: true}
+        certmanager: {enable: false}
+      seedValues:
+        manager: {enable: true}
+        rbac: {enable: false}
+        crd: {enable: false}
+        certmanager: {enable: false}
+  shootAccess:
+    secretName: argora-operator-remote-kubeconfig
+    server: https://api.m-qa-de-1.internal
+  transformations:
+    - filterKinds:
+        kinds: [Service, ConfigMap, Secret]

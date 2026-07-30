@@ -1,0 +1,30 @@
+apiVersion: dual-deployment-operator.cc.sap/v1alpha1
+kind: DualDeploymentOperator
+metadata:
+  name: khalkeon-remote
+  namespace: shoot--cp--m-qa-de-1
+spec:
+  shootNamespace: kube-system
+  source:
+    helm:
+      repo: oci://ghcr.io/cobaltcore-dev/charts
+      name: khalkeon
+      version: 0.0.0-9c611ca-crds
+      shootValues:
+        controllerManager: {enable: false}
+        rbac: {enable: true}
+        crd: {enable: true}
+        webhook: {enable: false}
+        certmanager: {enable: false}
+      seedValues:
+        controllerManager: {enable: true}
+        rbac: {enable: false}
+        crd: {enable: false}
+        webhook: {enable: false}
+        certmanager: {enable: false}
+  shootAccess:
+    secretName: khalkeon-remote-kubeconfig
+    server: https://api.m-qa-de-1.internal
+  transformations:
+    - filterKinds:
+        kinds: [Service]

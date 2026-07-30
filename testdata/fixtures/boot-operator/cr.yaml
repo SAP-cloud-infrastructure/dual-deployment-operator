@@ -1,0 +1,36 @@
+apiVersion: dual-deployment-operator.cc.sap/v1alpha1
+kind: DualDeploymentOperator
+metadata:
+  name: boot-operator-remote
+  namespace: shoot--cp--m-qa-de-1
+spec:
+  shootNamespace: kube-system
+  source:
+    helm:
+      repo: oci://ghcr.io/ironcore-dev/charts
+      name: boot-operator
+      version: 0.2.1-20260612064329-eeeb577-crds
+      values:
+        fullnameOverride: boot-operator
+        controllerManager:
+          serviceAccountName: boot-operator-controller-manager
+      shootValues:
+        controllerManager: {enable: false}
+        rbac: {enable: true}
+        crd: {enable: true}
+        webhook: {enable: false}
+        certmanager: {enable: false}
+        metrics: {enable: true}
+      seedValues:
+        controllerManager: {enable: true}
+        rbac: {enable: false}
+        crd: {enable: false}
+        webhook: {enable: false}
+        certmanager: {enable: false}
+        metrics: {enable: false}
+  shootAccess:
+    secretName: boot-operator-remote-kubeconfig
+    server: https://api.m-qa-de-1.internal
+  transformations:
+    - filterKinds:
+        kinds: [Service]
