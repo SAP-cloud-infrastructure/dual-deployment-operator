@@ -1432,9 +1432,11 @@ The `--chart-cache-dir` / `--chart-cache-cap-mb` (or unified `--source-cache-*`)
 > `helm template`); operator side drives `source.From → Render → transform.Build → Apply`.
 > Harness + fixtures in `internal/equivalence/` and `testdata/fixtures/<op>/`.
 >
-> **`ipam-capi` equivalence is DEFERRED to a scoped follow-up, sequenced AFTER Phase 9
-> (Helm chart phase).** Two ipam-capi-specific blockers surfaced (the first fixed here,
-> the second deferred):
+> **`ipam-capi` equivalence is DEFERRED to a standalone future follow-up (not tied to any
+> phase).** It is not sequenced within the phase plan because closing it depends on a
+> `KustomizeSource` capability that is itself a separate CRD + source change; schedule it
+> independently once that extension exists. Two ipam-capi-specific blockers surfaced (the
+> first fixed here, the second deferred):
 > 1. *Fixed in this change:* the production git `RootResolver` (`fetchSHA`) used a
 >    `Depth: 1` shallow fetch and could not check out an arbitrary historical commit
 >    SHA — see the `kustomize-root-resolver` spec delta + `TestGitResolverResolvesHistoricalSHA`.
