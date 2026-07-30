@@ -71,8 +71,21 @@ func TestEquivalence(t *testing.T) {
 			// Scoped equivalence (Decision B): compare only the delivered kinds both
 			// sides are expected to produce, dropping per-fixture known divergences.
 			scope := Scope{ComparedKinds: f.ComparedKinds, KnownDivergences: f.KnownDivergences, IgnoreLabels: f.IgnoreLabels, CanonicalNamespace: f.CanonicalNamespace}
-			seedReport := Compare(scope.Apply(golden.Seed), scope.Apply(opSeed))
-			shootReport := Compare(scope.Apply(golden.Shoot), scope.Apply(opShoot))
+			goldenShoot, opShootScoped := scope.Apply(golden.Shoot), scope.Apply(opShoot)
+
+			// Non-vacuity floor: every operator delivers CRDs + RBAC to the shoot,
+			// so the scoped shoot sets must be non-empty. A fixture typo (bad
+			// comparedKinds, over-broad suppression) that empties both sides would
+			// otherwise pass a vacuous Compare — guard against that false green.
+			if len(goldenShoot) == 0 {
+				t.Fatalf("scoped golden shoot set is empty — fixture comparedKinds/scoping likely wrong")
+			}
+			if len(opShootScoped) == 0 {
+				t.Fatalf("scoped operator shoot set is empty — fixture CR/scoping likely wrong")
+			}
+
+			seedReport := scope.CompareScoped(scope.Apply(golden.Seed), scope.Apply(opSeed))
+			shootReport := scope.CompareScoped(goldenShoot, opShootScoped)
 			if !seedReport.Equal() {
 				t.Errorf("seed render mismatch:\n%s", seedReport.String())
 			}

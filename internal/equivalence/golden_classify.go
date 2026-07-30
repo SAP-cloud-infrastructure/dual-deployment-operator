@@ -159,12 +159,18 @@ func UnwrapManagedResources(docs []*unstructured.Unstructured) (fromMR, passthro
 			name, _ := m["name"].(string)
 			sec, ok := secretsByName[name]
 			if !ok {
-				continue
+				// A ManagedResource referencing a Secret not present in the
+				// render means the golden shoot set would be incomplete. Fail
+				// closed rather than silently drop the expected resources.
+				return nil, nil, fmt.Errorf("equivalence: MR %q references Secret %q not found in render", d.GetName(), name)
 			}
 			referenced[name] = true
-			enc, _, err := unstructured.NestedString(sec.Object, "data", "objects.yaml")
+			enc, found, err := unstructured.NestedString(sec.Object, "data", "objects.yaml")
 			if err != nil {
 				return nil, nil, err
+			}
+			if !found || enc == "" {
+				return nil, nil, fmt.Errorf("equivalence: MR secret %q has no non-empty data[objects.yaml]", name)
 			}
 			raw, decErr := base64.StdEncoding.DecodeString(enc)
 			if decErr != nil {

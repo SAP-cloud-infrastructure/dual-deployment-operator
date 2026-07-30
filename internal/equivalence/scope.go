@@ -7,6 +7,7 @@ package equivalence
 
 import (
 	"slices"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -39,26 +40,20 @@ func (s Scope) comparesKind(kind string) bool {
 	return slices.Contains(s.ComparedKinds, kind)
 }
 
-func (s Scope) isKnownDivergence(u *unstructured.Unstructured) bool {
-	for _, e := range s.KnownDivergences {
-		if u.GetKind() == e.Kind && u.GetName() == e.Name {
-			return true
-		}
-	}
-	return false
-}
-
-// Apply returns a copy of set containing only in-scope objects (compared kind,
-// not a known divergence), with per-fixture IgnoreLabels stripped and, when
-// CanonicalNamespace is set, namespace placement canonicalized. Objects are
-// re-keyed after namespace canonicalization so identity aligns across sides.
+// Apply returns a copy of set containing only in-scope objects (compared kind),
+// with per-fixture IgnoreLabels stripped and, when CanonicalNamespace is set,
+// namespace placement canonicalized. Objects are re-keyed after namespace
+// canonicalization so identity aligns across sides.
+//
+// Known-divergence objects are deliberately RETAINED here — they are NOT dropped
+// before comparison. Dropping them from both sides would let a both-sided object
+// with a genuine field difference vanish silently (false green). Suppression of
+// known divergences happens in CompareScoped, and ONLY for single-sided
+// missing/extra — never for a field mismatch on an object present on both sides.
 func (s Scope) Apply(set ObjectSet) ObjectSet {
 	out := ObjectSet{}
 	for _, u := range set {
 		if !s.comparesKind(u.GetKind()) {
-			continue
-		}
-		if s.isKnownDivergence(u) {
 			continue
 		}
 		obj := s.stripIgnoredLabels(u)
@@ -66,6 +61,49 @@ func (s Scope) Apply(set ObjectSet) ObjectSet {
 		out[KeyOf(obj)] = obj
 	}
 	return out
+}
+
+// CompareScoped runs Compare over the scoped golden/operator sets, then drops
+// ONLY the single-sided (missing/extra) findings whose object is a declared
+// known divergence. Field mismatches on both-sided objects are never suppressed,
+// so a known-divergence entry cannot hide real drift.
+func (s Scope) CompareScoped(golden, op ObjectSet) Report {
+	r := Compare(golden, op)
+	if len(s.KnownDivergences) == 0 {
+		return r
+	}
+	r.MissingOp = s.dropKnownDivergent(r.MissingOp)
+	r.ExtraOp = s.dropKnownDivergent(r.ExtraOp)
+	return r
+}
+
+// dropKnownDivergent removes entries whose displayKey names a known-divergence
+// kind+name. displayKey is "<apiVersion>/<kind>/<namespace>/<name>", so we match
+// on the kind (3rd-from-... ) and name (last) segments.
+func (s Scope) dropKnownDivergent(keys []string) []string {
+	out := keys[:0:0]
+	for _, k := range keys {
+		if !s.keyIsKnownDivergence(k) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+func (s Scope) keyIsKnownDivergence(displayKey string) bool {
+	parts := strings.Split(displayKey, "/")
+	if len(parts) < 4 {
+		return false
+	}
+	// parts: [apiVersionGroup..., kind, namespace, name] — kind is 2nd, name is last.
+	kind := parts[len(parts)-3]
+	name := parts[len(parts)-1]
+	for _, e := range s.KnownDivergences {
+		if e.Kind == kind && e.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (s Scope) canonicalizeNamespace(u *unstructured.Unstructured) *unstructured.Unstructured {

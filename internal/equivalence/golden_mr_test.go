@@ -60,3 +60,29 @@ func TestUnwrapManagedResourcesPassesThroughUnrelated(t *testing.T) {
 		t.Errorf("unrelated doc must pass through unchanged; got %d docs", len(passthrough))
 	}
 }
+
+func TestUnwrapManagedResourcesFailsOnMissingSecret(t *testing.T) {
+	mr := obj("resources.gardener.cloud/v1alpha1", "ManagedResource", "mr-orphan")
+	if err := unstructured.SetNestedSlice(mr.Object, []any{map[string]any{"name": "absent-secret"}}, "spec", "secretRefs"); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := UnwrapManagedResources([]*unstructured.Unstructured{mr})
+	if err == nil {
+		t.Fatal("MR referencing an absent Secret must fail closed (else golden shoot set silently incomplete)")
+	}
+}
+
+func TestUnwrapManagedResourcesFailsOnEmptyObjectsYAML(t *testing.T) {
+	sec := obj("v1", "Secret", "mr-empty")
+	if err := unstructured.SetNestedField(sec.Object, "", "data", "objects.yaml"); err != nil {
+		t.Fatal(err)
+	}
+	mr := obj("resources.gardener.cloud/v1alpha1", "ManagedResource", "mr-empty")
+	if err := unstructured.SetNestedSlice(mr.Object, []any{map[string]any{"name": "mr-empty"}}, "spec", "secretRefs"); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := UnwrapManagedResources([]*unstructured.Unstructured{mr, sec})
+	if err == nil {
+		t.Fatal("MR secret with empty data[objects.yaml] must fail closed")
+	}
+}
