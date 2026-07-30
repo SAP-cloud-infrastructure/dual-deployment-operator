@@ -1434,7 +1434,7 @@ git add internal/equivalence/equivalence_test.go testdata/fixtures/
 git commit -m "test(equivalence): fan out equivalence subtests to all five operators"
 ```
 
-- [ ] Task 11 complete
+- [x] Task 11 complete
 
 ---
 
