@@ -17,7 +17,7 @@ func TestUnwrapManagedResourcesEmitsBareObjects(t *testing.T) {
 	sec := obj("v1", "Secret", "mr-crd-endpoints")
 	_ = unstructured.SetNestedField(sec.Object, base64.StdEncoding.EncodeToString([]byte(crdYAML)), "data", "objects.yaml")
 	mr := obj("resources.gardener.cloud/v1alpha1", "ManagedResource", "mr-crd-endpoints")
-	_ = unstructured.SetNestedSlice(mr.Object, []interface{}{map[string]interface{}{"name": "mr-crd-endpoints"}}, "spec", "secretRefs")
+	_ = unstructured.SetNestedSlice(mr.Object, []any{map[string]any{"name": "mr-crd-endpoints"}}, "spec", "secretRefs")
 
 	fromMR, passthrough, err := UnwrapManagedResources([]*unstructured.Unstructured{mr, sec})
 	if err != nil {

@@ -12,12 +12,12 @@ import (
 )
 
 func TestNormalizeDropsEmptyAnnotationsMap(t *testing.T) {
-	u := &unstructured.Unstructured{Object: map[string]interface{}{
+	u := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1",
 		"kind":       "ConfigMap",
-		"metadata": map[string]interface{}{
+		"metadata": map[string]any{
 			"name":        "x",
-			"annotations": map[string]interface{}{},
+			"annotations": map[string]any{},
 		},
 	}}
 	Normalize(u)

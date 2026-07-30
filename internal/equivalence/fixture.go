@@ -10,8 +10,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/api/v1alpha1"
 	"sigs.k8s.io/yaml"
+
+	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/api/v1alpha1"
 )
 
 // Fixture pins one operator's equivalence inputs (design decision A: golden is

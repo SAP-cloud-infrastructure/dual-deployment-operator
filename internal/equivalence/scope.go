@@ -5,7 +5,11 @@
 
 package equivalence
 
-import "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+import (
+	"slices"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+)
 
 // Scope narrows the equivalence comparison per Decision B: only objects whose
 // kind is in ComparedKinds are compared, objects matching a KnownDivergence
@@ -32,12 +36,7 @@ func (s Scope) comparesKind(kind string) bool {
 	if len(s.ComparedKinds) == 0 {
 		return true
 	}
-	for _, k := range s.ComparedKinds {
-		if k == kind {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(s.ComparedKinds, kind)
 }
 
 func (s Scope) isKnownDivergence(u *unstructured.Unstructured) bool {
@@ -88,7 +87,7 @@ func (s Scope) canonicalizeNamespace(u *unstructured.Unstructured) *unstructured
 	}
 	changed := false
 	for i, raw := range subjects {
-		m, ok := raw.(map[string]interface{})
+		m, ok := raw.(map[string]any)
 		if !ok {
 			continue
 		}

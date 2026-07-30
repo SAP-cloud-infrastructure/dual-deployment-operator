@@ -12,12 +12,12 @@ import "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 // already normalized by Go map semantics + reflect.DeepEqual, so only empties
 // and nils are pruned here.
 func Normalize(u *unstructured.Unstructured) {
-	u.Object = pruneEmpties(u.Object).(map[string]interface{})
+	u.Object = pruneEmpties(u.Object).(map[string]any)
 }
 
-func pruneEmpties(v interface{}) interface{} {
+func pruneEmpties(v any) any {
 	switch t := v.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		for k, child := range t {
 			pruned := pruneEmpties(child)
 			if isEmpty(pruned) {
@@ -27,7 +27,7 @@ func pruneEmpties(v interface{}) interface{} {
 			t[k] = pruned
 		}
 		return t
-	case []interface{}:
+	case []any:
 		for i := range t {
 			t[i] = pruneEmpties(t[i])
 		}
@@ -37,11 +37,11 @@ func pruneEmpties(v interface{}) interface{} {
 	}
 }
 
-func isEmpty(v interface{}) bool {
+func isEmpty(v any) bool {
 	switch t := v.(type) {
 	case nil:
 		return true
-	case map[string]interface{}:
+	case map[string]any:
 		return len(t) == 0
 	default:
 		return false

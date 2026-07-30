@@ -46,7 +46,7 @@ func displayKey(u *unstructured.Unstructured) string {
 }
 
 // diffPaths recursively walks two normalized values and returns dotted paths where they differ.
-func diffPaths(a, b interface{}, prefix string) []string {
+func diffPaths(a, b any, prefix string) []string {
 	var paths []string
 
 	nextPath := func(key string) string {
@@ -57,8 +57,8 @@ func diffPaths(a, b interface{}, prefix string) []string {
 	}
 
 	switch ta := a.(type) {
-	case map[string]interface{}:
-		tb, ok := b.(map[string]interface{})
+	case map[string]any:
+		tb, ok := b.(map[string]any)
 		if !ok {
 			return []string{prefix}
 		}
@@ -86,8 +86,8 @@ func diffPaths(a, b interface{}, prefix string) []string {
 			}
 		}
 
-	case []interface{}:
-		tb, ok := b.([]interface{})
+	case []any:
+		tb, ok := b.([]any)
 		if !ok {
 			return []string{prefix}
 		}

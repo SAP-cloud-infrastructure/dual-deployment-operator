@@ -110,7 +110,7 @@ func splitYAMLDocs(b []byte) ([]*unstructured.Unstructured, error) {
 	dec := utilyaml.NewYAMLOrJSONDecoder(bytes.NewReader(b), 4096)
 	var out []*unstructured.Unstructured
 	for {
-		m := map[string]interface{}{}
+		m := map[string]any{}
 		err := dec.Decode(&m)
 		if errors.Is(err, io.EOF) {
 			break
@@ -146,7 +146,7 @@ func UnwrapManagedResources(docs []*unstructured.Unstructured) (fromMR, passthro
 		}
 		refs, _, _ := unstructured.NestedSlice(d.Object, "spec", "secretRefs")
 		for _, r := range refs {
-			m, ok := r.(map[string]interface{})
+			m, ok := r.(map[string]any)
 			if !ok {
 				continue
 			}

@@ -13,10 +13,10 @@ import (
 )
 
 func cm(name, key, val string) *unstructured.Unstructured {
-	return &unstructured.Unstructured{Object: map[string]interface{}{
+	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1", "kind": "ConfigMap",
-		"metadata": map[string]interface{}{"name": name, "namespace": "ns"},
-		"data":     map[string]interface{}{key: val},
+		"metadata": map[string]any{"name": name, "namespace": "ns"},
+		"data":     map[string]any{key: val},
 	}}
 }
 
@@ -44,13 +44,13 @@ func TestCompareReportsFieldDiffAndMissing(t *testing.T) {
 }
 
 func vwc(name string) *unstructured.Unstructured {
-	return &unstructured.Unstructured{Object: map[string]interface{}{
+	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "admissionregistration.k8s.io/v1",
 		"kind":       "ValidatingWebhookConfiguration",
-		"metadata":   map[string]interface{}{"name": name},
-		"webhooks": []interface{}{map[string]interface{}{
+		"metadata":   map[string]any{"name": name},
+		"webhooks": []any{map[string]any{
 			"name":         "w",
-			"clientConfig": map[string]interface{}{"url": "https://x/y"}, // no caBundle on either side
+			"clientConfig": map[string]any{"url": "https://x/y"}, // no caBundle on either side
 		}},
 	}}
 }

@@ -112,13 +112,13 @@ func RenderGolden(ctx context.Context, req GoldenRenderReq) ([]*unstructured.Uns
 	return splitYAMLDocs([]byte(rel.Manifest))
 }
 
-func mergeValuesYAML(docs [][]byte) (map[string]interface{}, error) {
-	out := map[string]interface{}{}
+func mergeValuesYAML(docs [][]byte) (map[string]any, error) {
+	out := map[string]any{}
 	for _, d := range docs {
 		if len(d) == 0 {
 			continue
 		}
-		m := map[string]interface{}{}
+		m := map[string]any{}
 		if err := yaml.Unmarshal(d, &m); err != nil {
 			return nil, fmt.Errorf("golden: parse values: %w", err)
 		}
@@ -127,10 +127,10 @@ func mergeValuesYAML(docs [][]byte) (map[string]interface{}, error) {
 	return out, nil
 }
 
-func deepMerge(base, over map[string]interface{}) map[string]interface{} {
+func deepMerge(base, over map[string]any) map[string]any {
 	for k, v := range over {
-		if bv, ok := base[k].(map[string]interface{}); ok {
-			if ov, ok := v.(map[string]interface{}); ok {
+		if bv, ok := base[k].(map[string]any); ok {
+			if ov, ok := v.(map[string]any); ok {
 				base[k] = deepMerge(bv, ov)
 				continue
 			}
