@@ -4,7 +4,7 @@
 
 **Goal:** Generate and finalize the `dual-deployment-operator` controller Helm chart (chart 1) at repo-root `chart/` from the existing `config/*` kustomize scaffold via the kubebuilder helm plugin, keppel-free and per-shoot-deployable.
 
-**Architecture:** The kubebuilder `helm.kubebuilder.io/v2-alpha` plugin reads `config/*` (the single source of truth) and emits `chart/` (Chart.yaml, values.yaml, templates/, crds/). Post-generation we apply a bounded set of customizations the plain scaffold omits — keppel-free image default, Gardener egress pod labels, leader-election, probes — and verify via `helm lint`/`helm template`. Chart 1 is namespace-agnostic so a downstream wrapper (chart 2, in `sapcc/helm-charts`) consumes it as a subchart and the pipeline installs it per `shoot--cp--*` namespace.
+**Architecture:** The kubebuilder `helm.kubebuilder.io/v2-alpha` plugin reads `config/*` (the single source of truth) and emits `chart/` (Chart.yaml, values.yaml, templates/ — including the CRD as a toggled template under `templates/crd/`). Post-generation we apply a bounded set of customizations the plain scaffold omits — keppel-free image default, Gardener egress pod labels, leader-election, probes — and verify via `helm lint`/`helm template`. Chart 1 is namespace-agnostic so a downstream wrapper (chart 2, in `sapcc/helm-charts`) consumes it as a subchart and the pipeline installs it per `shoot--cp--*` namespace.
 
 **Tech Stack:** kubebuilder v4.15.0 (helm/v2-alpha plugin), Helm v3+/v4, Go 1.22+ (`cmd/main.go`), REUSE/SPDX headers, go-makefile-maker.
 
@@ -21,7 +21,7 @@
 
 - Create: `chart/Chart.yaml` — chart metadata (name `dual-deployment-operator`, version, appVersion) — plugin-generated.
 - Create: `chart/values.yaml` — image (repository/tag), replicas, RBAC toggles, egress labels — plugin-generated, then customized.
-- Create: `chart/crds/<crd>.yaml` — the `DualDeploymentOperator` CRD (installed once, untemplated) — plugin-generated.
+- Create: `chart/templates/crd/dualdeploymentoperators.dual-deployment-operator.cc.sap.yaml` — the `DualDeploymentOperator` CRD as a toggled template (gated by `.Values.crd.enabled`, `helm.sh/resource-policy: keep` when `.Values.crd.keep`) — plugin-generated.
 - Create: `chart/templates/manager/manager.yaml` (or `chart/templates/deployment.yaml`) — controller Deployment — plugin-generated, then customized (egress labels, probes, leader-elect).
 - Create: `chart/templates/rbac/*.yaml` — broad seed applier ClusterRole/ClusterRoleBinding + leader-election Role — plugin-generated from `config/rbac`.
 - Modify: `PROJECT` — plugin registers `helm.kubebuilder.io/v2-alpha` with pinned output — plugin-written.
@@ -82,18 +82,18 @@ git commit -m "chore: enable leader-election release-on-cancel and explicit --le
 ## Task 2: Generate chart/ via the kubebuilder helm plugin
 
 **Files:**
-- Create: `chart/**` (Chart.yaml, values.yaml, templates/, crds/)
+- Create: `chart/**` (Chart.yaml, values.yaml, templates/ — including `templates/crd/`)
 - Modify: `PROJECT`
 
 - [ ] **Step 1: Run the helm plugin with output at repo root**
 
-Run: `kubebuilder edit --plugins=helm/v2-alpha --output-dir=.`
-Expected: creates `chart/` at repo root; updates `PROJECT` with a `helm.kubebuilder.io/v2-alpha` plugin entry.
+Run: `KUSTOMIZE="$PWD/bin/kustomize" kubebuilder edit --plugins=helm/v2-alpha --output-dir=.`
+Expected: creates `chart/` at repo root; updates `PROJECT` with a `helm.kubebuilder.io/v2-alpha` plugin entry. (The `KUSTOMIZE` override points at a prebuilt kustomize v5 CLI in `bin/` because the plugin runs `make build-installer` internally and the Makefile's default `KUSTOMIZE ?= go run sigs.k8s.io/kustomize/kustomize/v5` has no resolvable go.sum entry; install it once with `GOBIN="$PWD/bin" go install sigs.k8s.io/kustomize/kustomize/v5@v5.8.1` and restore go.mod/go.sum afterward.)
 
 - [ ] **Step 2: Verify the chart skeleton exists**
 
-Run: `ls chart/ chart/templates/ chart/crds/`
-Expected: `chart/Chart.yaml`, `chart/values.yaml`, `chart/templates/` present, and `chart/crds/` contains the CRD.
+Run: `ls chart/ chart/templates/ chart/templates/crd/`
+Expected: `chart/Chart.yaml`, `chart/values.yaml`, `chart/templates/` present, and `chart/templates/crd/` contains the CRD template.
 
 - [ ] **Step 3: Verify PROJECT records the plugin + output dir**
 
@@ -121,36 +121,44 @@ git commit -m "feat: generate dual-deployment-operator controller chart via kube
 
 ---
 
-## Task 3: CRD placement in chart/crds (verify + assert)
+## Task 3: CRD ships with the chart, toggled and kept (verify + assert)
+
+> **Spec note:** the `helm.kubebuilder.io/v2-alpha` plugin emits the CRD as a **templated** manifest at `chart/templates/crd/…` gated by `.Values.crd.enabled` (default `true`), with `.Values.crd.keep` (default `true`) stamping `helm.sh/resource-policy: keep`. This is the plugin's native layout; the spec was amended to accept it (keeps the chart fully generated). Do NOT move the CRD to an untemplated `chart/crds/` dir.
 
 **Files:**
-- Verify: `chart/crds/*.yaml`
-- Verify: `chart/templates/**`
+- Verify: `chart/templates/crd/dualdeploymentoperators.dual-deployment-operator.cc.sap.yaml`
+- Verify: `chart/values.yaml` (`crd.enabled`, `crd.keep`)
 
-- [ ] **Step 1: Confirm the CRD is under crds/, not templates/**
+- [ ] **Step 1: Confirm the CRD ships as a toggled template**
 
 Run:
 ```bash
-ls chart/crds/
-grep -rl "kind: CustomResourceDefinition" chart/templates/ || echo "NONE in templates (correct)"
+ls chart/templates/crd/
+head -12 chart/templates/crd/dualdeploymentoperators.dual-deployment-operator.cc.sap.yaml
 ```
-Expected: a CRD file in `chart/crds/`; `NONE in templates (correct)`.
+Expected: the CRD file exists under `chart/templates/crd/`, wrapped in `{{- if .Values.crd.enabled }}`, and its annotations include a `{{- if .Values.crd.keep }} "helm.sh/resource-policy": keep` block.
 
-- [ ] **Step 2: Confirm the CRD content matches config/crd/bases**
+- [ ] **Step 2: Confirm crd.enabled / crd.keep default to true**
 
-Run: `diff <(grep -c "" config/crd/bases/dual-deployment-operator.cc.sap_dualdeploymentoperators.yaml) <(grep -c "" chart/crds/*.yaml) || true`
-Expected: comparable non-zero line counts (the plugin copies the generated CRD). If the CRD is absent from `chart/crds/`, re-run Task 2 Step 1 and confirm `config/crd/bases/` is populated (`make manifests`).
+Run: `grep -nA4 "^crd:" chart/values.yaml`
+Expected: `crd:` block with `enabled: true` and `keep: true`.
 
-- [ ] **Step 3: Confirm templated render excludes the CRD**
+- [ ] **Step 3: Confirm default render includes the CRD; disabled render omits it**
 
-Run: `helm template dual-deployment-operator chart/ | grep -c "kind: CustomResourceDefinition"`
-Expected: `0` (Helm renders `templates/` only; `crds/` is applied separately, not templated).
+Run:
+```bash
+export KUSTOMIZE="$PWD/bin/kustomize"
+helm template dual-deployment-operator chart/ | grep -c "kind: CustomResourceDefinition"        # expect 1
+helm template dual-deployment-operator chart/ --set crd.enabled=false | grep -c "kind: CustomResourceDefinition"  # expect 0
+helm template dual-deployment-operator chart/ | grep -c 'helm.sh/resource-policy: keep'          # expect >=1 (keep default true)
+```
+Expected: `1`, then `0`, then `>=1`.
 
 - [ ] **Step 4: Commit (if the plugin needed a re-run)**
 
 ```bash
 git add chart/
-git commit -m "test: assert CRD ships in chart/crds and is excluded from templates" --allow-empty
+git commit -m "test: assert CRD ships as toggled template with resource-policy keep" --allow-empty
 ```
 
 - [ ] **Task 3 complete**
@@ -376,7 +384,7 @@ git commit -m "chore: REUSE headers for chart, per-shoot namespace assertions, r
 ## Self-Review
 
 **Spec coverage:**
-- `controller-helm-chart` — "generated from config/*" → Task 2; "regeneration confined to chart/" → Task 2 Step 4; "lints/templates cleanly" → Task 2 Step 5 + Task 7 Step 4; "CRD in crds/" → Task 3.
+- `controller-helm-chart` — "generated from config/*" → Task 2; "regeneration confined to chart/" → Task 2 Step 4; "lints/templates cleanly" → Task 2 Step 5 + Task 7 Step 4; "CRD ships as toggled template with keep" → Task 3.
 - `controller-chart-image` — "keppel-free ghcr default + AppVersion tag" → Task 4 Steps 2–4; "overridable / subchart override" → Task 4 Step 5.
 - `controller-chart-rbac` — "broad ClusterRole/Binding" → Task 6 Steps 1–2; "leader-election lease" → covered by generated leader-election Role (Task 6 Step 1 scope) + Task 1; "ClusterRoleBinding subject release namespace + static names" → Task 6 Steps 3–4.
 - `controller-chart-deployment` — "per-shoot release namespace" → Task 7 Steps 1–2; "Gardener egress labels" → Task 5 Steps 2–3; "leader election + replicas 1" → Task 1 + Task 5 Steps 4–5; "probes + metrics + no cache volume" → Task 5 Steps 4–5.

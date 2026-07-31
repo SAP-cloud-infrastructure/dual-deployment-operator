@@ -6,6 +6,10 @@ cliVersion: 4.15.0
 domain: cc.sap
 layout:
 - go.kubebuilder.io/v4
+plugins:
+  helm.kubebuilder.io/v2-alpha:
+    manifests: dist/install.yaml
+    output: .
 projectName: dual-deployment-operator
 repo: github.com/SAP-cloud-infrastructure/dual-deployment-operator
 resources:
