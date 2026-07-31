@@ -38,7 +38,7 @@
 - Modify: `cmd/main.go:178`
 - Modify: `config/manager/manager.yaml:64`
 
-- [ ] **Step 1: Enable LeaderElectionReleaseOnCancel in cmd/main.go**
+- [x] **Step 1: Enable LeaderElectionReleaseOnCancel in cmd/main.go**
 
 Edit `cmd/main.go` — uncomment the option at line 178 so the outgoing leader releases the lease on graceful shutdown:
 
@@ -53,7 +53,7 @@ Edit `cmd/main.go` — uncomment the option at line 178 so the outgoing leader r
 		LeaderElectionReleaseOnCancel: true,
 ```
 
-- [ ] **Step 2: Set --leader-elect=true in the manager manifest**
+- [x] **Step 2: Set --leader-elect=true in the manager manifest**
 
 Edit `config/manager/manager.yaml` line 64: change the bare flag to explicit `true` so the generated chart's Deployment carries it:
 
@@ -63,19 +63,19 @@ Edit `config/manager/manager.yaml` line 64: change the bare flag to explicit `tr
           - --health-probe-bind-address=:8081
 ```
 
-- [ ] **Step 3: Verify build + codegen stay green**
+- [x] **Step 3: Verify build + codegen stay green**
 
 Run: `go build ./... && make manifests generate`
 Expected: build exit 0; `git status --short config/ api/` shows no drift.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add cmd/main.go config/manager/manager.yaml
 git commit -m "chore: enable leader-election release-on-cancel and explicit --leader-elect=true for chart"
 ```
 
-- [ ] **Task 1 complete**
+- [x] **Task 1 complete**
 
 ---
 
@@ -85,39 +85,39 @@ git commit -m "chore: enable leader-election release-on-cancel and explicit --le
 - Create: `chart/**` (Chart.yaml, values.yaml, templates/ — including `templates/crd/`)
 - Modify: `PROJECT`
 
-- [ ] **Step 1: Run the helm plugin with output at repo root**
+- [x] **Step 1: Run the helm plugin with output at repo root**
 
 Run: `KUSTOMIZE="$PWD/bin/kustomize" kubebuilder edit --plugins=helm/v2-alpha --output-dir=.`
 Expected: creates `chart/` at repo root; updates `PROJECT` with a `helm.kubebuilder.io/v2-alpha` plugin entry. (The `KUSTOMIZE` override points at a prebuilt kustomize v5 CLI in `bin/` because the plugin runs `make build-installer` internally and the Makefile's default `KUSTOMIZE ?= go run sigs.k8s.io/kustomize/kustomize/v5` has no resolvable go.sum entry; install it once with `GOBIN="$PWD/bin" go install sigs.k8s.io/kustomize/kustomize/v5@v5.8.1` and restore go.mod/go.sum afterward.)
 
-- [ ] **Step 2: Verify the chart skeleton exists**
+- [x] **Step 2: Verify the chart skeleton exists**
 
 Run: `ls chart/ chart/templates/ chart/templates/crd/`
 Expected: `chart/Chart.yaml`, `chart/values.yaml`, `chart/templates/` present, and `chart/templates/crd/` contains the CRD template.
 
-- [ ] **Step 3: Verify PROJECT records the plugin + output dir**
+- [x] **Step 3: Verify PROJECT records the plugin + output dir**
 
 Run: `grep -A3 "helm.kubebuilder.io/v2-alpha" PROJECT`
 Expected: plugin block present with an `output`/`manifests` field (deterministic regeneration target).
 
-- [ ] **Step 4: Verify regeneration did NOT touch hand-written source**
+- [x] **Step 4: Verify regeneration did NOT touch hand-written source**
 
 Run: `git status --short cmd/ internal/ api/`
 Expected: empty (no changes under `cmd/`, `internal/`, `api/` — plugin scope is `chart/` + `PROJECT` only).
 
-- [ ] **Step 5: Verify the chart lints and templates**
+- [x] **Step 5: Verify the chart lints and templates**
 
 Run: `helm lint chart/ && helm template dual-deployment-operator chart/ >/dev/null`
 Expected: `1 chart(s) linted, 0 chart(s) failed`; template renders with no error.
 
-- [ ] **Step 6: Commit the generated chart**
+- [x] **Step 6: Commit the generated chart**
 
 ```bash
 git add chart/ PROJECT
 git commit -m "feat: generate dual-deployment-operator controller chart via kubebuilder helm plugin"
 ```
 
-- [ ] **Task 2 complete**
+- [x] **Task 2 complete**
 
 ---
 
@@ -129,7 +129,7 @@ git commit -m "feat: generate dual-deployment-operator controller chart via kube
 - Verify: `chart/templates/crd/dualdeploymentoperators.dual-deployment-operator.cc.sap.yaml`
 - Verify: `chart/values.yaml` (`crd.enabled`, `crd.keep`)
 
-- [ ] **Step 1: Confirm the CRD ships as a toggled template**
+- [x] **Step 1: Confirm the CRD ships as a toggled template**
 
 Run:
 ```bash
@@ -138,12 +138,12 @@ head -12 chart/templates/crd/dualdeploymentoperators.dual-deployment-operator.cc
 ```
 Expected: the CRD file exists under `chart/templates/crd/`, wrapped in `{{- if .Values.crd.enabled }}`, and its annotations include a `{{- if .Values.crd.keep }} "helm.sh/resource-policy": keep` block.
 
-- [ ] **Step 2: Confirm crd.enabled / crd.keep default to true**
+- [x] **Step 2: Confirm crd.enabled / crd.keep default to true**
 
 Run: `grep -nA4 "^crd:" chart/values.yaml`
 Expected: `crd:` block with `enabled: true` and `keep: true`.
 
-- [ ] **Step 3: Confirm default render includes the CRD; disabled render omits it**
+- [x] **Step 3: Confirm default render includes the CRD; disabled render omits it**
 
 Run:
 ```bash
@@ -154,14 +154,14 @@ helm template dual-deployment-operator chart/ | grep -c 'helm.sh/resource-policy
 ```
 Expected: `1`, then `0`, then `>=1`.
 
-- [ ] **Step 4: Commit (if the plugin needed a re-run)**
+- [x] **Step 4: Commit (if the plugin needed a re-run)**
 
 ```bash
 git add chart/
 git commit -m "test: assert CRD ships as toggled template with resource-policy keep" --allow-empty
 ```
 
-- [ ] **Task 3 complete**
+- [x] **Task 3 complete**
 
 ---
 
@@ -170,12 +170,12 @@ git commit -m "test: assert CRD ships as toggled template with resource-policy k
 **Files:**
 - Modify: `chart/values.yaml`
 
-- [ ] **Step 1: Inspect the generated image block**
+- [x] **Step 1: Inspect the generated image block**
 
 Run: `grep -nA4 "image:" chart/values.yaml`
 Expected: a `manager.image.repository` + `manager.image.tag` block (kubebuilder default, likely `repository: controller`).
 
-- [ ] **Step 2: Set the keppel-free ghcr default, empty tag**
+- [x] **Step 2: Set the keppel-free ghcr default, empty tag**
 
 Edit `chart/values.yaml` so the manager image is:
 
@@ -188,7 +188,7 @@ manager:
 
 Keep the surrounding generated keys (pullPolicy, resources, etc.) as-is.
 
-- [ ] **Step 3: Assert the rendered image resolves to the ghcr path at AppVersion**
+- [x] **Step 3: Assert the rendered image resolves to the ghcr path at AppVersion**
 
 Run:
 ```bash
@@ -197,12 +197,12 @@ helm template dual-deployment-operator chart/ | grep -E "image: .*dual-deploymen
 ```
 Expected: `image: ghcr.io/SAP-cloud-infrastructure/dual-deployment-operator:<appVersion>`.
 
-- [ ] **Step 4: Assert NO keppel reference anywhere in the chart**
+- [x] **Step 4: Assert NO keppel reference anywhere in the chart**
 
 Run: `! grep -rn "keppel" chart/ && echo "keppel-free OK"`
 Expected: `keppel-free OK`.
 
-- [ ] **Step 5: Assert image is overridable (subchart-style)**
+- [x] **Step 5: Assert image is overridable (subchart-style)**
 
 Run:
 ```bash
@@ -212,14 +212,14 @@ helm template dual-deployment-operator chart/ \
 ```
 Expected: the override path + tag appear in the rendered Deployment.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add chart/values.yaml
 git commit -m "feat: keppel-free ghcr image default in chart values (overridable by wrapper)"
 ```
 
-- [ ] **Task 4 complete**
+- [x] **Task 4 complete**
 
 ---
 
@@ -228,12 +228,12 @@ git commit -m "feat: keppel-free ghcr image default in chart values (overridable
 **Files:**
 - Modify: `chart/values.yaml` and/or `chart/templates/manager/manager.yaml` (whichever the plugin uses to stamp pod labels)
 
-- [ ] **Step 1: Locate the pod template metadata.labels in the generated Deployment**
+- [x] **Step 1: Locate the pod template metadata.labels in the generated Deployment**
 
 Run: `grep -rn "template:" -A6 chart/templates/ | grep -n "labels" ; ls chart/templates/manager 2>/dev/null || ls chart/templates`
 Expected: identify the Deployment template file and its pod `template.metadata.labels` block.
 
-- [ ] **Step 2: Add the three Gardener egress labels to the pod template**
+- [x] **Step 2: Add the three Gardener egress labels to the pod template**
 
 Edit the Deployment template's `spec.template.metadata.labels` to include (literal, not gated on a value so they are always present):
 
@@ -245,7 +245,7 @@ Edit the Deployment template's `spec.template.metadata.labels` to include (liter
         # ...existing generated labels (control-plane, selector labels) preserved...
 ```
 
-- [ ] **Step 3: Assert all three egress labels render on the pod template**
+- [x] **Step 3: Assert all three egress labels render on the pod template**
 
 Run:
 ```bash
@@ -255,7 +255,7 @@ helm template dual-deployment-operator chart/ | \
 ```
 Expected: `3`.
 
-- [ ] **Step 4: Assert probes and bind-address flags are present**
+- [x] **Step 4: Assert probes and bind-address flags are present**
 
 Run:
 ```bash
@@ -264,7 +264,7 @@ helm template dual-deployment-operator chart/ | grep -E -- "--health-probe-bind-
 ```
 Expected: `/healthz` and `/readyz` both present; all three flags present.
 
-- [ ] **Step 5: Assert replicas default is 1 and NO chart-cache emptyDir**
+- [x] **Step 5: Assert replicas default is 1 and NO chart-cache emptyDir**
 
 Run:
 ```bash
@@ -273,19 +273,19 @@ helm template dual-deployment-operator chart/ | grep -E "replicas: 1"
 ```
 Expected: `replicas: 1` present; `no cache volume OK`.
 
-- [ ] **Step 6: Re-lint after edits**
+- [x] **Step 6: Re-lint after edits**
 
 Run: `helm lint chart/`
 Expected: `0 chart(s) failed`.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add chart/
 git commit -m "feat: Gardener egress labels on manager pod; confirm probes/leader-elect/replicas"
 ```
 
-- [ ] **Task 5 complete**
+- [x] **Task 5 complete**
 
 ---
 
@@ -294,34 +294,34 @@ git commit -m "feat: Gardener egress labels on manager pod; confirm probes/leade
 **Files:**
 - Verify/Modify: `chart/templates/rbac/*.yaml`
 
-- [ ] **Step 1: Confirm a ClusterRole + ClusterRoleBinding are generated**
+- [x] **Step 1: Confirm a ClusterRole + ClusterRoleBinding are generated**
 
 Run: `grep -rl "kind: ClusterRole\b" chart/templates/ ; grep -rl "kind: ClusterRoleBinding" chart/templates/`
 Expected: at least one ClusterRole and one ClusterRoleBinding template.
 
-- [ ] **Step 2: Confirm the applier grant covers CR watch + Secrets + seed-render kinds**
+- [x] **Step 2: Confirm the applier grant covers CR watch + Secrets + seed-render kinds**
 
 Run: `helm template dual-deployment-operator chart/ | awk '/kind: ClusterRole$/,/kind: ClusterRoleBinding/'`
 Expected: rules include `dualdeploymentoperators` (get/list/watch), `secrets` (get/list), and the seed-render kinds (deployments, services, configmaps, serviceaccounts, roles, rolebindings, clusterroles, clusterrolebindings, networkpolicies) with create/update/delete/get/list/watch. If the generated grant is narrower than the spec (`config/rbac` markers on the controller only cover the CR), add the applier rules to `config/rbac/role.yaml` via `+kubebuilder:rbac` markers in `internal/controller/*_controller.go`, run `make manifests`, then re-run Task 2 Step 1 to regenerate the chart.
 
-- [ ] **Step 3: Confirm the ClusterRoleBinding subject uses the release namespace**
+- [x] **Step 3: Confirm the ClusterRoleBinding subject uses the release namespace**
 
 Run: `grep -rn "namespace:" chart/templates/rbac/*.yaml | grep -i "Release.Namespace" || helm template dual-deployment-operator chart/ -n shoot--cp--test | awk '/kind: ClusterRoleBinding/,/roleRef/' | grep "namespace: shoot--cp--test"`
 Expected: the binding subject namespace is `{{ .Release.Namespace }}` (renders to the install namespace), not hardcoded.
 
-- [ ] **Step 4: Confirm cluster-scoped role names are static (release-independent)**
+- [x] **Step 4: Confirm cluster-scoped role names are static (release-independent)**
 
 Run: `helm template dual-deployment-operator chart/ -n shoot--cp--a | grep -A2 "kind: ClusterRole$" | grep "name:" ; helm template dual-deployment-operator chart/ -n shoot--cp--b | grep -A2 "kind: ClusterRole$" | grep "name:"`
 Expected: identical ClusterRole names across the two namespaces (seed-global names → single-install-per-seed contract).
 
-- [ ] **Step 5: Commit (only if RBAC markers/chart changed)**
+- [x] **Step 5: Commit (only if RBAC markers/chart changed)**
 
 ```bash
 git add chart/ config/rbac/ internal/controller/ 2>/dev/null
 git commit -m "feat: broad seed applier ClusterRole with release-namespace-bound subject" --allow-empty
 ```
 
-- [ ] **Task 6 complete**
+- [x] **Task 6 complete**
 
 ---
 
@@ -331,7 +331,7 @@ git commit -m "feat: broad seed applier ClusterRole with release-namespace-bound
 - Verify: `chart/templates/**`
 - Add (if needed): REUSE/SPDX coverage for `chart/`
 
-- [ ] **Step 1: Assert namespaced resources do NOT hardcode metadata.namespace**
+- [x] **Step 1: Assert namespaced resources do NOT hardcode metadata.namespace**
 
 Run:
 ```bash
@@ -340,7 +340,7 @@ helm template dual-deployment-operator chart/ -n shoot--cp--x | \
 ```
 Expected: `no hardcoded namespaces OK` (every rendered namespace is the release namespace).
 
-- [ ] **Step 2: Assert two releases land in independent namespaces**
+- [x] **Step 2: Assert two releases land in independent namespaces**
 
 Run:
 ```bash
@@ -349,12 +349,12 @@ helm template dual-deployment-operator chart/ -n shoot--cp--m-b | grep -m1 "name
 ```
 Expected: each render's Deployment/SA namespace matches its own `-n` value.
 
-- [ ] **Step 3: Ensure REUSE/SPDX compliance for the new chart files**
+- [x] **Step 3: Ensure REUSE/SPDX compliance for the new chart files**
 
 Run: `make check 2>&1 | grep -iE "reuse|license" || reuse lint 2>&1 | tail -5`
 Expected: REUSE lint passes. If `chart/` files lack headers, add a `chart/**` paths block to the `reuse.annotations` in `Makefile.maker.yaml` (SPDX `Apache-2.0`, `SAP SE or an SAP affiliate company`), run `make` to regenerate `REUSE.toml`/`Makefile`, and re-run.
 
-- [ ] **Step 4: Full gate — codegen drift + build + lint + helm**
+- [x] **Step 4: Full gate — codegen drift + build + lint + helm**
 
 Run:
 ```bash
@@ -366,18 +366,18 @@ echo "ALL GREEN"
 ```
 Expected: `ALL GREEN` (no codegen drift, build clean, lint clean, chart lints + templates).
 
-- [ ] **Step 5: Record the post-gen customization set (regeneration guard)**
+- [x] **Step 5: Record the post-gen customization set (regeneration guard)**
 
 Append a short "Chart customizations re-applied after any `kubebuilder edit --force`" note to `chart/README.md` (create if absent) listing: keppel-free image default (Task 4), the three Gardener egress pod labels (Task 5), `--leader-elect=true` (Task 1/5), and the broad applier RBAC (Task 6). This is the documented set an implementer re-applies after regeneration.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add chart/ Makefile.maker.yaml REUSE.toml Makefile 2>/dev/null
 git commit -m "chore: REUSE headers for chart, per-shoot namespace assertions, regeneration guard notes"
 ```
 
-- [ ] **Task 7 complete**
+- [x] **Task 7 complete**
 
 ---
 
