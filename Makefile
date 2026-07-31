@@ -60,11 +60,11 @@ uninstall: manifests
 .PHONY: deploy
 deploy: manifests
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
-	$(KUSTOMIZE) build config/default | $(KUBECTL) apply -f -
+	$(KUSTOMIZE) build config/dev | $(KUBECTL) apply -f -
 
 .PHONY: undeploy
 undeploy:
-	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found -f -
+	$(KUSTOMIZE) build config/dev | $(KUBECTL) delete --ignore-not-found -f -
 
 .PHONY: build-installer
 build-installer: manifests generate

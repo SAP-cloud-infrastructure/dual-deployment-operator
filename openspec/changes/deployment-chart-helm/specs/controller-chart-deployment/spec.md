@@ -21,6 +21,22 @@ The chart MUST support per-shoot deployment — one operator instance per `shoot
 - **THEN** each release's namespaced resources land in its own namespace
 - **AND** the target namespace is not read from a values field
 
+### Requirement: Kustomize config installs the same operator as the chart
+
+The `config/` kustomize base MUST install the same operator as the Helm chart, so a user gets an equivalent installation regardless of tool. `config/default` MUST be namespace-portable: it MUST NOT contain a `Namespace` object, so the target namespace is set by the kustomize `namespace:` transformer (an overlay or `kustomize edit set namespace <ns>`) — the kustomize equivalent of `helm install --namespace <ns>`, which correctly rewrites both `metadata.namespace` and RBAC `ClusterRoleBinding`/`RoleBinding` ServiceAccount subject namespaces. (Plain `kubectl -n <ns>` is NOT the portability mechanism: it does not rewrite RBAC subject namespaces.) A dev overlay (`config/dev`) MAY add a concrete `Namespace` for standalone `make deploy`. Accounting for that dev-only `Namespace` object and the Helm release-name prefix, `config/default` (or `config/dev`) and the chart MUST render the same set of resources (CRD, ServiceAccount, applier ClusterRole + ClusterRoleBinding, leader-election Role + RoleBinding, metrics roles/bindings, helper roles, Service, Deployment) with equivalent behavior (same applier ClusterRole rules, same manager args/probes/labels).
+
+#### Scenario: config/default is namespace-portable
+
+- **WHEN** `kustomize build config/default` is rendered, or an overlay referencing `../default` sets `namespace: shoot--cp--<x>`
+- **THEN** `config/default` contains no `Namespace` object
+- **AND** the overlay's `namespace:` rewrites every namespaced resource's `metadata.namespace` and the RBAC subject namespaces to `shoot--cp--<x>`
+
+#### Scenario: kustomize and chart install the same resources
+
+- **WHEN** `kustomize build config/dev` and `helm template chart/` are compared
+- **THEN** they render the same set of resource kinds and logical roles, except the dev-only `Namespace` object (Helm relies on `--namespace`) and the Helm release-name prefix on names
+- **AND** the applier ClusterRole rules, manager container args, probes, and Gardener egress pod labels are equivalent
+
 ### Requirement: Gardener egress labels on the manager pod template
 
 The operator runs per-shoot in a `shoot--cp--*` namespace on the seed, where Gardener enforces a deny-all NetworkPolicy with label-gated allow policies. Chart 1's `deployment.yaml` pod template MUST carry the Gardener networking egress labels `networking.gardener.cloud/to-dns: allowed`, `networking.gardener.cloud/to-public-networks: allowed`, and `networking.gardener.cloud/to-private-networks: allowed`, without which the operator's Helm OCI pulls (keppel) and kustomize root+transitive fetches (github) fail with DNS/connection errors.

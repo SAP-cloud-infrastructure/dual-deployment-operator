@@ -117,7 +117,7 @@ manager:
     ## Gardener egress labels — REQUIRED. The operator runs per-shoot in a
     ## shoot--cp--* namespace on the seed, where a deny-all NetworkPolicy blocks
     ## all egress (even DNS) unless these label-gated allow policies are present.
-    ## Without them the Helm OCI pulls (keppel) and kustomize github fetches fail.
+    ## Without them the operator's OCI registry pulls and kustomize github fetches fail.
     labels:
       networking.gardener.cloud/to-dns: allowed
       networking.gardener.cloud/to-public-networks: allowed
@@ -137,8 +137,9 @@ rbac:
   ##
   helpers:
     ## Install convenience admin/editor/viewer roles for CRDs
+    ## Default true to stay in sync with the kustomize config/default install.
     ##
-    enabled: false
+    enabled: true
 
 ## ServiceAccount configuration
 ##
