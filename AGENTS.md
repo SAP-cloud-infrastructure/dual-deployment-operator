@@ -18,6 +18,8 @@ internal/clients/*             Seed (in-cluster) and shoot (token+CA from Garden
 config/crd/bases/*             Generated CRDs (DO NOT EDIT)
 config/rbac/role.yaml          Generated RBAC (DO NOT EDIT)
 config/samples/*               Example CRs (edit these)
+config/dev/*                   Dev overlay — re-adds the Namespace object for standalone make deploy (config/default is namespace-agnostic)
+chart/                         Controller Helm chart (chart 1) — generated from config/* via the kubebuilder helm/v2-alpha plugin; do NOT hand-author from scratch; re-generate with `kubebuilder edit --plugins=helm/v2-alpha --output-dir=.` then re-apply the post-gen customizations listed in chart/README.md
 Makefile                       Build/test/deploy commands
 PROJECT                        Kubebuilder metadata Auto-generated (DO NOT EDIT)
 ```
