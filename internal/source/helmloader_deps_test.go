@@ -214,3 +214,191 @@ func pushSubchartAndParent(t *testing.T, host string, client *http.Client) strin
 
 	return parentTGZPath
 }
+
+// pushParentWithVendoredSub pushes a parent chart that vendors its subchart under
+// charts/ by attaching the sub as a Go chart.Chart object before Save, which causes
+// chartutil.Save to write charts/sub-0.1.0.tgz inside the archive. The parent
+// declares NO Metadata.Dependencies, so requireLockIfDeps is satisfied without a
+// Chart.lock. Returns the chart name that was pushed (for use in Load).
+func pushParentWithVendoredSub(t *testing.T, host string, client *http.Client) string {
+	t.Helper()
+	const parentName = "vendored-parent"
+
+	rc, err := registry.NewClient(
+		registry.ClientOptHTTPClient(client),
+		registry.ClientOptBasicAuth(authedTestUser, authedTestPass),
+	)
+	if err != nil {
+		t.Fatalf("registry client: %v", err)
+	}
+
+	sub := &chart.Chart{Metadata: &chart.Metadata{
+		APIVersion: chart.APIVersionV2,
+		Name:       "sub",
+		Version:    "0.1.0",
+	}}
+
+	parent := &chart.Chart{Metadata: &chart.Metadata{
+		APIVersion: chart.APIVersionV2,
+		Name:       parentName,
+		Version:    "0.1.0",
+	}}
+	// Attach sub as a vendored dependency. chartutil.Save writes it to charts/sub-0.1.0.tgz
+	// inside the parent archive. No Metadata.Dependencies entry is added so requireLockIfDeps
+	// returns nil (no lock required) and downloader.Manager.Build() is a no-op.
+	parent.AddDependency(sub)
+
+	parentTGZPath, err := chartutil.Save(parent, t.TempDir())
+	if err != nil {
+		t.Fatalf("save vendored parent chart: %v", err)
+	}
+	data, err := os.ReadFile(parentTGZPath)
+	if err != nil {
+		t.Fatalf("read vendored parent tgz: %v", err)
+	}
+	if _, err := rc.Push(data, host+"/"+parentName+":0.1.0"); err != nil {
+		t.Fatalf("push vendored parent chart: %v", err)
+	}
+	return parentName
+}
+
+// pushNoDepChart pushes a minimal chart with no declared dependencies, for testing
+// the no-op path through expandAndResolveDeps.
+func pushNoDepChart(t *testing.T, host string, client *http.Client) string {
+	t.Helper()
+	const chartName = "nodep-chart"
+
+	rc, err := registry.NewClient(
+		registry.ClientOptHTTPClient(client),
+		registry.ClientOptBasicAuth(authedTestUser, authedTestPass),
+	)
+	if err != nil {
+		t.Fatalf("registry client: %v", err)
+	}
+
+	ch := &chart.Chart{Metadata: &chart.Metadata{
+		APIVersion: chart.APIVersionV2,
+		Name:       chartName,
+		Version:    "0.1.0",
+	}}
+	tgzPath, err := chartutil.Save(ch, t.TempDir())
+	if err != nil {
+		t.Fatalf("save no-dep chart: %v", err)
+	}
+	data, err := os.ReadFile(tgzPath)
+	if err != nil {
+		t.Fatalf("read no-dep tgz: %v", err)
+	}
+	if _, err := rc.Push(data, host+"/"+chartName+":0.1.0"); err != nil {
+		t.Fatalf("push no-dep chart: %v", err)
+	}
+	return chartName
+}
+
+// pushParentDepsNoLock pushes a parent that declares a dependency in Chart.yaml but
+// ships no Chart.lock and no vendored charts/. This is the fixture for the fail-closed
+// pre-check: requireLockIfDeps must reject it before Build runs.
+func pushParentDepsNoLock(t *testing.T, host string, client *http.Client) string {
+	t.Helper()
+	const parentName = "lockless-parent"
+
+	rc, err := registry.NewClient(
+		registry.ClientOptHTTPClient(client),
+		registry.ClientOptBasicAuth(authedTestUser, authedTestPass),
+	)
+	if err != nil {
+		t.Fatalf("registry client: %v", err)
+	}
+
+	dep := &chart.Dependency{
+		Name:       "sub",
+		Version:    "0.1.0",
+		Repository: "oci://example.test/charts",
+	}
+	parent := &chart.Chart{
+		Metadata: &chart.Metadata{
+			APIVersion:   chart.APIVersionV2,
+			Name:         parentName,
+			Version:      "0.1.0",
+			Dependencies: []*chart.Dependency{dep},
+		},
+		// Lock deliberately left nil so chartutil.Save does not write Chart.lock.
+	}
+	// No sub chart attached: charts/ is absent in the saved archive.
+	tgzPath, err := chartutil.Save(parent, t.TempDir())
+	if err != nil {
+		t.Fatalf("save lockless parent chart: %v", err)
+	}
+	data, err := os.ReadFile(tgzPath)
+	if err != nil {
+		t.Fatalf("read lockless parent tgz: %v", err)
+	}
+	if _, err := rc.Push(data, host+"/"+parentName+":0.1.0"); err != nil {
+		t.Fatalf("push lockless parent chart: %v", err)
+	}
+	return parentName
+}
+
+// TestHelmLoaderVendoredSubchartUnchanged verifies that a parent chart shipping its
+// subchart already vendored under charts/ loads cleanly and the subchart is visible
+// in ch.Dependencies(). Vendoring is intentional here; unlike
+// TestHelmLoaderResolvesUnvendoredDependency there is no assertNoVendoredSubcharts
+// invariant — the presence of charts/ IS the fixture.
+func TestHelmLoaderVendoredSubchartUnchanged(t *testing.T) {
+	host, client := startAuthedOCIRegistry(t)
+	parentName := pushParentWithVendoredSub(t, host, client)
+
+	l := newHelmLoader(func(_ context.Context, _ string) (creds, error) {
+		return creds{user: authedTestUser, pass: authedTestPass, ok: true}, nil
+	})
+	l.httpClient = client
+
+	ch, err := l.Load(context.Background(), "oci://"+host, parentName, "0.1.0")
+	if err != nil {
+		t.Fatalf("Load with vendored subchart: %v", err)
+	}
+	if len(ch.Dependencies()) == 0 {
+		t.Fatal("expected vendored subchart in loaded chart, got none")
+	}
+}
+
+// TestHelmLoaderNoDependenciesNoOp verifies that a plain chart with no declared
+// dependencies loads unchanged through the full Load path (no Build, no lock check).
+func TestHelmLoaderNoDependenciesNoOp(t *testing.T) {
+	host, client := startAuthedOCIRegistry(t)
+	chartName := pushNoDepChart(t, host, client)
+
+	l := newHelmLoader(func(_ context.Context, _ string) (creds, error) {
+		return creds{user: authedTestUser, pass: authedTestPass, ok: true}, nil
+	})
+	l.httpClient = client
+
+	ch, err := l.Load(context.Background(), "oci://"+host, chartName, "0.1.0")
+	if err != nil {
+		t.Fatalf("Load with no-dep chart: %v", err)
+	}
+	if ch.Metadata.Name != chartName {
+		t.Fatalf("expected chart name %q, got %q", chartName, ch.Metadata.Name)
+	}
+}
+
+// TestHelmLoaderMissingLockFailsClosed verifies that Load returns an error containing
+// "Chart.lock" when the chart declares dependencies but ships no Chart.lock and no
+// vendored charts/. This exercises the fail-closed pre-check in expandAndResolveDeps.
+func TestHelmLoaderMissingLockFailsClosed(t *testing.T) {
+	host, client := startAuthedOCIRegistry(t)
+	parentName := pushParentDepsNoLock(t, host, client)
+
+	l := newHelmLoader(func(_ context.Context, _ string) (creds, error) {
+		return creds{user: authedTestUser, pass: authedTestPass, ok: true}, nil
+	})
+	l.httpClient = client
+
+	_, err := l.Load(context.Background(), "oci://"+host, parentName, "0.1.0")
+	if err == nil {
+		t.Fatal("expected error for dependency-declaring chart with no Chart.lock, got nil")
+	}
+	if !strings.Contains(err.Error(), "Chart.lock") {
+		t.Fatalf("error should mention Chart.lock, got: %v", err)
+	}
+}
