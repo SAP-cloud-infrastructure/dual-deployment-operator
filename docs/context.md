@@ -230,6 +230,23 @@ PR #14 removes both:
 
 ---
 
+### Revision 8: Subchart dependency resolution in the Helm loader (proposal)
+
+**Motivating event**: the operator-native rewrite of `metal-operator-remote` ([`sapcc/helm-charts` `system/metal-operator-remote-v2`](https://github.com/sapcc/helm-charts/tree/master/system/metal-operator-remote-v2)) wraps the upstream `metal-operator` chart as a Helm **subchart** dependency. This surfaced an implicit contract in the loader.
+
+**Finding**: `internal/source/helmloader.go` `Load()` pulls the chart archive and calls `loader.Load()` directly. It does **not** run Helm dependency resolution (`helm dependency build/update`). A chart that declares `dependencies:` in `Chart.yaml` therefore under-renders **silently** unless its subcharts are already vendored in the pulled archive under `charts/`. The operator thus imposes an undocumented "vendor all subcharts into the published `.tgz`" contract on chart authors.
+
+**Proposal** (full doc: [`design`/`subchart-dependency-resolution.md`](subchart-dependency-resolution.md)): add an opt-in dependency-build step to `Load()` before `loader.Load()`. Because Helm's `downloader.Manager` works on an unpacked chart **directory**, expand the pulled `.tgz` (`chartutil.Expand`), run `downloader.Manager{ChartPath, Getters, RepositoryConfig/Cache, RegistryClient}.Build()` on the directory, then `loader.Load(dir)`. ~35–40 LOC in `internal/source/helmloader.go`; no CRD change, no new transformation.
+
+**Risks** (why this is not a free win):
+1. **Single-registry auth** — the CR's one `authSecretRef` cannot authenticate a subchart hosted in a *different* private registry.
+2. **Reconcile-time network** — resolving deps needs egress to the subchart repo on every uncached render (NetworkPolicy + a new failure mode). The render cache mitigates steady state; the first render per content id still pays.
+3. **`Chart.lock` semantics** — with a committed lock, resolution is deterministic; without it, `Build()` degrades toward semver `Update()` against the repo index.
+
+**Status**: proposal only — no code lands with this revision. `metal-operator-remote-v2` ships with its subchart **vendored**, so it works against the operator as it exists today; this enhancement is the later simplification that lets wrapper charts drop vendoring. Recommended as a **separate, prerequisite** `internal/source` change done first, after which `-v2` may declare a plain `dependencies:` entry instead of vendoring.
+
+---
+
 ## Alternatives considered — rendering approach
 
 Nine options were surveyed. Summary of rejections:
