@@ -1421,6 +1421,75 @@ The `--chart-cache-dir` / `--chart-cache-cap-mb` (or unified `--source-cache-*`)
 
 ---
 
+## Phase 7.6: Helm subchart dependency resolution (~1 day)
+
+**Blocks production usage of subchart-wrapping charts.** Phase 7's Helm loader ([`internal/source/helmloader.go`](../internal/source/helmloader.go)) pulls the chart `.tgz` and calls `loader.Load()` directly — it does **not** run Helm dependency resolution. A chart that declares `dependencies:` in `Chart.yaml` under-renders **silently** unless its subcharts are vendored under `charts/` in the pulled archive. The operator-native `metal-operator-remote-v2` wrapper ([`sapcc/helm-charts` `system/metal-operator-remote-v2`](https://github.com/sapcc/helm-charts/tree/master/system/metal-operator-remote-v2)) wraps the upstream `metal-operator` chart as a subchart dependency; it works today only because it **vendors** that subchart. This phase adds dependency resolution so wrapper charts can declare a plain `dependencies:` entry instead. Full rationale: [`subchart-dependency-resolution.md`](subchart-dependency-resolution.md) + `context.md` Revision 8.
+
+> **This is the community-standard approach.** Argo CD resolves chart dependencies at sync (reconcile) time via the Helm SDK exactly this way; Flux pre-resolves in a separate `source-controller` artifact step this operator has no analogue for. Reconcile-time `downloader.Manager.Build()` is the aligned choice; the Phase 7.5 render cache (keyed on the resolved OCI digest) makes it run once per chart version.
+
+### Change: dependency-build step in `Load()`
+
+`downloader.Manager` operates on an **unpacked chart directory**, not the in-memory `*chart.Chart`, so the pulled `.tgz` must be expanded first. Insert before `loader.Load()`:
+
+```go
+// after chartPath is the pulled .tgz (from pullOCI / pullHTTP):
+unpackedDir := filepath.Join(tmp, "unpacked")
+if err := os.MkdirAll(unpackedDir, 0o755); err != nil {
+    return nil, err
+}
+f, err := os.Open(chartPath)
+if err != nil {
+    return nil, err
+}
+defer func() { _ = f.Close() }()
+if err := chartutil.Expand(unpackedDir, f); err != nil {
+    return nil, fmt.Errorf("source: expand chart: %w", err)
+}
+chartDir := filepath.Join(unpackedDir, name)
+
+rc, err := registry.NewClient(opts...) // reuse the pullOCI option set (cache, optional basic-auth, test httpClient)
+if err != nil {
+    return nil, err
+}
+m := &downloader.Manager{
+    Out:              io.Discard,
+    ChartPath:        chartDir,
+    Getters:          getter.All(l.settings),
+    RepositoryConfig: l.settings.RepositoryConfig,
+    RepositoryCache:  l.settings.RepositoryCache,
+    RegistryClient:   rc,
+}
+if err := m.Build(); err != nil {
+    return nil, fmt.Errorf("source: build dependencies: %w", err)
+}
+return loader.Load(chartDir)
+```
+
+Estimated size: **~35–40 lines**. `l.settings`, `getter.All`, and the OCI registry-client option set already exist in the Phase 7 pull path and are reused/refactored. `Build()` on a chart with no `dependencies:` is a cheap no-op, so it runs **unconditionally** — no `Chart.yaml`-presence guard.
+
+### `Build()`-only, `Chart.lock` required (the determinism trap)
+
+Verified against Helm v3.21.3 `pkg/downloader/manager.go`: `Manager.Build()` rebuilds `charts/` from a committed `Chart.lock` (exact pinned versions, no semver re-negotiation) — but if the lock is **absent**, `Build()` silently falls back to `Update()`, which re-negotiates semver ranges against the live repo index and can pull a newer subchart mid-reconcile. **Call `Build()` only, never `Update()`**; a missing/out-of-sync `Chart.lock` must surface as a fail-closed render error on CR status, not a silent re-resolve. Chart authors using dependencies **MUST commit `Chart.lock`** (accepted practice, like `package-lock.json` / `Cargo.lock`).
+
+### Auth contract (Helm single-registry limitation)
+
+Helm's registry client supports **one credential set per OCI hostname** and has **no per-dependency credential** ([helm/helm#11286](https://github.com/helm/helm/issues/11286)). The CR carries one `authSecretRef` for the parent pull. Contract for chart authors: subcharts must reside on the **same** (or a public) registry as the parent — reusing that `authSecretRef` — or stay vendored under `charts/` if they need distinct private credentials. Do not attempt per-dependency auth wiring; it does not exist in Helm.
+
+### Kustomize side — no change needed (verified)
+
+The analogous gap does **not** exist on the kustomize path. [`internal/source/kustomize.go`](../internal/source/kustomize.go) runs `krusty.Run` with `LoadRestrictionsNone`, which **fetches remote bases itself during the build**, and the git [`RootResolver`](../internal/source/gitresolver.go) is fail-closed on an unresolvable `?ref=`. Helm's `loader.Load()` is a pure unpack (no dependency fetch), which is why only the Helm loader needs this step. The one kustomize nuance — transitive-tag mutability — is already documented as a Phase 7.5 cache-soundness caveat, not a silent-under-render defect.
+
+### Tests (default job — real pull + hermetic)
+
+- **Vendored subchart still renders (regression guard)** — a chart with a pre-vendored `charts/<dep>.tgz` renders the subchart's objects; proves `Build()` does not break the existing vendored path.
+- **Declared-but-unvendored dependency now resolves** — a fixture parent chart declaring a `dependencies:` entry (with a committed `Chart.lock`) whose subchart is served by an in-process registry/repo resolves and renders the subchart's objects through the production `helmLoader`. Reuse the hermetic OCI/HTTP server pattern from Phase 7's `TestHelmLoaderOCIAuthed` / `TestHelmLoaderAuthedHTTPRepo`.
+- **No-dependency chart is a no-op** — a chart with no `dependencies:` loads unchanged (Build() no-op path).
+- **Missing/out-of-sync `Chart.lock` fails closed** — a chart declaring `dependencies:` without a committed lock returns a clear render error (the design's `Build()`-only contract), not a silent under-render.
+
+**Success criterion**: a chart declaring an unvendored `dependencies:` entry (with committed `Chart.lock`) renders its subchart's objects through the operator; a pre-vendored chart still renders unchanged; a no-dependency chart is unaffected; a missing/out-of-sync lock fails closed with a surfaced error; `make test` stays green offline while the hermetic subchart-resolution test proves the resolve path; once shipped, `metal-operator-remote-v2` can drop subchart vendoring in favor of `dependencies:` + `Chart.lock`.
+
+---
+
 ## Phase 8: Equivalence tests (~1 week)
 
 > **Status (2026-07):** SHIPPED for the four Helm-sourced operators — `metal-operator`,
@@ -1729,6 +1798,7 @@ make test-integration
 | 5 | Applier applies a resource via SSA and returns Healthy status; can also delete; strips caBundle from WebhookConfigurations and conversion-webhook CRDs before apply (so the injector owns caBundle) |
 | 6 | Reconciler successfully processes a CR end-to-end with mocked source; applies the ordered transformation list to both renders; produces seed/shoot manifest sets where the shoot set includes WebhookConfigurations (caBundle stripped, injector-labeled); status populated |
 | 7 | Operator pulls a real (small) chart **anonymously** from `oci://keppel.global.cloud.sap/ccloud-helm/...` and fetches a real pinned-ref kustomize overlay from the public `github.com/sapcc/helm-charts` source, rendering both to manifests; the optional credential seam is exercised by a self-hosted authed test but off by default; cache pulls once per version; `make test` stays green offline while the online tier passes in CI |
+| 7.6 | A chart declaring an **unvendored** `dependencies:` entry (with committed `Chart.lock`) renders its subchart's objects through the operator via `downloader.Manager.Build()`; a pre-vendored chart still renders unchanged; a no-dependency chart is unaffected; a missing/out-of-sync lock fails closed with a surfaced error; `make test` green offline with a hermetic subchart-resolution test; `metal-operator-remote-v2` can then drop vendoring |
 | 8 | Equivalence test passes for at least metal-operator vs. today's chart output (seed render matches the prior seed-side output; shoot render matches the prior shoot-side output) |
 | 9 | Chart 1 (`dual-deployment-operator`, this repo, via kubebuilder helm plugin) builds/publishes with CRD in `crds/`; chart 2 (`dual-deployment-operator-remote`, `sapcc/helm-charts`) depends on it and installs in a QA shoot-cp namespace — controller + CRD come up first (dependency), then the CR instances (templated from `cc/kube-secrets` values); the operator reconciles the applied CRs. `cmd/main.go` probes/metrics/leader-election confirmed wired and reflected in chart 1's `deployment.yaml`; the per-operator `shoot-rbac-bootstrap` MR is authored in chart 2 |
 | 9.5 | GHCR publish workflow (via `sapcc/go-makefile-maker`) publishes the operator image to `ghcr.io/<org>/dual-deployment-operator` on merge/tag with `GITHUB_TOKEN` (no keppel push secret); keppel mirrors it to `ccloud-ghcr-io-mirror`; chart 1's `values.yaml` references the keppel-mirrored path; `helm install` of chart 1 with the published tag starts a running manager Pod with green probes |
