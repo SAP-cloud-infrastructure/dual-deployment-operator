@@ -19,6 +19,7 @@ import (
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chart/loader"
+	"helm.sh/helm/v3/pkg/chartutil"
 	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/registry"
 	"helm.sh/helm/v3/pkg/repo"
@@ -274,4 +275,25 @@ func findTGZ(dest string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("source: no chart tgz found in %s", dest)
+}
+
+// requireLockIfDeps fails closed when the expanded chart at chartDir declares a
+// non-empty dependencies: list in Chart.yaml but has no Chart.lock. This guarantees
+// downloader.Manager.Build() only ever runs its deterministic lock-driven path and
+// never falls back to Update() (semver re-negotiation against the live index).
+func requireLockIfDeps(chartDir string) error {
+	meta, err := chartutil.LoadChartfile(filepath.Join(chartDir, "Chart.yaml"))
+	if err != nil {
+		return fmt.Errorf("source: read Chart.yaml: %w", err)
+	}
+	if len(meta.Dependencies) == 0 {
+		return nil
+	}
+	if _, err := os.Stat(filepath.Join(chartDir, "Chart.lock")); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("source: chart %q declares dependencies but has no Chart.lock; commit Chart.lock for deterministic resolution", meta.Name)
+		}
+		return fmt.Errorf("source: stat Chart.lock: %w", err)
+	}
+	return nil
 }
