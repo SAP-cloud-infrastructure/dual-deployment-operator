@@ -39,7 +39,7 @@ Refactor so the OCI registry-client options built in `pullOCI` are reusable by t
 **Files:**
 - Modify: `internal/source/helmloader.go` (`pullOCI`, add helper `ociRegistryClient`)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `internal/source/helmloader_test.go`:
 
@@ -58,12 +58,12 @@ func TestOCIRegistryClientOptionsReused(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/source/ -run TestOCIRegistryClientOptionsReused -v`
 Expected: FAIL — `l.ociRegistryClient undefined`.
 
-- [ ] **Step 3: Extract the helper and call it from `pullOCI`**
+- [x] **Step 3: Extract the helper and call it from `pullOCI`**
 
 In `internal/source/helmloader.go`, add the helper (mirrors the exact option set currently inline in `pullOCI`):
 
@@ -94,12 +94,12 @@ Then replace the inline option block in `pullOCI` (the `opts := []registry.Clien
 
 (Leave `resolveOCIDigest` as-is for this task — it is not on the render path and can be aligned in a later cleanup.)
 
-- [ ] **Step 4: Run tests to verify pass + no regression**
+- [x] **Step 4: Run tests to verify pass + no regression**
 
 Run: `go test ./internal/source/ -run 'TestOCIRegistryClientOptionsReused|TestHelmLoaderOCIAuthed|TestHelmLoader' -v`
 Expected: PASS (new test passes; existing OCI pull/auth tests still pass).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/source/helmloader.go internal/source/helmloader_test.go
