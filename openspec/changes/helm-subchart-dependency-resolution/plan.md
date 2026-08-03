@@ -508,7 +508,7 @@ Add one online test that exercises `Load` → `downloader.Manager.Build()` again
 **Files:**
 - Modify: `internal/source/helmloader_online_test.go` (append one test)
 
-- [ ] **Step 1: Pick and verify a stable public target chart**
+- [x] **Step 1: Pick and verify a stable public target chart**
 
 The target must: be a **classic HTTP(S) Helm repo** chart (the online tier already uses `pullHTTP` against `prometheus-community.github.io`, a stable GitHub-Pages-hosted repo), declare a **remote** `dependencies:` entry, ship a committed `Chart.lock`, and **not** vendor the subchart under `charts/` in its published `.tgz` (so `Build()` must actually fetch it).
 
@@ -525,7 +525,7 @@ tar tzf /tmp/ddo-verify/<chart>-<pinned>.tgz | grep -c '<chart>/charts/.*\.tgz' 
 
 Pin the exact `chart` + `version` that satisfies **all** conditions (remote dep, `Chart.lock` present, `charts/` empty in the published `.tgz`). Prefer a low-churn chart on a GitHub-Pages-hosted repo (like the existing `prometheus-community.github.io` target) for URL stability. Record the verified `name@version` and the expected subchart in the test comment. If no suitable prometheus-community chart qualifies, use another stable public HTTP repo chart that publishes unvendored with a lock.
 
-- [ ] **Step 2: Write the online test**
+- [x] **Step 2: Write the online test**
 
 Append to `internal/source/helmloader_online_test.go` (substitute the verified `repo`/`name`/`version`/`subchart` from Step 1). Match the existing tests' exact style — no skip helper, `t.Fatalf` on error:
 
@@ -561,17 +561,17 @@ func TestHelmLoaderOnlineResolvesRemoteDependency(t *testing.T) {
 
 No new imports beyond what the file already has (`context`, `testing`) — do NOT add a `strings` import or a skip helper.
 
-- [ ] **Step 3: Run the online test (with network)**
+- [x] **Step 3: Run the online test (with network)**
 
 Run: `go test ./internal/source/ -run TestHelmLoaderOnlineResolvesRemoteDependency -v`
 Expected: PASS — the loader pulls the parent, `Build()` fetches the declared remote subchart, and the subchart is present in `ch.Dependencies()`.
 
-- [ ] **Step 4: Confirm the whole online tier still runs together**
+- [x] **Step 4: Confirm the whole online tier still runs together**
 
 Run: `go test ./internal/source/ -run 'TestHelmLoaderOnline' -v`
 Expected: all three online tests PASS (the two existing + the new one), confirming the new test sits in the same ungated tier and doesn't change how the others run.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/source/helmloader_online_test.go
