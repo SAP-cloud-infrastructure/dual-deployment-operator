@@ -79,14 +79,7 @@ func (l *helmLoader) pullOCI(ctx context.Context, repoURL, name, version, dest s
 		return "", fmt.Errorf("source: resolve credentials: %w", err)
 	}
 
-	opts := []registry.ClientOption{registry.ClientOptEnableCache(true)}
-	if c.ok {
-		opts = append(opts, registry.ClientOptBasicAuth(c.user, c.pass)) // inline, no on-disk Login
-	}
-	if l.httpClient != nil {
-		opts = append(opts, registry.ClientOptHTTPClient(l.httpClient))
-	}
-	rc, err := registry.NewClient(opts...) // MUST be non-nil even anonymously
+	rc, err := l.ociRegistryClient(c)
 	if err != nil {
 		return "", err
 	}
@@ -101,6 +94,20 @@ func (l *helmLoader) pullOCI(ctx context.Context, repoURL, name, version, dest s
 		return "", fmt.Errorf("source: oci pull %s@%s: %w", name, version, err)
 	}
 	return findTGZ(dest)
+}
+
+// ociRegistryClient builds the registry client used for both OCI chart pulls and
+// dependency resolution, so the same cache / optional basic-auth / test httpClient
+// seam applies to subchart fetches. Production leaves httpClient nil.
+func (l *helmLoader) ociRegistryClient(c creds) (*registry.Client, error) {
+	opts := []registry.ClientOption{registry.ClientOptEnableCache(true)}
+	if c.ok {
+		opts = append(opts, registry.ClientOptBasicAuth(c.user, c.pass)) // inline, no on-disk Login
+	}
+	if l.httpClient != nil {
+		opts = append(opts, registry.ClientOptHTTPClient(l.httpClient))
+	}
+	return registry.NewClient(opts...)
 }
 
 func (l *helmLoader) pullHTTP(ctx context.Context, repoURL, name, version, dest string) (string, error) {

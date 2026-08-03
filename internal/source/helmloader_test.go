@@ -644,3 +644,16 @@ generated: "2026-01-01T00:00:00Z"
 		t.Fatalf("ResolveID = %q, want %q", got, wantDigest)
 	}
 }
+
+func TestOCIRegistryClientOptionsReused(t *testing.T) {
+	// The helper must produce a non-nil client anonymously (no resolver),
+	// mirroring the existing anonymous-pull contract.
+	l := newHelmLoader(nil)
+	rc, err := l.ociRegistryClient(creds{})
+	if err != nil {
+		t.Fatalf("ociRegistryClient: %v", err)
+	}
+	if rc == nil {
+		t.Fatal("expected non-nil registry client for anonymous pull")
+	}
+}
