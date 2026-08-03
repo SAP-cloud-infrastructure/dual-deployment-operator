@@ -1,0 +1,85 @@
+<!--
+SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company
+SPDX-License-Identifier: Apache-2.0
+-->
+
+## MODIFIED Requirements
+
+### Requirement: Pull to a temporary directory and clean up (loader-level, no chart caching)
+
+The loader MUST pull each chart into a temporary directory, resolve its declared Helm dependencies (see "Subchart dependency resolution at pull time"), load it via `loader.Load` into a `*chart.Chart`, and remove the temporary directory after the chart is loaded. The loader itself MUST NOT cache charts — every `Load` fetches fresh into a fresh temporary directory. Render-result caching is a separate concern performed one layer above the loader by the `cachingSource` decorator (see the `render-cache` capability), keyed by the resolved OCI digest via the loader's `ResolveID` method (see the `source-id-resolution` capability); a cache hit skips the `Load` entirely, but any `Load` that does run still fetches fresh and cleans up. This is a layering statement, not a contradiction: the loader is stateless per call, while caching lives above it. Because dependency resolution runs inside `Load`, it is transparently covered by the render cache — resolution is paid at most once per resolved parent chart id and requires no change to the cache key.
+
+#### Scenario: each Load fetches fresh and cleans up its temp dir
+
+- **WHEN** `Load` is called for a chart
+- **THEN** the loader pulls the chart `.tgz` into a temporary directory and loads it
+- **AND** removes the temporary directory before returning
+- **AND** does not retain the chart for a subsequent call (a second `Load` of the same `repo|name|version` pulls again)
+
+#### Scenario: render-layer cache can skip Load without changing loader semantics
+
+- **WHEN** the `cachingSource` decorator has a cached render for the resolved chart digest, mode, inputs, and namespace
+- **THEN** `Load` is not invoked for that render
+- **AND** WHEN the cache misses and `Load` is invoked, the loader still fetches fresh into a temporary directory and cleans up as specified
+
+---
+
+## ADDED Requirements
+
+### Requirement: Subchart dependency resolution at pull time
+
+The loader MUST resolve a chart's declared Helm dependencies at pull time so that a chart declaring `dependencies:` in `Chart.yaml` renders its subcharts without those subcharts being vendored under `charts/` in the pulled archive. After pulling the chart `.tgz` and before loading it, the loader MUST expand the archive to a chart directory and run Helm's `downloader.Manager.Build()` on that directory, then load the directory via `loader.Load`. A chart that declares no dependencies MUST be unaffected (the build step is a no-op), and a chart that already vendors its subcharts under `charts/` MUST continue to render those subcharts unchanged.
+
+#### Scenario: chart declaring an unvendored dependency resolves its subchart
+
+- **WHEN** `Load` is called for a chart whose `Chart.yaml` declares a `dependencies:` entry that is NOT vendored under `charts/`, and a committed `Chart.lock` pins that dependency
+- **THEN** the loader expands the pulled archive, runs `downloader.Manager.Build()` to fetch the pinned subchart, and loads the resulting directory
+- **AND** the returned `*chart.Chart` includes the resolved subchart so its templates render
+
+#### Scenario: chart with vendored subcharts still renders unchanged
+
+- **WHEN** `Load` is called for a chart that already contains its subchart vendored under `charts/`
+- **THEN** the loader loads the chart with its vendored subchart present
+- **AND** the returned `*chart.Chart` renders the subchart's objects exactly as before this capability existed
+
+#### Scenario: chart with no dependencies is unaffected
+
+- **WHEN** `Load` is called for a chart whose `Chart.yaml` declares no `dependencies:`
+- **THEN** the dependency-build step is a no-op
+- **AND** the returned `*chart.Chart` is identical to loading the pulled archive directly
+
+---
+
+### Requirement: Deterministic dependency resolution requires a committed Chart.lock
+
+Dependency resolution MUST be deterministic: the loader MUST run only Helm's lock-driven build path and MUST NOT fall back to semver re-negotiation against a live repository index during a render. Because Helm's `downloader.Manager.Build()` silently falls back to `Update()` (semver re-negotiation) when no `Chart.lock` is present, the loader MUST, before invoking `Build()`, detect when the expanded chart's `Chart.yaml` declares a non-empty `dependencies:` list and require a `Chart.lock` in the chart directory. If a dependency-declaring chart has no `Chart.lock`, `Load` MUST fail closed with a clear error rather than resolve dependencies non-deterministically. Charts that declare dependencies MUST commit `Chart.lock`.
+
+#### Scenario: missing Chart.lock on a dependency-declaring chart fails closed
+
+- **WHEN** `Load` is called for a chart whose `Chart.yaml` declares a non-empty `dependencies:` list but the pulled archive contains no `Chart.lock`
+- **THEN** `Load` returns a clear error identifying the missing lock
+- **AND** the loader does NOT invoke `Build()`'s semver-re-negotiation fallback and does NOT silently under-render
+
+#### Scenario: dependency-less chart does not require a lock
+
+- **WHEN** `Load` is called for a chart whose `Chart.yaml` declares no `dependencies:` and no `Chart.lock` is present
+- **THEN** the lock requirement does not apply
+- **AND** `Load` proceeds and returns the parsed `*chart.Chart`
+
+---
+
+### Requirement: Subchart resolution reuses the single source credential
+
+The loader MUST authenticate dependency resolution using the same single credential resolved for the parent chart pull (from the CR's one `authSecretRef`), reusing the parent pull's registry-client option set (registry cache, optional basic-auth, and the test HTTP-client seam). The loader MUST NOT attempt per-dependency credentials, because the Helm SDK supports only one credential set per registry host and provides no per-dependency credential mechanism. A subchart hosted on the same registry as the parent (or on a public registry) MUST resolve; a subchart on a different private registry requiring different credentials is out of scope and MUST surface as a clear authentication error rather than silently under-render.
+
+#### Scenario: subchart on the same registry as the parent resolves with the parent credential
+
+- **WHEN** `Load` resolves a dependency whose subchart is hosted on the same registry as the parent chart
+- **THEN** the loader uses the parent pull's credential/registry-client options for the dependency build
+- **AND** the subchart resolves without any additional credential configuration
+
+#### Scenario: subchart on a different private registry surfaces an auth error
+
+- **WHEN** `Load` resolves a dependency whose subchart is hosted on a different private registry requiring credentials not covered by the CR's `authSecretRef`
+- **THEN** `Build()` returns an authentication error that `Load` surfaces
+- **AND** the loader does NOT silently under-render the parent chart
