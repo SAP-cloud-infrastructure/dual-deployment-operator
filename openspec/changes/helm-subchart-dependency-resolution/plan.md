@@ -409,7 +409,7 @@ Prove the remaining spec scenarios end-to-end through `Load()`: vendored chart s
 **Files:**
 - Test: `internal/source/helmloader_deps_test.go` (append)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append:
 
@@ -471,26 +471,26 @@ func TestHelmLoaderMissingLockFailsClosed(t *testing.T) {
 
 > Implementer note: `pushParentWithVendoredSub`, `pushFixtureChart` (exists), and `pushParentDepsNoLock` all build on the in-process harness. Package the chart archives with `chartutil.Save`/`SaveDir` as the existing helpers do; do NOT add external services or module deps.
 
-- [ ] **Step 2: Run tests to verify they fail (where implementation is missing)**
+- [x] **Step 2: Run tests to verify they fail (where implementation is missing)**
 
 Run: `go test ./internal/source/ -run 'TestHelmLoaderVendoredSubchartUnchanged|TestHelmLoaderNoDependenciesNoOp|TestHelmLoaderMissingLockFailsClosed' -v`
 Expected: `MissingLockFailsClosed` may already PASS (Task 2/3 wired the pre-check); vendored/no-op FAIL only if their push helpers are not yet written. Implement the helpers to green.
 
-- [ ] **Step 3: Implement any missing push helpers**
+- [x] **Step 3: Implement any missing push helpers**
 
 Add the `pushParentWithVendoredSub` / `pushParentDepsNoLock` helpers in the test file, mirroring `pushFixtureChart`'s packaging (build a `*chart.Chart` in memory or via `chartutil.SaveDir`, then push through the harness's helm registry client). No production code changes expected in this task.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `go test ./internal/source/ -run 'TestHelmLoaderVendoredSubchartUnchanged|TestHelmLoaderNoDependenciesNoOp|TestHelmLoaderMissingLockFailsClosed' -v`
 Expected: PASS (all three).
 
-- [ ] **Step 5: Full package + lint + build gate**
+- [x] **Step 5: Full package + lint + build gate**
 
 Run: `go test ./internal/source/... && go build ./... && make run-golangci-lint`
 Expected: PASS, exit 0, lint clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add internal/source/helmloader_deps_test.go
