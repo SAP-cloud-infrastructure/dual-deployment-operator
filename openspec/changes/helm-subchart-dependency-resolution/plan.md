@@ -116,7 +116,7 @@ Add the pre-check that reads the expanded chart's `Chart.yaml`; if it declares a
 - Modify: `internal/source/helmloader.go` (add `requireLockIfDeps`)
 - Test: `internal/source/helmloader_deps_test.go` (create)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `internal/source/helmloader_deps_test.go`:
 
@@ -175,12 +175,12 @@ func TestRequireLockIfDeps(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/source/ -run TestRequireLockIfDeps -v`
 Expected: FAIL — `requireLockIfDeps undefined`.
 
-- [ ] **Step 3: Implement `requireLockIfDeps`**
+- [x] **Step 3: Implement `requireLockIfDeps`**
 
 In `internal/source/helmloader.go` add (and ensure imports include `helm.sh/helm/v3/pkg/chartutil`):
 
@@ -207,12 +207,12 @@ func requireLockIfDeps(chartDir string) error {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/source/ -run TestRequireLockIfDeps -v`
 Expected: PASS (all three sub-cases).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/source/helmloader.go internal/source/helmloader_deps_test.go
