@@ -21,6 +21,8 @@ import (
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/chartutil"
 	"helm.sh/helm/v3/pkg/cli"
+	"helm.sh/helm/v3/pkg/downloader"
+	"helm.sh/helm/v3/pkg/getter"
 	"helm.sh/helm/v3/pkg/registry"
 	"helm.sh/helm/v3/pkg/repo"
 	"sigs.k8s.io/yaml"
@@ -64,7 +66,13 @@ func (l *helmLoader) Load(ctx context.Context, repoURL, name, version string) (*
 	if err != nil {
 		return nil, err
 	}
-	return loader.Load(chartPath)
+	// Resolve declared subchart dependencies at pull time. downloader.Manager works
+	// on an unpacked directory, so expand the pulled .tgz first.
+	chartDir, err := l.expandAndResolveDeps(ctx, chartPath, tmp)
+	if err != nil {
+		return nil, err
+	}
+	return loader.Load(chartDir)
 }
 
 func (l *helmLoader) credFor(ctx context.Context, _ string) (creds, error) {
@@ -275,6 +283,66 @@ func findTGZ(dest string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("source: no chart tgz found in %s", dest)
+}
+
+// expandAndResolveDeps expands the pulled chart .tgz under tmp, fails closed if it
+// declares dependencies without a Chart.lock, runs downloader.Manager.Build() to
+// fetch the pinned subcharts, and returns the chart directory to load.
+func (l *helmLoader) expandAndResolveDeps(ctx context.Context, chartPath, tmp string) (string, error) {
+	unpacked := filepath.Join(tmp, "unpacked")
+	if err := os.MkdirAll(unpacked, 0o755); err != nil {
+		return "", err
+	}
+	f, err := os.Open(chartPath)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	if err := chartutil.Expand(unpacked, f); err != nil {
+		return "", fmt.Errorf("source: expand chart: %w", err)
+	}
+	chartDir, err := singleChildDir(unpacked)
+	if err != nil {
+		return "", err
+	}
+	if err := requireLockIfDeps(chartDir); err != nil {
+		return "", err
+	}
+	c, err := l.credFor(ctx, "")
+	if err != nil {
+		return "", fmt.Errorf("source: resolve credentials for deps: %w", err)
+	}
+	rc, err := l.ociRegistryClient(c)
+	if err != nil {
+		return "", err
+	}
+	m := &downloader.Manager{
+		Out:              io.Discard,
+		ChartPath:        chartDir,
+		Getters:          getter.All(l.settings),
+		RepositoryConfig: l.settings.RepositoryConfig,
+		RepositoryCache:  l.settings.RepositoryCache,
+		RegistryClient:   rc,
+		SkipUpdate:       true,
+	}
+	if err := m.Build(); err != nil {
+		return "", fmt.Errorf("source: build dependencies: %w", err)
+	}
+	return chartDir, nil
+}
+
+// singleChildDir returns the sole subdirectory of parent (the expanded chart root).
+func singleChildDir(parent string) (string, error) {
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return "", fmt.Errorf("source: read expanded dir: %w", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			return filepath.Join(parent, e.Name()), nil
+		}
+	}
+	return "", fmt.Errorf("source: expanded chart has no directory in %s", parent)
 }
 
 // requireLockIfDeps fails closed when the expanded chart at chartDir declares a
