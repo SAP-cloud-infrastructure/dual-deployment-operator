@@ -228,7 +228,7 @@ Insert the resolution step between pull and load, reusing the temp dir and the s
 **Files:**
 - Modify: `internal/source/helmloader.go` (`Load`)
 
-- [ ] **Step 1: Write the failing test (unvendored dependency resolves)**
+- [x] **Step 1: Write the failing test (unvendored dependency resolves)**
 
 Append to `internal/source/helmloader_deps_test.go`. This reuses the existing in-process OCI registry harness (`startAuthedOCIRegistry`, `pushFixtureChart`) from `helmloader_authed_test.go`; extend the harness only if needed to push a parent chart that declares a dependency on an already-pushed subchart, with a committed `Chart.lock`. Keep it hermetic (TLS `httptest`, loader `httpClient` seam):
 
@@ -312,12 +312,12 @@ func assertNoVendoredSubcharts(t *testing.T, tgzPath string) {
 > - `reg` accessor fields (`host`, `client`) build on the existing harness.
 > - `assertNoVendoredSubcharts` needs the imports `archive/tar`, `compress/gzip`, `io`, `os`, `strings` in the test file's import block.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/source/ -run TestHelmLoaderResolvesUnvendoredDependency -v`
 Expected: FAIL at the final assertion — the fixture-invariant check (`assertNoVendoredSubcharts`) MUST PASS (the pushed parent has an empty `charts/`), and then the "subchart 'sub' present" assertion FAILS because current `Load` calls `loader.Load(chartPath)` on the `.tgz` without resolving deps, so the unvendored subchart is absent. If the invariant check itself fails, the fixture helper is wrong (it vendored the subchart) — fix the helper, not the assertion, so the test keeps proving the fetch.
 
-- [ ] **Step 3: Implement the resolution step in `Load`**
+- [x] **Step 3: Implement the resolution step in `Load`**
 
 In `internal/source/helmloader.go`, ensure imports include `io`, `path/filepath`, `helm.sh/helm/v3/pkg/chartutil`, `helm.sh/helm/v3/pkg/downloader`, `helm.sh/helm/v3/pkg/getter`. Replace the tail of `Load` (currently `return loader.Load(chartPath)`) with:
 
@@ -388,12 +388,12 @@ func singleChildDir(parent string) (string, error) {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/source/ -run TestHelmLoaderResolvesUnvendoredDependency -v`
 Expected: PASS (subchart `sub` resolved and present).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/source/helmloader.go internal/source/helmloader_deps_test.go
