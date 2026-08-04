@@ -394,7 +394,16 @@ func resolveDepsPlan(chartDir string) (needsBuild bool, err error) {
 		return false, nil
 	}
 	for _, d := range meta.Dependencies {
-		if d.Repository != "" && !strings.HasPrefix(d.Repository, "file://") && !registry.IsOCI(d.Repository) {
+		if d.Repository == "" {
+			// Build's downloadAll loads an empty-repository dep via loader.LoadDir,
+			// which needs an unpacked charts/<name> directory — a packed .tgz alone
+			// makes Build fail. Require the unpacked form in the Build regime.
+			if !unpackedSubchartExists(chartDir, d.Name) {
+				return false, fmt.Errorf("source: chart %q dependency %q declares no repository but is not vendored as an unpacked charts/%s directory; Build cannot resolve it — provide an oci:// repository or vendor it unpacked", meta.Name, d.Name, d.Name)
+			}
+			continue
+		}
+		if !strings.HasPrefix(d.Repository, "file://") && !registry.IsOCI(d.Repository) {
 			return false, fmt.Errorf("source: chart %q dependency %q uses unsupported repository %q; when any dependency must be fetched, every dependency repository must be oci:// (or file://) because Build re-resolves the whole Chart.lock — vendor all subcharts, or republish this one via OCI", meta.Name, d.Name, d.Repository)
 		}
 	}
@@ -410,9 +419,17 @@ func resolveDepsPlan(chartDir string) (needsBuild bool, err error) {
 // vendoredSubchartExists reports whether subchart name is already present under
 // chartDir/charts as either an unpacked directory or a packed <name>-*.tgz.
 func vendoredSubchartExists(chartDir, name string) bool {
-	if fi, err := os.Stat(filepath.Join(chartDir, "charts", name)); err == nil && fi.IsDir() {
+	if unpackedSubchartExists(chartDir, name) {
 		return true
 	}
 	matches, err := filepath.Glob(filepath.Join(chartDir, "charts", name+"-*.tgz"))
 	return err == nil && len(matches) > 0
+}
+
+// unpackedSubchartExists reports whether subchart name is present under
+// chartDir/charts as an unpacked directory (the form Build's downloadAll requires
+// for an empty-repository dependency, via loader.LoadDir).
+func unpackedSubchartExists(chartDir, name string) bool {
+	fi, err := os.Stat(filepath.Join(chartDir, "charts", name))
+	return err == nil && fi.IsDir()
 }

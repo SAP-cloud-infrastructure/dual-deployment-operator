@@ -96,6 +96,16 @@ func TestResolveDepsPlan(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "oci://") {
 		t.Fatalf("error should point at the oci:// requirement, got: %v", err)
 	}
+
+	// Regression (empty-repo packed vendoring): an empty-repository dep vendored
+	// only as a packed charts/<name>-*.tgz is NOT Build-safe (Build's downloadAll
+	// loader.LoadDir needs an unpacked dir), so in the Build regime (an unvendored
+	// OCI dep also present) it must be rejected rather than fail inside Build.
+	if _, err := resolveDepsPlan(writeEmptyRepoPackedChartDir(t)); err == nil {
+		t.Fatal("expected error for empty-repo dep vendored only as a packed .tgz in the Build regime")
+	} else if !strings.Contains(err.Error(), "unpacked") {
+		t.Fatalf("error should mention the unpacked requirement, got: %v", err)
+	}
 }
 
 // writeMixedChartDir writes a chart declaring two deps: an unvendored OCI dep
@@ -122,6 +132,35 @@ func writeMixedChartDir(t *testing.T) string {
 	httpsub := &chart.Chart{Metadata: &chart.Metadata{APIVersion: chart.APIVersionV2, Name: "httpsub", Version: "0.1.0"}}
 	if _, err := chartutil.Save(httpsub, filepath.Join(chartDir, "charts")); err != nil {
 		t.Fatalf("vendor httpsub: %v", err)
+	}
+	return chartDir
+}
+
+// writeEmptyRepoPackedChartDir writes a chart declaring an unvendored OCI dep
+// (forces a Build) plus an empty-repository dep vendored only as a packed
+// charts/localsub-0.1.0.tgz. chartutil.Save writes the packed form, which Build's
+// loader.LoadDir cannot consume for an empty-repository dep.
+func writeEmptyRepoPackedChartDir(t *testing.T) string {
+	t.Helper()
+	const name = "c"
+	dir := t.TempDir()
+	chartDir := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Join(chartDir, "templates"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cy := "apiVersion: v2\nname: " + name + "\nversion: 0.1.0\n" +
+		"dependencies:\n" +
+		"  - name: ocisub\n    version: 0.1.0\n    repository: oci://example.test/charts\n" +
+		"  - name: localsub\n    version: 0.1.0\n"
+	if err := os.WriteFile(filepath.Join(chartDir, "Chart.yaml"), []byte(cy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(chartDir, "Chart.lock"), []byte("dependencies: []\ndigest: sha256:x\ngenerated: \"2026-01-01T00:00:00Z\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	localsub := &chart.Chart{Metadata: &chart.Metadata{APIVersion: chart.APIVersionV2, Name: "localsub", Version: "0.1.0"}}
+	if _, err := chartutil.Save(localsub, filepath.Join(chartDir, "charts")); err != nil {
+		t.Fatalf("vendor localsub: %v", err)
 	}
 	return chartDir
 }
