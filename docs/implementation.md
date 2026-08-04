@@ -1490,6 +1490,42 @@ The analogous gap does **not** exist on the kustomize path. [`internal/source/ku
 
 ---
 
+## Phase 7.7: Remove classic HTTP(S) Helm-repo parent-chart support (OCI-only) (~1 day)
+
+**Motivation.** Phase 7 shipped a classic HTTP(S) Helm-repo parent-chart path (`pullHTTP`, plus the `http(s)://` dispatch arms in `Load`/`ResolveID`/`repoScope` and `resolveHTTPID`) alongside the OCI path. Phase 7.6 then restricted **subchart dependency** resolution to OCI (HTTP(S)-repo subchart deps are rejected fail-closed, because `downloader.Manager.Build()` needs HTTP repos pre-registered/index-cached, which the operator does not do at reconcile time). This makes the HTTP(S) **parent** path a near-dead end: a chart pulled from an HTTP(S) repo that itself declares subchart dependencies will, in practice, declare those subcharts on the **same HTTP(S) repo** — which Phase 7.6 now rejects. So an HTTP(S) parent chart works only in the narrow case of "no dependencies, or all-vendored deps." The whole fleet publishes to the keppel **OCI** registry (verified in Phase 7: `oci://keppel.global.cloud.sap/ccloud-helm/...`, anonymous), so the HTTP(S) parent path carries maintenance + test surface for a case no operator uses. This phase removes it, making the Helm loader **OCI-only end to end**.
+
+> **Scope stance / community-practice note.** OCI is the current, sanctioned Helm distribution transport (classic `index.yaml` HTTP repos are legacy); an operator that renders a fixed, internally-published fleet has no reason to keep the HTTP(S) transport. This is a deliberate narrowing, not a capability regression the fleet relies on. Confirm no in-flight consumer sets `spec.source.helm.repo` to an `http(s)://` value before removing (all current CRs use `oci://`).
+
+### Removal scope (`internal/source/helmloader.go`)
+
+- Delete `pullHTTP` and `resolveHTTPID`.
+- In `Load`, `ResolveID`, and `repoScope`: drop the `http://` / `https://` dispatch arms; the `default` arm becomes "only `oci://` is supported" (the existing unsupported-scheme error already covers this — reword it to name OCI explicitly).
+- Remove now-unused HTTP-only helpers/imports (e.g. `repo.IndexFile` handling, `net/http`/`io` usages that only served `resolveHTTPID`) — let the compiler + `make run-golangci-lint` drive the cleanup.
+- Keep `hostOf`/`rejectURLCredentials` (still used by the OCI path).
+
+### CRD / admission (validate, do not silently narrow)
+
+- `spec.source.helm.repo` MUST now be an `oci://` URL. Add/extend the CEL validation (or the loader's `rejectURLCredentials`-adjacent guard) so a non-`oci://` Helm repo is rejected at admission with a clear message, rather than failing opaquely at reconcile. Check `api/v1alpha1/*_types.go` for an existing `repo` pattern/CEL rule and tighten it; run `make manifests generate`.
+
+### Tests to remove / adjust
+
+- Remove `TestHelmLoaderOnlineHTTPRepo` (online HTTP parent pull) and `TestHelmLoaderAuthedHTTPRepo` (hermetic authed HTTP repo) and any `resolveHTTPID`/`repoScope`-HTTP unit tests (`TestHelmLoader_ResolveID_HTTPIndexDigest`, `_HTTPVersionFallback`, `_HTTPUnkeyable`, `_repoScope_HTTPPathDistinguishes`, `_resolveHTTPID_*`, `TestHelmLoader_ResolveID_RejectsURLCredentials_HTTP`).
+- Add a unit test asserting a `http(s)://` Helm `repo` is rejected (at admission via CEL and/or at `Load`/`ResolveID` with a clear error).
+- The OCI online + hermetic authed tests stay; the kustomize git path is untouched (HTTP(S) there is a different transport — kustomize remote bases via krusty — and is NOT in scope here).
+
+### Docs to update
+
+- `helm-chart-loader` spec: the "Production Helm ChartLoader with scheme dispatch" requirement currently lists both `oci://` and `http(s)://`; narrow it to OCI-only and drop the "classic HTTP(S) repo reference is pulled via RepoURL" scenario (this is a MODIFIED + REMOVED delta in a NEW OpenSpec change for this phase).
+- README + AGENTS: change "Production Helm ChartLoader (OCI + HTTP(S) repos)" → "OCI-only".
+- design.md §3.3: drop the HTTP(S) parent-repo mention from the Helm source discriminator.
+- context.md: add a short revision recording the OCI-only narrowing and its rationale (HTTP parent + Phase 7.6 OCI-only subchart rule = dead end).
+
+**Success criterion**: the Helm loader accepts only `oci://` Helm sources; a `http(s)://` Helm `repo` is rejected with a clear error (admission + loader); `pullHTTP`/`resolveHTTPID` and their tests are gone; `go build ./...`, `make run-golangci-lint`, and the offline `internal/source` suite are green; `make manifests generate` produces no unexpected diff beyond the tightened CRD rule; kustomize path unchanged.
+
+> **Do this as its own OpenSpec change** (schema `sdd-plus-superpowers`), not folded into the Phase 7.6 change (already archived) or PR #16. It touches the CRD validation surface, so it is a slightly larger blast radius than 7.6.
+
+---
+
 ## Phase 8: Equivalence tests (~1 week)
 
 > **Status (2026-07):** SHIPPED for the four Helm-sourced operators — `metal-operator`,
