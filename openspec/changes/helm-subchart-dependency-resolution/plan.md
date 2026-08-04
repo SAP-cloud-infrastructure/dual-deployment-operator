@@ -590,17 +590,17 @@ Per design Decision "Scratch/expansion space reuses the Phase 7.5 cache emptyDir
 - Inspect: `chart/templates/deployment.yaml` (chart 1 manager container `securityContext`)
 - Modify (conditional): `internal/source/helmloader.go` (`Load` temp-base), `cmd/main.go` (pass cache dir), and/or `internal/source/gitresolver.go` for symmetry — only as the verification dictates.
 
-- [ ] **Step 1: Verify chart 1 securityContext**
+- [x] **Step 1: Verify chart 1 securityContext**
 
 Run: `grep -n "readOnlyRootFilesystem\|securityContext\|mountPath\|/cache/source\|emptyDir" chart/templates/deployment.yaml`
 Expected: determine whether `readOnlyRootFilesystem: true` is set on the manager container and whether the Phase 7.5 cache `emptyDir` is mounted (`/cache/source`).
 
-- [ ] **Step 2: Decide + record**
+- [x] **Step 2: Decide + record**
 
 - If `readOnlyRootFilesystem` is NOT set (root FS writable): no code change needed — `os.MkdirTemp("")` on the container layer is correct. Note this in the commit message and mark the remaining steps N/A.
 - If it IS set: the loader MUST write under a writable mount. Proceed to Step 3.
 
-- [ ] **Step 3 (conditional): Write the failing test for a configurable temp base**
+- [x] **Step 3 (conditional): Write the failing test for a configurable temp base**
 
 Add to `helmloader_test.go`:
 
@@ -620,21 +620,21 @@ func TestHelmLoaderHonorsScratchDir(t *testing.T) {
 }
 ```
 
-- [ ] **Step 4 (conditional): Run to verify fail**
+- [x] **Step 4 (conditional): Run to verify fail**
 
 Run: `go test ./internal/source/ -run TestHelmLoaderHonorsScratchDir -v`
 Expected: FAIL — `scratchDir` / `newScratchDir` undefined.
 
-- [ ] **Step 5 (conditional): Implement configurable scratch base**
+- [x] **Step 5 (conditional): Implement configurable scratch base**
 
 In `helmloader.go`: add `scratchDir string` to `helmLoader`, add `func (l *helmLoader) newScratchDir() (string, error) { return os.MkdirTemp(l.scratchDir, "ddo-helm-") }` (empty `scratchDir` reproduces today's behavior), and replace the `os.MkdirTemp("", "ddo-helm-")` call in `Load` with `l.newScratchDir()`. Wire the cache dir from `cmd/main.go` (reuse the Phase 7.5 `--source-cache-*`/`--chart-cache-dir` value) when constructing the loader, and mount points already exist from Phase 7.5.
 
-- [ ] **Step 6 (conditional): Run to verify pass + full gate**
+- [x] **Step 6 (conditional): Run to verify pass + full gate**
 
 Run: `go test ./internal/source/... && go build ./... && make run-golangci-lint`
 Expected: PASS, exit 0, lint clean.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add internal/source/helmloader.go cmd/main.go internal/source/helmloader_test.go
