@@ -54,6 +54,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var sourceScratchDir string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -72,6 +73,9 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&sourceScratchDir, "source-scratch-dir", "",
+		"Base directory for the Helm chart loader's per-render temp dir. Leave empty to use the OS temp dir; "+
+			"set to a writable mounted volume when the container root filesystem is read-only.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -193,7 +197,7 @@ func main() {
 			Cluster:      "seed",
 		},
 		SourceDeps: source.Deps{
-			ChartLoader:  source.NewHelmLoader(),
+			ChartLoader:  source.NewHelmLoader(sourceScratchDir),
 			RootResolver: source.NewGitResolver(),
 			RenderCache:  source.NewRenderCache(),
 		},

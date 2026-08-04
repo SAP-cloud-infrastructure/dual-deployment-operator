@@ -73,7 +73,7 @@ func TestEquivalence(t *testing.T) {
 
 			// Operator side: drive the real render+transform pipeline.
 			deps := source.Deps{
-				ChartLoader:  source.NewHelmLoader(),
+				ChartLoader:  source.NewHelmLoader(""),
 				RootResolver: source.NewGitResolver(),
 			}
 			opSeed, opShoot, err := CaptureOperator(context.Background(), f.CR, deps)

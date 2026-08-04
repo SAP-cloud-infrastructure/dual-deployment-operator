@@ -85,7 +85,7 @@ func TestFromWiresAuthSecretRefCredentials(t *testing.T) {
 	}).Build()
 
 	deps := Deps{
-		ChartLoader:        NewHelmLoader(),
+		ChartLoader:        NewHelmLoader(""),
 		RootResolver:       NewGitResolver(),
 		CredentialResolver: &CredentialResolver{Client: cl, Namespace: "ns"},
 	}

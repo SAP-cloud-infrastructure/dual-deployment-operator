@@ -657,3 +657,17 @@ func TestOCIRegistryClientOptionsReused(t *testing.T) {
 		t.Fatal("expected non-nil registry client for anonymous pull")
 	}
 }
+
+func TestHelmLoaderHonorsScratchDir(t *testing.T) {
+	scratch := t.TempDir()
+	l := newHelmLoader(nil)
+	l.scratchDir = scratch
+	tmp, err := l.newScratchDir()
+	if err != nil {
+		t.Fatalf("newScratchDir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmp) }()
+	if !strings.HasPrefix(tmp, scratch) {
+		t.Fatalf("temp dir %q not under configured scratch %q", tmp, scratch)
+	}
+}

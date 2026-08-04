@@ -37,10 +37,18 @@ type helmLoader struct {
 	// httpClient overrides the Helm registry client's HTTP client. Production MUST
 	// leave it nil; only tests set it, to trust an in-process self-signed TLS registry.
 	httpClient *http.Client
+	// scratchDir bases the per-Load temp dir; empty uses os.TempDir(). MUST be set
+	// to a writable mounted volume when the container root FS is read-only, else
+	// os.MkdirTemp("") fails at runtime.
+	scratchDir string
 }
 
 func newHelmLoader(resolve func(context.Context, string) (creds, error)) *helmLoader {
 	return &helmLoader{settings: cli.New(), resolve: resolve}
+}
+
+func (l *helmLoader) newScratchDir() (string, error) {
+	return os.MkdirTemp(l.scratchDir, "ddo-helm-")
 }
 
 func (l *helmLoader) Load(ctx context.Context, repoURL, name, version string) (*chart.Chart, error) {
@@ -48,7 +56,7 @@ func (l *helmLoader) Load(ctx context.Context, repoURL, name, version string) (*
 		return nil, err
 	}
 
-	tmp, err := os.MkdirTemp("", "ddo-helm-")
+	tmp, err := l.newScratchDir()
 	if err != nil {
 		return nil, err
 	}
