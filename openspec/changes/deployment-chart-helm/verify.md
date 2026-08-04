@@ -70,7 +70,7 @@ egress-label presence, per-shoot namespace independence).
 - **Writable source-scratch volume** (`controller-chart-deployment` spec): the manager runs
   `readOnlyRootFilesystem: true`, so the Helm loader's per-render `os.MkdirTemp` would fail
   without a writable mount. Both helm and kustomize render a `source-scratch` `emptyDir`
-  (`sizeLimit: 256Mi`) mounted at `/tmp/ddo-source` plus `--source-scratch-dir=/tmp/ddo-source`;
+  (`sizeLimit: 256Mi`) mounted at `/var/run/ddo-source` plus `--source-scratch-dir=/var/run/ddo-source`;
   the two renders are byte-identical on those lines and `readOnlyRootFilesystem: true` is
   preserved. The operator side (`--source-scratch-dir` flag + `source.NewHelmLoader`) shipped
   in the Phase 7.6 `helm-subchart-dependency-resolution` change; this closes the chart-side gap

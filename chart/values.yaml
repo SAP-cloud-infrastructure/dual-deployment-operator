@@ -26,7 +26,7 @@ manager:
   ##
   args:
     - --leader-elect=true
-    - --source-scratch-dir=/tmp/ddo-source
+    - --source-scratch-dir=/var/run/ddo-source
 
   ## Environment variables
   ##
@@ -109,7 +109,7 @@ manager:
   ## --source-scratch-dir would otherwise fail on the read-only root filesystem.
   extraVolumeMounts:
     - name: source-scratch
-      mountPath: /tmp/ddo-source
+      mountPath: /var/run/ddo-source
   extraVolumes:
     - name: source-scratch
       emptyDir:
