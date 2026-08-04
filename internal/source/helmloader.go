@@ -313,8 +313,12 @@ func (l *helmLoader) expandAndResolveDeps(ctx context.Context, chartPath, tmp st
 	if err != nil {
 		return "", err
 	}
-	if err := requireResolvableDeps(chartDir); err != nil {
+	needsBuild, err := resolveDepsPlan(chartDir)
+	if err != nil {
 		return "", err
+	}
+	if !needsBuild {
+		return chartDir, nil
 	}
 	c, err := l.credFor(ctx, "")
 	if err != nil {
@@ -353,44 +357,57 @@ func singleChildDir(parent string) (string, error) {
 	return "", fmt.Errorf("source: expanded chart has no directory in %s", parent)
 }
 
-// requireResolvableDeps fails closed when the expanded chart at chartDir declares
-// dependencies the loader cannot resolve deterministically. It enforces two
-// preconditions before downloader.Manager.Build() runs:
+// resolveDepsPlan decides whether downloader.Manager.Build() must run for the
+// expanded chart at chartDir, and fails closed on dependencies the loader cannot
+// resolve deterministically. It returns needsBuild=true only when at least one
+// declared dependency is NOT already vendored under charts/ and therefore must be
+// fetched. Preconditions enforced for any dependency that needs fetching:
 //
-//  1. Every declared dependency MUST use an OCI (oci://) repository. Helm's
-//     Build() resolves OCI (and file://) deps directly from the reference, but
-//     requires classic HTTP(S) dependency repos to be pre-registered in a
-//     repositories.yaml and index-cached — setup the operator does not perform at
-//     reconcile time (Build would fail with ErrRepoNotFound). HTTP(S)-repo
-//     subchart deps are therefore rejected fail-closed rather than under-render.
-//  2. If any dependency is declared, a Chart.lock MUST be present, so Build()
+//  1. Its repository MUST be an OCI (oci://) or file:// reference. Helm's Build()
+//     resolves those directly, but requires classic HTTP(S) dep repos to be
+//     pre-registered in a repositories.yaml and index-cached — setup the operator
+//     does not perform at reconcile time (Build would fail with ErrRepoNotFound).
+//     A chart may still declare an HTTP(S) repository AND vendor the subchart under
+//     charts/; that is accepted and needs no fetch.
+//  2. If any dependency needs fetching, a Chart.lock MUST be present, so Build()
 //     only ever runs its deterministic lock-driven path and never falls back to
 //     Update() (semver re-negotiation against the live index).
-//
-// A chart with no dependencies passes unconditionally (Build is a cheap no-op).
-func requireResolvableDeps(chartDir string) error {
+func resolveDepsPlan(chartDir string) (needsBuild bool, err error) {
 	meta, err := chartutil.LoadChartfile(filepath.Join(chartDir, "Chart.yaml"))
 	if err != nil {
-		return fmt.Errorf("source: read Chart.yaml: %w", err)
+		return false, fmt.Errorf("source: read Chart.yaml: %w", err)
 	}
 	if len(meta.Dependencies) == 0 {
-		return nil
+		return false, nil
 	}
+	fetch := false
 	for _, d := range meta.Dependencies {
-		// An empty repository means an in-archive (vendored) subchart, which needs
-		// no fetch; file:// is a local path. Both are fine. Everything else MUST be OCI.
-		if d.Repository == "" || strings.HasPrefix(d.Repository, "file://") {
+		if vendoredSubchartExists(chartDir, d.Name) {
 			continue
 		}
-		if !registry.IsOCI(d.Repository) {
-			return fmt.Errorf("source: chart %q dependency %q uses unsupported repository %q; subchart dependencies must use an oci:// repository (vendor the subchart or republish it via OCI)", meta.Name, d.Name, d.Repository)
+		fetch = true
+		if d.Repository != "" && !strings.HasPrefix(d.Repository, "file://") && !registry.IsOCI(d.Repository) {
+			return false, fmt.Errorf("source: chart %q dependency %q uses unsupported repository %q; subchart dependencies must use an oci:// repository or be vendored under charts/ (or republish the subchart via OCI)", meta.Name, d.Name, d.Repository)
 		}
+	}
+	if !fetch {
+		return false, nil
 	}
 	if _, err := os.Stat(filepath.Join(chartDir, "Chart.lock")); err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("source: chart %q declares dependencies but has no Chart.lock; commit Chart.lock for deterministic resolution", meta.Name)
+			return false, fmt.Errorf("source: chart %q declares unvendored dependencies but has no Chart.lock; commit Chart.lock for deterministic resolution", meta.Name)
 		}
-		return fmt.Errorf("source: stat Chart.lock: %w", err)
+		return false, fmt.Errorf("source: stat Chart.lock: %w", err)
 	}
-	return nil
+	return true, nil
+}
+
+// vendoredSubchartExists reports whether subchart name is already present under
+// chartDir/charts as either an unpacked directory or a packed <name>-*.tgz.
+func vendoredSubchartExists(chartDir, name string) bool {
+	if fi, err := os.Stat(filepath.Join(chartDir, "charts", name)); err == nil && fi.IsDir() {
+		return true
+	}
+	matches, err := filepath.Glob(filepath.Join(chartDir, "charts", name+"-*.tgz"))
+	return err == nil && len(matches) > 0
 }

@@ -24,8 +24,9 @@ import (
 )
 
 // writeChartDir writes a minimal expanded chart dir. A non-empty depRepo adds one
-// dependency on that repository; lock writes a Chart.lock.
-func writeChartDir(t *testing.T, depRepo string, lock bool) string {
+// dependency on that repository; lock writes a Chart.lock; vendorSub writes a
+// packed charts/sub-0.1.0.tgz so the dependency counts as already vendored.
+func writeChartDir(t *testing.T, depRepo string, lock, vendorSub bool) string {
 	t.Helper()
 	const name = "c"
 	dir := t.TempDir()
@@ -45,27 +46,46 @@ func writeChartDir(t *testing.T, depRepo string, lock bool) string {
 			t.Fatal(err)
 		}
 	}
+	if vendorSub {
+		sub := &chart.Chart{Metadata: &chart.Metadata{APIVersion: chart.APIVersionV2, Name: "sub", Version: "0.1.0"}}
+		if _, err := chartutil.Save(sub, filepath.Join(chartDir, "charts")); err != nil {
+			t.Fatalf("vendor sub: %v", err)
+		}
+	}
 	return chartDir
 }
 
-func TestRequireResolvableDeps(t *testing.T) {
+func TestResolveDepsPlan(t *testing.T) {
 	const ociRepo = "oci://example.test/charts"
 
-	if err := requireResolvableDeps(writeChartDir(t, ociRepo, false)); err == nil {
-		t.Fatal("expected error for dependency-declaring chart without Chart.lock")
+	needsBuild, err := resolveDepsPlan(writeChartDir(t, ociRepo, true, false))
+	if err != nil {
+		t.Fatalf("oci dep + lock, unvendored should pass: %v", err)
+	}
+	if !needsBuild {
+		t.Fatal("oci dep + lock, unvendored must require a Build")
+	}
+
+	if _, err := resolveDepsPlan(writeChartDir(t, ociRepo, false, false)); err == nil {
+		t.Fatal("expected error for unvendored dependency without Chart.lock")
 	} else if !strings.Contains(err.Error(), "Chart.lock") {
 		t.Fatalf("error should mention Chart.lock, got: %v", err)
 	}
-	if err := requireResolvableDeps(writeChartDir(t, ociRepo, true)); err != nil {
-		t.Fatalf("oci dep + lock should pass: %v", err)
+
+	if needsBuild, err := resolveDepsPlan(writeChartDir(t, "", false, false)); err != nil || needsBuild {
+		t.Fatalf("no-deps chart: needsBuild=%v err=%v", needsBuild, err)
 	}
-	if err := requireResolvableDeps(writeChartDir(t, "", false)); err != nil {
-		t.Fatalf("no-deps chart must not require a lock: %v", err)
-	}
-	if err := requireResolvableDeps(writeChartDir(t, "https://charts.example.com", true)); err == nil {
-		t.Fatal("expected error for HTTP(S)-repo dependency")
+
+	if _, err := resolveDepsPlan(writeChartDir(t, "https://charts.example.com", true, false)); err == nil {
+		t.Fatal("expected error for unvendored HTTP(S)-repo dependency")
 	} else if !strings.Contains(err.Error(), "oci://") {
 		t.Fatalf("error should point at the oci:// requirement, got: %v", err)
+	}
+
+	// Regression: an HTTP(S)-repo dependency that IS vendored under charts/ must be
+	// accepted with no Build (Helm loads the vendored subchart directly).
+	if needsBuild, err := resolveDepsPlan(writeChartDir(t, "https://charts.example.com", false, true)); err != nil || needsBuild {
+		t.Fatalf("vendored HTTP dep must be accepted with no Build: needsBuild=%v err=%v", needsBuild, err)
 	}
 }
 
@@ -223,7 +243,7 @@ func pushSubchartAndParent(t *testing.T, host string, client *http.Client) strin
 // pushParentWithVendoredSub pushes a parent chart that vendors its subchart under
 // charts/ by attaching the sub as a Go chart.Chart object before Save, which causes
 // chartutil.Save to write charts/sub-0.1.0.tgz inside the archive. The parent
-// declares NO Metadata.Dependencies, so requireResolvableDeps is satisfied without a
+// declares NO Metadata.Dependencies, so resolveDepsPlan is satisfied without a
 // Chart.lock. Returns the chart name that was pushed (for use in Load).
 func pushParentWithVendoredSub(t *testing.T, host string, client *http.Client) string {
 	t.Helper()
@@ -249,7 +269,7 @@ func pushParentWithVendoredSub(t *testing.T, host string, client *http.Client) s
 		Version:    "0.1.0",
 	}}
 	// Attach sub as a vendored dependency. chartutil.Save writes it to charts/sub-0.1.0.tgz
-	// inside the parent archive. No Metadata.Dependencies entry is added so requireResolvableDeps
+	// inside the parent archive. No Metadata.Dependencies entry is added so resolveDepsPlan
 	// returns nil (no lock required) and downloader.Manager.Build() is a no-op.
 	parent.AddDependency(sub)
 
@@ -302,7 +322,7 @@ func pushNoDepChart(t *testing.T, host string, client *http.Client) string {
 
 // pushParentDepsNoLock pushes a parent that declares a dependency in Chart.yaml but
 // ships no Chart.lock and no vendored charts/. This is the fixture for the fail-closed
-// pre-check: requireResolvableDeps must reject it before Build runs.
+// pre-check: resolveDepsPlan must reject it before Build runs.
 func pushParentDepsNoLock(t *testing.T, host string, client *http.Client) string {
 	t.Helper()
 	const parentName = "lockless-parent"
