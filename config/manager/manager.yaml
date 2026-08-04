@@ -63,6 +63,7 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
+          - --source-scratch-dir=/var/run/ddo-source
         env:
           - name: POD_NAMESPACE
             valueFrom:
@@ -101,7 +102,12 @@ spec:
           requests:
             cpu: 10m
             memory: 64Mi
-        volumeMounts: []
-      volumes: []
+        volumeMounts:
+          - name: source-scratch
+            mountPath: /var/run/ddo-source
+      volumes:
+        - name: source-scratch
+          emptyDir:
+            sizeLimit: 256Mi
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10
