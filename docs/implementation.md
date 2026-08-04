@@ -1526,6 +1526,24 @@ The analogous gap does **not** exist on the kustomize path. [`internal/source/ku
 >    `managedresources`/shoot overlay is self-contained and would render; only the
 >    seed overlay is blocked.
 
+> **Subchart-wrapping equivalence fixture — FOLLOW-UP (Phase 7.6 regression guard).** Once
+> Phase 7.6 (Helm subchart dependency resolution) shipped, add a fifth equivalence fixture
+> for a chart that declares an **OCI subchart dependency** — the natural consumer is
+> [`sapcc/helm-charts` `system/metal-operator-remote-v2`](https://github.com/sapcc/helm-charts/tree/master/system/metal-operator-remote-v2),
+> which wraps upstream `metal-operator` as a subchart. This is a strong end-to-end
+> regression guard: the golden side already runs `helm dependency build` (real Helm subchart
+> resolution), and the operator side now runs `downloader.Manager.Build()` inside
+> `helmLoader.Load` — the fixture proves the two produce equivalent rendered output for a
+> subchart-wrapping chart (before Phase 7.6 the operator side under-rendered, so this is the
+> exact bug the fixture catches). Not tied to a phase; runs behind `RUN_EQUIVALENCE=1` like
+> the other four (both sides fetch the subchart from the internal keppel OCI registry).
+> **Prerequisites to build it** (same shape as the existing fixtures): a pinned
+> `sapcc/helm-charts` commit SHA where `metal-operator-remote-v2` exists as an OCI
+> subchart-wrapping chart, its per-shoot overlay values, and the fixture `cr.yaml` under
+> `testdata/fixtures/metal-operator-remote-v2/`. Independent of PR #16 (the Phase 7.6 loader
+> change), which is covered by the hermetic `TestHelmLoaderResolvesUnvendoredDependency` and
+> `TestResolveDepsPlan`; this fixture adds the render-equivalence dimension on top.
+
 Fixtures directory:
 
 ```
