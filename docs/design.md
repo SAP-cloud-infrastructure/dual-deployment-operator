@@ -460,7 +460,7 @@ The CR is the entire configuration surface. Per-cluster differences live in `spe
 The operator supports two source types, exactly one of which must be set. Each source declares its own fields — no shared "values" at `source` level.
 
 **`spec.source.helm`**:
-- `repo` — OCI or HTTP Helm repo URL
+- `repo` — OCI Helm repo URL (`oci://…`; enforced at admission via CEL). Classic HTTP(S) Helm repositories are not supported (Phase 7.7 — see context.md).
 - `name` — chart name
 - `version` — semver constraint (must resolve deterministically)
 - `values` — common values, applied to both renders (map, passed to `helm template -f`)
