@@ -652,17 +652,17 @@ No CRD/RBAC change is expected (loader-internal), but run codegen to prove it an
 **Files:**
 - Verify: no diffs in `config/crd/bases/*`, `config/rbac/role.yaml`, `**/zz_generated.*`
 
-- [ ] **Step 1: Run codegen and confirm no diff**
+- [x] **Step 1: Run codegen and confirm no diff**
 
 Run: `make manifests generate && git status --porcelain config/ api/`
 Expected: no changes (this change adds no markers/types).
 
-- [ ] **Step 2: Full gate**
+- [x] **Step 2: Full gate**
 
 Run: `make check`
 Expected: build + test + lint all green (envtest may be needed for other packages; `internal/source` itself does not require it).
 
-- [ ] **Step 3: Commit (only if codegen produced intended diffs)**
+- [x] **Step 3: Commit (only if codegen produced intended diffs)**
 
 ```bash
 git add -A
