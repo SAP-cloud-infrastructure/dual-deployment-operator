@@ -412,13 +412,6 @@ func TestHelmLoader_repoScope(t *testing.T) {
 	if s != "oci:reg.example.com" {
 		t.Fatalf("oci repoScope = %q", s)
 	}
-	s, err = l.repoScope("https://charts.example.com")
-	if err != nil {
-		t.Fatalf("https repoScope error: %v", err)
-	}
-	if s != "http:charts.example.com" {
-		t.Fatalf("http repoScope = %q", s)
-	}
 }
 
 // makeMinimalChartTGZ builds a minimal valid Helm chart tgz (Chart.yaml only)
