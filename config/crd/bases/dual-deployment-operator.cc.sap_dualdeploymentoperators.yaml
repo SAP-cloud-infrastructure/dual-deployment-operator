@@ -87,6 +87,8 @@ spec:
                   or Kustomize.
                 properties:
                   helm:
+                    description: HelmSource references a chart in an OCI registry.
+                      repo MUST be an oci:// reference.
                     properties:
                       authSecretRef:
                         description: |-
@@ -119,6 +121,9 @@ spec:
                     - repo
                     - version
                     type: object
+                    x-kubernetes-validations:
+                    - message: helm repo must be an oci:// reference
+                      rule: self.repo.startsWith('oci://')
                   kustomize:
                     description: KustomizeSource references a kustomize root plus
                       its two overlay subpaths.

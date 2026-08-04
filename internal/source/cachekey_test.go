@@ -26,15 +26,6 @@ func TestCacheKey_DistinctDimensions(t *testing.T) {
 	}
 }
 
-func TestCacheKey_OCIvsHTTPNoCollision(t *testing.T) {
-	oci := keyParts{sourceKind: "helm", repoScope: "oci:reg.example.com", resolvedID: "x", mode: "seed", inputHash: "h", namespace: "ns"}
-	http := oci
-	http.repoScope = "http:reg.example.com"
-	if oci.String() == http.String() {
-		t.Fatal("OCI and HTTP sources must not share a cache key")
-	}
-}
-
 func TestHashValues_OrderInsensitive(t *testing.T) {
 	a := map[string]any{"a": 1, "b": map[string]any{"c": 2, "d": 3}}
 	b := map[string]any{"b": map[string]any{"d": 3, "c": 2}, "a": 1}

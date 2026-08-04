@@ -251,6 +251,16 @@ PR #14 removes both:
 
 ---
 
+### Revision 9: Helm loader narrowed to OCI-only (Phase 7.7)
+
+**Change**: The Helm `ChartLoader` (`internal/source/helmloader.go`) drops the classic HTTP(S) Helm-repo parent-chart path (`pullHTTP`, `resolveHTTPID`, and the `http(s)://` dispatch arms in `Load`/`ResolveID`/`repoScope`) and is now **OCI-only**. A non-`oci://` Helm `repo` is rejected at admission via a CEL rule on `spec.source.helm.repo` (`self.repo.startsWith('oci://')`), with the loader's unsupported-scheme error kept as a runtime backstop.
+
+**Why**: Phase 7 shipped the HTTP(S) parent path alongside OCI, but Phase 7.6 then restricted **subchart dependency** resolution to OCI (HTTP(S)-repo subchart deps rejected fail-closed, because `downloader.Manager.Build()` needs HTTP repos pre-registered/index-cached, which the operator does not do at reconcile time). That made the HTTP(S) **parent** path a dead end: an HTTP(S) parent chart works only with no dependencies or all-vendored deps — a case no fleet operator uses. The whole fleet publishes to the keppel **OCI** registry (verified Phase 7: `oci://keppel.global.cloud.sap/ccloud-helm/…`, anonymous). OCI is the current sanctioned Helm distribution transport; classic `index.yaml` HTTP repos are legacy. Removing the parent HTTP(S) path drops maintenance + test surface for a capability the fleet does not rely on and makes the Helm loader OCI-only end to end.
+
+**Scope stance**: deliberate narrowing, not a capability regression the fleet depends on. The operator is not deployed live yet (no live CRs), and all current CRs use `oci://`, so no migration is required; the CEL rule + loader error catch any future stray. The kustomize git/HTTP transport (krusty remote bases) is a different mechanism and is unaffected. The render-cache key struct is intentionally left unchanged (only `repoScope` loses its `http:` arm) — collapsing `sourceKind` into `repoScope`'s scheme was rejected as out-of-scope and as removing an extensibility seam.
+
+---
+
 ## Alternatives considered — rendering approach
 
 Nine options were surveyed. Summary of rejections:
