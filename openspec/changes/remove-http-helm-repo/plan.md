@@ -92,7 +92,7 @@ git add api/v1alpha1/dualdeploymentoperator_types.go config/crd internal/webhook
 git commit -m "feat(api): enforce oci:// helm repo via CEL (Phase 7.7)"
 ```
 
-- [ ] Task 1 complete
+- [x] Task 1 complete
 
 ---
 
@@ -179,7 +179,7 @@ git add internal/source/helmloader.go internal/source/helmloader_test.go
 git commit -m "feat(source): make Helm loader OCI-only, drop HTTP(S) repo path (Phase 7.7)"
 ```
 
-- [ ] Task 2 complete
+- [x] Task 2 complete
 
 ---
 
@@ -238,7 +238,7 @@ git add internal/source/helmloader_test.go internal/source/helmloader_online_tes
 git commit -m "test(source): drop classic HTTP Helm-repo tests, add OCI-only rejection tests (Phase 7.7)"
 ```
 
-- [ ] Task 3 complete
+- [x] Task 3 complete
 
 ---
 
@@ -276,7 +276,7 @@ git add README.md AGENTS.md docs/design.md docs/context.md
 git commit -m "docs: Helm loader is OCI-only (Phase 7.7)"
 ```
 
-- [ ] Task 4 complete
+- [x] Task 4 complete
 
 ---
 
@@ -310,4 +310,4 @@ Expected: `Change 'remove-http-helm-repo' is valid`.
 git add -A && git commit -m "chore: regenerate manifests (Phase 7.7)"   # only if there is a diff
 ```
 
-- [ ] Task 5 complete
+- [x] Task 5 complete
