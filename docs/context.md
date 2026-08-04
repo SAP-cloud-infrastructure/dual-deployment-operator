@@ -230,6 +230,27 @@ PR #14 removes both:
 
 ---
 
+### Revision 8: Subchart dependency resolution in the Helm loader (accepted — Phase 7.6)
+
+**Motivating event**: the operator-native rewrite of `metal-operator-remote` ([`sapcc/helm-charts` `system/metal-operator-remote-v2`](https://github.com/sapcc/helm-charts/tree/master/system/metal-operator-remote-v2)) wraps the upstream `metal-operator` chart as a Helm **subchart** dependency. This surfaced an implicit contract in the loader that blocks production usage of subchart-wrapping charts.
+
+**Finding**: `internal/source/helmloader.go` `Load()` pulls the chart archive and calls `loader.Load()` directly. It does **not** run Helm dependency resolution (`helm dependency build/update`). A chart that declares `dependencies:` in `Chart.yaml` therefore under-renders **silently** unless its subcharts are already vendored in the pulled archive under `charts/`. The operator thus imposes an undocumented "vendor all subcharts into the published `.tgz`" contract on chart authors.
+
+**Change** (full doc: [`subchart-dependency-resolution.md`](subchart-dependency-resolution.md); scheduled as **Phase 7.6**): add a dependency-build step to `Load()` before `loader.Load()`. Because Helm's `downloader.Manager` works on an unpacked chart **directory**, expand the pulled `.tgz` (`chartutil.Expand`), run `downloader.Manager{ChartPath, Getters, RepositoryConfig, RepositoryCache, RegistryClient, Out, Debug}.Build()` on the directory, then `loader.Load(dir)`. ~35–40 LOC in `internal/source/helmloader.go`; no CRD change, no new transformation.
+
+**Why this approach** (community-practice check, 2026-08): reconcile-time `downloader.Manager.Build()` is the **community-standard** pattern for server-side chart rendering — **Argo CD** resolves chart dependencies at sync time exactly this way. (**Flux** pre-resolves in a separate `source-controller` artifact step, which this operator has no analogue for.) No divergence from best practice; no pushback warranted.
+
+**Constraints baked into the design** (verified against Helm v3.21.3):
+1. **`Build()`-only, `Chart.lock` required.** `Manager.Build()` rebuilds `charts/` from a committed `Chart.lock` (exact pinned versions, no semver re-negotiation) — but if the lock is **absent** it silently falls back to `Update()`, which re-negotiates semver against the live index and can pull a newer subchart mid-reconcile. The design calls `Build()` only and treats a missing/out-of-sync lock as a fail-closed error surfaced to CR status, so charts using dependencies **MUST commit `Chart.lock`** (accepted practice, like `package-lock.json`).
+2. **Single-registry auth (Helm limitation, not ours).** Helm's registry client allows **one credential set per OCI hostname** and has **no per-dependency credential** ([helm/helm#11286](https://github.com/helm/helm/issues/11286)). Contract: subcharts must live on the same (or a public) registry as the parent (reusing the CR's one `authSecretRef`), or be pre-vendored under `charts/` if they need distinct private creds.
+3. **Reconcile-time network** — resolving deps needs egress to the subchart repo on every uncached render (covered by the Gardener egress labels already required for the parent pull; adds a "subchart repo unreachable → render fails" mode). The render cache (Phase 7.5, keyed on resolved OCI digest) makes `Build()` run once per chart version.
+
+**Kustomize side — not affected (verified).** The analogous silent-under-render gap does not exist on the kustomize path: `krusty.Run` with `LoadRestrictionsNone` fetches remote bases itself during the build, and the git `RootResolver` is fail-closed on an unresolvable `?ref=`. Only Helm's `loader.Load()` is a pure unpack that skips declared-but-absent deps. The one kustomize nuance (transitive-tag mutability) is already documented as a Phase 7.5 cache-soundness caveat, not a new gap.
+
+**Status**: accepted; scheduled as a **prerequisite** Phase 7.6 `internal/source` change. `metal-operator-remote-v2` ships with its subchart **vendored** (works against the operator today); once Phase 7.6 lands, `-v2` may declare a plain `dependencies:` entry + committed `Chart.lock` instead of vendoring.
+
+---
+
 ## Alternatives considered — rendering approach
 
 Nine options were surveyed. Summary of rejections:

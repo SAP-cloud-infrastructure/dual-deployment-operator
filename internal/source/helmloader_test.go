@@ -644,3 +644,30 @@ generated: "2026-01-01T00:00:00Z"
 		t.Fatalf("ResolveID = %q, want %q", got, wantDigest)
 	}
 }
+
+func TestOCIRegistryClientOptionsReused(t *testing.T) {
+	// The helper must produce a non-nil client anonymously (no resolver),
+	// mirroring the existing anonymous-pull contract.
+	l := newHelmLoader(nil)
+	rc, err := l.ociRegistryClient(creds{})
+	if err != nil {
+		t.Fatalf("ociRegistryClient: %v", err)
+	}
+	if rc == nil {
+		t.Fatal("expected non-nil registry client for anonymous pull")
+	}
+}
+
+func TestHelmLoaderHonorsScratchDir(t *testing.T) {
+	scratch := t.TempDir()
+	l := newHelmLoader(nil)
+	l.scratchDir = scratch
+	tmp, err := l.newScratchDir()
+	if err != nil {
+		t.Fatalf("newScratchDir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmp) }()
+	if !strings.HasPrefix(tmp, scratch) {
+		t.Fatalf("temp dir %q not under configured scratch %q", tmp, scratch)
+	}
+}

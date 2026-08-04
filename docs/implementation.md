@@ -1421,6 +1421,111 @@ The `--chart-cache-dir` / `--chart-cache-cap-mb` (or unified `--source-cache-*`)
 
 ---
 
+## Phase 7.6: Helm subchart dependency resolution (~1 day)
+
+**Blocks production usage of subchart-wrapping charts.** Phase 7's Helm loader ([`internal/source/helmloader.go`](../internal/source/helmloader.go)) pulls the chart `.tgz` and calls `loader.Load()` directly — it does **not** run Helm dependency resolution. A chart that declares `dependencies:` in `Chart.yaml` under-renders **silently** unless its subcharts are vendored under `charts/` in the pulled archive. The operator-native `metal-operator-remote-v2` wrapper ([`sapcc/helm-charts` `system/metal-operator-remote-v2`](https://github.com/sapcc/helm-charts/tree/master/system/metal-operator-remote-v2)) wraps the upstream `metal-operator` chart as a subchart dependency; it works today only because it **vendors** that subchart. This phase adds dependency resolution so wrapper charts can declare a plain `dependencies:` entry instead. Full rationale: [`subchart-dependency-resolution.md`](subchart-dependency-resolution.md) + `context.md` Revision 8.
+
+> **This is the community-standard approach.** Argo CD resolves chart dependencies at sync (reconcile) time via the Helm SDK exactly this way; Flux pre-resolves in a separate `source-controller` artifact step this operator has no analogue for. Reconcile-time `downloader.Manager.Build()` is the aligned choice; the Phase 7.5 render cache (keyed on the resolved OCI digest) makes it run once per chart version.
+
+### Change: dependency-build step in `Load()`
+
+`downloader.Manager` operates on an **unpacked chart directory**, not the in-memory `*chart.Chart`, so the pulled `.tgz` must be expanded first. Insert before `loader.Load()`:
+
+```go
+// after chartPath is the pulled .tgz (from pullOCI / pullHTTP):
+unpackedDir := filepath.Join(tmp, "unpacked")
+if err := os.MkdirAll(unpackedDir, 0o755); err != nil {
+    return nil, err
+}
+f, err := os.Open(chartPath)
+if err != nil {
+    return nil, err
+}
+defer func() { _ = f.Close() }()
+if err := chartutil.Expand(unpackedDir, f); err != nil {
+    return nil, fmt.Errorf("source: expand chart: %w", err)
+}
+chartDir := filepath.Join(unpackedDir, name)
+
+rc, err := registry.NewClient(opts...) // reuse the pullOCI option set (cache, optional basic-auth, test httpClient)
+if err != nil {
+    return nil, err
+}
+m := &downloader.Manager{
+    Out:              io.Discard,
+    ChartPath:        chartDir,
+    Getters:          getter.All(l.settings),
+    RepositoryConfig: l.settings.RepositoryConfig,
+    RepositoryCache:  l.settings.RepositoryCache,
+    RegistryClient:   rc,
+}
+if err := m.Build(); err != nil {
+    return nil, fmt.Errorf("source: build dependencies: %w", err)
+}
+return loader.Load(chartDir)
+```
+
+Estimated size: **~35–40 lines**. `l.settings`, `getter.All`, and the OCI registry-client option set already exist in the Phase 7 pull path and are reused/refactored. `Build()` on a chart with no `dependencies:` is a cheap no-op, so it runs **unconditionally** — no `Chart.yaml`-presence guard.
+
+### `Build()`-only, `Chart.lock` required (the determinism trap)
+
+Verified against Helm v3.21.3 `pkg/downloader/manager.go`: `Manager.Build()` rebuilds `charts/` from a committed `Chart.lock` (exact pinned versions, no semver re-negotiation) — but if the lock is **absent**, `Build()` silently falls back to `Update()`, which re-negotiates semver ranges against the live repo index and can pull a newer subchart mid-reconcile. **Call `Build()` only, never `Update()`**; a missing/out-of-sync `Chart.lock` must surface as a fail-closed render error on CR status, not a silent re-resolve. Chart authors using dependencies **MUST commit `Chart.lock`** (accepted practice, like `package-lock.json` / `Cargo.lock`).
+
+### Auth contract (Helm single-registry limitation)
+
+Helm's registry client supports **one credential set per OCI hostname** and has **no per-dependency credential** ([helm/helm#11286](https://github.com/helm/helm/issues/11286)). The CR carries one `authSecretRef` for the parent pull. Contract for chart authors: subcharts must reside on the **same** (or a public) registry as the parent — reusing that `authSecretRef` — or stay vendored under `charts/` if they need distinct private credentials. Do not attempt per-dependency auth wiring; it does not exist in Helm.
+
+### Kustomize side — no change needed (verified)
+
+The analogous gap does **not** exist on the kustomize path. [`internal/source/kustomize.go`](../internal/source/kustomize.go) runs `krusty.Run` with `LoadRestrictionsNone`, which **fetches remote bases itself during the build**, and the git [`RootResolver`](../internal/source/gitresolver.go) is fail-closed on an unresolvable `?ref=`. Helm's `loader.Load()` is a pure unpack (no dependency fetch), which is why only the Helm loader needs this step. The one kustomize nuance — transitive-tag mutability — is already documented as a Phase 7.5 cache-soundness caveat, not a silent-under-render defect.
+
+### Tests (default job — real pull + hermetic)
+
+- **Vendored subchart still renders (regression guard)** — a chart with a pre-vendored `charts/<dep>.tgz` renders the subchart's objects; proves `Build()` does not break the existing vendored path.
+- **Declared-but-unvendored dependency now resolves** — a fixture parent chart declaring a `dependencies:` entry (with a committed `Chart.lock`) whose subchart is served by an in-process registry/repo resolves and renders the subchart's objects through the production `helmLoader`. Reuse the hermetic OCI/HTTP server pattern from Phase 7's `TestHelmLoaderOCIAuthed` / `TestHelmLoaderAuthedHTTPRepo`.
+- **No-dependency chart is a no-op** — a chart with no `dependencies:` loads unchanged (Build() no-op path).
+- **Missing/out-of-sync `Chart.lock` fails closed** — a chart declaring `dependencies:` without a committed lock returns a clear render error (the design's `Build()`-only contract), not a silent under-render.
+
+**Success criterion**: a chart declaring an unvendored `dependencies:` entry (with committed `Chart.lock`) renders its subchart's objects through the operator; a pre-vendored chart still renders unchanged; a no-dependency chart is unaffected; a missing/out-of-sync lock fails closed with a surfaced error; `make test` stays green offline while the hermetic subchart-resolution test proves the resolve path; once shipped, `metal-operator-remote-v2` can drop subchart vendoring in favor of `dependencies:` + `Chart.lock`.
+
+---
+
+## Phase 7.7: Remove classic HTTP(S) Helm-repo parent-chart support (OCI-only) (~1 day)
+
+**Motivation.** Phase 7 shipped a classic HTTP(S) Helm-repo parent-chart path (`pullHTTP`, plus the `http(s)://` dispatch arms in `Load`/`ResolveID`/`repoScope` and `resolveHTTPID`) alongside the OCI path. Phase 7.6 then restricted **subchart dependency** resolution to OCI (HTTP(S)-repo subchart deps are rejected fail-closed, because `downloader.Manager.Build()` needs HTTP repos pre-registered/index-cached, which the operator does not do at reconcile time). This makes the HTTP(S) **parent** path a near-dead end: a chart pulled from an HTTP(S) repo that itself declares subchart dependencies will, in practice, declare those subcharts on the **same HTTP(S) repo** — which Phase 7.6 now rejects. So an HTTP(S) parent chart works only in the narrow case of "no dependencies, or all-vendored deps." The whole fleet publishes to the keppel **OCI** registry (verified in Phase 7: `oci://keppel.global.cloud.sap/ccloud-helm/...`, anonymous), so the HTTP(S) parent path carries maintenance + test surface for a case no operator uses. This phase removes it, making the Helm loader **OCI-only end to end**.
+
+> **Scope stance / community-practice note.** OCI is the current, sanctioned Helm distribution transport (classic `index.yaml` HTTP repos are legacy); an operator that renders a fixed, internally-published fleet has no reason to keep the HTTP(S) transport. This is a deliberate narrowing, not a capability regression the fleet relies on. Confirm no in-flight consumer sets `spec.source.helm.repo` to an `http(s)://` value before removing (all current CRs use `oci://`).
+
+### Removal scope (`internal/source/helmloader.go`)
+
+- Delete `pullHTTP` and `resolveHTTPID`.
+- In `Load`, `ResolveID`, and `repoScope`: drop the `http://` / `https://` dispatch arms; the `default` arm becomes "only `oci://` is supported" (the existing unsupported-scheme error already covers this — reword it to name OCI explicitly).
+- Remove now-unused HTTP-only helpers/imports (e.g. `repo.IndexFile` handling, `net/http`/`io` usages that only served `resolveHTTPID`) — let the compiler + `make run-golangci-lint` drive the cleanup.
+- Keep `hostOf`/`rejectURLCredentials` (still used by the OCI path).
+
+### CRD / admission (validate, do not silently narrow)
+
+- `spec.source.helm.repo` MUST now be an `oci://` URL. Add/extend the CEL validation (or the loader's `rejectURLCredentials`-adjacent guard) so a non-`oci://` Helm repo is rejected at admission with a clear message, rather than failing opaquely at reconcile. Check `api/v1alpha1/*_types.go` for an existing `repo` pattern/CEL rule and tighten it; run `make manifests generate`.
+
+### Tests to remove / adjust
+
+- Remove `TestHelmLoaderOnlineHTTPRepo` (online HTTP parent pull) and `TestHelmLoaderAuthedHTTPRepo` (hermetic authed HTTP repo) and any `resolveHTTPID`/`repoScope`-HTTP unit tests (`TestHelmLoader_ResolveID_HTTPIndexDigest`, `_HTTPVersionFallback`, `_HTTPUnkeyable`, `_repoScope_HTTPPathDistinguishes`, `_resolveHTTPID_*`, `TestHelmLoader_ResolveID_RejectsURLCredentials_HTTP`).
+- Add a unit test asserting a `http(s)://` Helm `repo` is rejected (at admission via CEL and/or at `Load`/`ResolveID` with a clear error).
+- The OCI online + hermetic authed tests stay; the kustomize git path is untouched (HTTP(S) there is a different transport — kustomize remote bases via krusty — and is NOT in scope here).
+
+### Docs to update
+
+- `helm-chart-loader` spec: the "Production Helm ChartLoader with scheme dispatch" requirement currently lists both `oci://` and `http(s)://`; narrow it to OCI-only and drop the "classic HTTP(S) repo reference is pulled via RepoURL" scenario (this is a MODIFIED + REMOVED delta in a NEW OpenSpec change for this phase).
+- README + AGENTS: change "Production Helm ChartLoader (OCI + HTTP(S) repos)" → "OCI-only".
+- design.md §3.3: drop the HTTP(S) parent-repo mention from the Helm source discriminator.
+- context.md: add a short revision recording the OCI-only narrowing and its rationale (HTTP parent + Phase 7.6 OCI-only subchart rule = dead end).
+
+**Success criterion**: the Helm loader accepts only `oci://` Helm sources; a `http(s)://` Helm `repo` is rejected with a clear error (admission + loader); `pullHTTP`/`resolveHTTPID` and their tests are gone; `go build ./...`, `make run-golangci-lint`, and the offline `internal/source` suite are green; `make manifests generate` produces no unexpected diff beyond the tightened CRD rule; kustomize path unchanged.
+
+> **Do this as its own OpenSpec change** (schema `sdd-plus-superpowers`), not folded into the Phase 7.6 change (already archived) or PR #16. It touches the CRD validation surface, so it is a slightly larger blast radius than 7.6.
+
+---
+
 ## Phase 8: Equivalence tests (~1 week)
 
 > **Status (2026-07):** SHIPPED for the four Helm-sourced operators — `metal-operator`,
@@ -1456,6 +1561,24 @@ The `--chart-cache-dir` / `--chart-cache-cap-mb` (or unified `--source-cache-*`)
 >    hence its own follow-up rather than part of the equivalence-tests change. The
 >    `managedresources`/shoot overlay is self-contained and would render; only the
 >    seed overlay is blocked.
+
+> **Subchart-wrapping equivalence fixture — FOLLOW-UP (Phase 7.6 regression guard).** Once
+> Phase 7.6 (Helm subchart dependency resolution) shipped, add a fifth equivalence fixture
+> for a chart that declares an **OCI subchart dependency** — the natural consumer is
+> [`sapcc/helm-charts` `system/metal-operator-remote-v2`](https://github.com/sapcc/helm-charts/tree/master/system/metal-operator-remote-v2),
+> which wraps upstream `metal-operator` as a subchart. This is a strong end-to-end
+> regression guard: the golden side already runs `helm dependency build` (real Helm subchart
+> resolution), and the operator side now runs `downloader.Manager.Build()` inside
+> `helmLoader.Load` — the fixture proves the two produce equivalent rendered output for a
+> subchart-wrapping chart (before Phase 7.6 the operator side under-rendered, so this is the
+> exact bug the fixture catches). Not tied to a phase; runs behind `RUN_EQUIVALENCE=1` like
+> the other four (both sides fetch the subchart from the internal keppel OCI registry).
+> **Prerequisites to build it** (same shape as the existing fixtures): a pinned
+> `sapcc/helm-charts` commit SHA where `metal-operator-remote-v2` exists as an OCI
+> subchart-wrapping chart, its per-shoot overlay values, and the fixture `cr.yaml` under
+> `testdata/fixtures/metal-operator-remote-v2/`. Independent of PR #16 (the Phase 7.6 loader
+> change), which is covered by the hermetic `TestHelmLoaderResolvesUnvendoredDependency` and
+> `TestResolveDepsPlan`; this fixture adds the render-equivalence dimension on top.
 
 Fixtures directory:
 
@@ -1572,6 +1695,22 @@ Scope the grant no broader than the seed render needs, but do not force it names
 - Chart 1 already includes the metrics `ServiceMonitor`/`metrics-reader` scaffolding via `config/prometheus/` + `config/rbac/`; keep or drop per whether the seed scrapes it, but do not silently lose the probes. A Deployment without probes is the gap this note closes.
 
 > **Chart-cache `emptyDir` volume moved to Phase 7.5.** Phase 7 does NOT cache (both loaders fetch fresh each reconcile), so no cache volume is needed for Phase 9. The `emptyDir` chart-cache mount is a **Phase 7.5** deliverable (see that phase), coupled with the caching implementation it supports.
+
+> **Writable scratch `emptyDir` REQUIRED for Phase 7.6 subchart resolution (read-only rootfs).** Chart 1's manager container runs with `securityContext.readOnlyRootFilesystem: true` (`config/manager/manager.yaml`). Phase 7.6 (Helm subchart dependency resolution) expands the pulled chart and runs `downloader.Manager.Build()` on disk, and the loader already writes a per-render temp dir for every Helm render. With a read-only root filesystem and **no** writable volume, `os.MkdirTemp("")` (which writes under `/tmp` on the container root) **fails at runtime** — so chart 1's `deployment.yaml` MUST mount a writable `emptyDir` for the loader's scratch space and pass its path via the operator's `--source-scratch-dir` flag. Phase 7.6 already shipped the operator side: `helmLoader.scratchDir` (via `source.NewHelmLoader(scratchDir)`) + the `--source-scratch-dir` manager flag; empty preserves `os.TempDir()` behavior for local/dev runs. Wire it in the chart as:
+> ```yaml
+> # pod spec
+> volumes:
+>   - name: source-scratch
+>     emptyDir:
+>       sizeLimit: 256Mi   # transient: pulled .tgz + expanded chart + fetched subcharts, cleaned up per render
+> # manager container
+> volumeMounts:
+>   - name: source-scratch
+>     mountPath: /tmp/ddo-source   # or any writable path; pass the same via --source-scratch-dir
+> args:
+>   - --source-scratch-dir=/tmp/ddo-source
+> ```
+> If Phase 7.5's `source-cache` `emptyDir` lands first, this scratch space MAY be consolidated onto that same volume (point `--source-scratch-dir` at a subdir of the cache mount) rather than adding a second `emptyDir` — the design decision in the `helm-subchart-dependency-resolution` change ("reuse the Phase 7.5 cache emptyDir; no new volume") applies. Either way, a writable mount is **mandatory**, not optional, because of `readOnlyRootFilesystem: true`. Without it the operator cannot render ANY Helm source (not just subchart-wrapping ones), since every `Load` needs the scratch dir.
 
 **Gardener egress labels on the operator Pod (Phase 7 cross-ref — REQUIRED for kustomize/OCI egress).** The operator runs per-shoot in a `shoot--cp--*` namespace **on the seed**, where Gardener enforces a `deny-all` NetworkPolicy plus label-gated allow policies. **Verified on `a-qa-de-200` / `shoot--cp--m-qa-de-200`** (2026-07): a Pod there has **no** egress — not even DNS — unless it carries the Gardener networking labels; the running `-remote` operators (ipam-capi, metal-operator, …) all carry them. A labeled smoke Pod reached `github.com` (git-upload-pack, HTTP 200 with refs advertised), `raw.githubusercontent.com` (HTTP 200), and `keppel.global.cloud.sap` (anonymous token + real chart tag list, HTTP 200); an unlabeled Pod failed DNS resolution entirely. So chart 1's `deployment.yaml` pod template **must** stamp these labels, or both the Helm OCI pull (keppel) and the kustomize root+transitive fetches (github) fail with DNS/connection errors:
 ```yaml
@@ -1729,6 +1868,7 @@ make test-integration
 | 5 | Applier applies a resource via SSA and returns Healthy status; can also delete; strips caBundle from WebhookConfigurations and conversion-webhook CRDs before apply (so the injector owns caBundle) |
 | 6 | Reconciler successfully processes a CR end-to-end with mocked source; applies the ordered transformation list to both renders; produces seed/shoot manifest sets where the shoot set includes WebhookConfigurations (caBundle stripped, injector-labeled); status populated |
 | 7 | Operator pulls a real (small) chart **anonymously** from `oci://keppel.global.cloud.sap/ccloud-helm/...` and fetches a real pinned-ref kustomize overlay from the public `github.com/sapcc/helm-charts` source, rendering both to manifests; the optional credential seam is exercised by a self-hosted authed test but off by default; cache pulls once per version; `make test` stays green offline while the online tier passes in CI |
+| 7.6 | A chart declaring an **unvendored** `dependencies:` entry (with committed `Chart.lock`) renders its subchart's objects through the operator via `downloader.Manager.Build()`; a pre-vendored chart still renders unchanged; a no-dependency chart is unaffected; a missing/out-of-sync lock fails closed with a surfaced error; `make test` green offline with a hermetic subchart-resolution test; `metal-operator-remote-v2` can then drop vendoring |
 | 8 | Equivalence test passes for at least metal-operator vs. today's chart output (seed render matches the prior seed-side output; shoot render matches the prior shoot-side output) |
 | 9 | Chart 1 (`dual-deployment-operator`, this repo, via kubebuilder helm plugin) builds/publishes with CRD in `crds/`; chart 2 (`dual-deployment-operator-remote`, `sapcc/helm-charts`) depends on it and installs in a QA shoot-cp namespace — controller + CRD come up first (dependency), then the CR instances (templated from `cc/kube-secrets` values); the operator reconciles the applied CRs. `cmd/main.go` probes/metrics/leader-election confirmed wired and reflected in chart 1's `deployment.yaml`; the per-operator `shoot-rbac-bootstrap` MR is authored in chart 2 |
 | 9.5 | GHCR publish workflow (via `sapcc/go-makefile-maker`) publishes the operator image to `ghcr.io/<org>/dual-deployment-operator` on merge/tag with `GITHUB_TOKEN` (no keppel push secret); keppel mirrors it to `ccloud-ghcr-io-mirror`; chart 1's `values.yaml` references the keppel-mirrored path; `helm install` of chart 1 with the published tag starts a running manager Pod with green probes |

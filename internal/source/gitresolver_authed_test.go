@@ -263,7 +263,7 @@ func TestFromThreadsHelmCredsToLoader(t *testing.T) {
 	}).Build()
 
 	deps := Deps{
-		ChartLoader:        NewHelmLoader(),
+		ChartLoader:        NewHelmLoader(""),
 		CredentialResolver: &CredentialResolver{Client: cl, Namespace: "ns"},
 	}
 	spec := v1alpha1.Source{Helm: &v1alpha1.HelmSource{

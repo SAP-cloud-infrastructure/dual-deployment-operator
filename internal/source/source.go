@@ -63,7 +63,13 @@ type Deps struct {
 
 // NewHelmLoader returns a production OCI+HTTP ChartLoader (no cache). The
 // per-source credential resolver is injected via Deps.CredentialResolver.
-func NewHelmLoader() ChartLoader { return newHelmLoader(nil) }
+// scratchDir bases the loader's per-Load temp dir; pass "" for os.TempDir(), or a
+// writable mounted path when the container root filesystem is read-only.
+func NewHelmLoader(scratchDir string) ChartLoader {
+	l := newHelmLoader(nil)
+	l.scratchDir = scratchDir
+	return l
+}
 
 // NewGitResolver returns a production git RootResolver.
 func NewGitResolver() RootResolver { return &gitResolver{} }
