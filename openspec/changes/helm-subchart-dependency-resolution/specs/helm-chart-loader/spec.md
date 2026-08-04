@@ -68,18 +68,20 @@ Dependency resolution MUST be deterministic: the loader MUST run only Helm's loc
 
 ---
 
-### Requirement: Subchart resolution reuses the single source credential
+### Requirement: Subchart dependencies MUST use OCI repositories
 
-The loader MUST authenticate dependency resolution using the same single credential resolved for the parent chart pull (from the CR's one `authSecretRef`), reusing the parent pull's registry-client option set (registry cache, optional basic-auth, and the test HTTP-client seam). The loader MUST NOT attempt per-dependency credentials, because the Helm SDK supports only one credential set per registry host and provides no per-dependency credential mechanism. A subchart hosted on the same registry as the parent (or on a public registry) MUST resolve; a subchart on a different private registry requiring different credentials is out of scope and MUST surface as a clear authentication error rather than silently under-render.
+Subchart dependency resolution is supported ONLY for dependencies whose `repository` is an OCI reference (`oci://…`). If a chart declares a dependency whose `repository` is a classic HTTP(S) Helm repository, `Load` MUST fail closed with a clear error rather than attempt resolution. Rationale: Helm's `downloader.Manager.Build()` resolves OCI (and `file://`) dependencies directly from the reference, but requires classic HTTP(S) dependency repositories to be pre-registered in a `repositories.yaml` and to have their index cached in the repository cache — setup the operator does not perform at reconcile time. Rather than resolve HTTP(S) subcharts non-deterministically or under-render silently, the loader rejects them. A chart whose subcharts must come from an HTTP(S) repository must either vendor those subcharts under `charts/` or republish them via an OCI registry.
 
-#### Scenario: subchart on the same registry as the parent resolves with the parent credential
+The loader MUST authenticate OCI dependency resolution using the same single credential resolved for the parent chart pull (from the CR's one `authSecretRef`), reusing the parent pull's registry-client option set (registry cache, optional basic-auth, and the test HTTP-client seam). The loader MUST NOT attempt per-dependency credentials, because the Helm SDK supports only one credential set per registry host and provides no per-dependency credential mechanism.
 
-- **WHEN** `Load` resolves a dependency whose subchart is hosted on the same registry as the parent chart
+#### Scenario: OCI subchart resolves with the parent credential
+
+- **WHEN** `Load` resolves a dependency whose `repository` is an `oci://` reference
 - **THEN** the loader uses the parent pull's credential/registry-client options for the dependency build
-- **AND** the subchart resolves without any additional credential configuration
+- **AND** the subchart resolves without any additional credential or repository configuration
 
-#### Scenario: subchart on a different private registry surfaces an auth error
+#### Scenario: HTTP(S)-repository subchart dependency is rejected fail-closed
 
-- **WHEN** `Load` resolves a dependency whose subchart is hosted on a different private registry requiring credentials not covered by the CR's `authSecretRef`
-- **THEN** `Build()` returns an authentication error that `Load` surfaces
-- **AND** the loader does NOT silently under-render the parent chart
+- **WHEN** `Load` processes a chart that declares a dependency whose `repository` is an `http://` or `https://` URL
+- **THEN** `Load` returns a clear error identifying the unsupported HTTP(S) subchart repository
+- **AND** the loader does NOT attempt resolution and does NOT silently under-render the parent chart
