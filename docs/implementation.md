@@ -1642,6 +1642,22 @@ Scope the grant no broader than the seed render needs, but do not force it names
 
 > **Chart-cache `emptyDir` volume moved to Phase 7.5.** Phase 7 does NOT cache (both loaders fetch fresh each reconcile), so no cache volume is needed for Phase 9. The `emptyDir` chart-cache mount is a **Phase 7.5** deliverable (see that phase), coupled with the caching implementation it supports.
 
+> **Writable scratch `emptyDir` REQUIRED for Phase 7.6 subchart resolution (read-only rootfs).** Chart 1's manager container runs with `securityContext.readOnlyRootFilesystem: true` (`config/manager/manager.yaml`). Phase 7.6 (Helm subchart dependency resolution) expands the pulled chart and runs `downloader.Manager.Build()` on disk, and the loader already writes a per-render temp dir for every Helm render. With a read-only root filesystem and **no** writable volume, `os.MkdirTemp("")` (which writes under `/tmp` on the container root) **fails at runtime** — so chart 1's `deployment.yaml` MUST mount a writable `emptyDir` for the loader's scratch space and pass its path via the operator's `--source-scratch-dir` flag. Phase 7.6 already shipped the operator side: `helmLoader.scratchDir` (via `source.NewHelmLoader(scratchDir)`) + the `--source-scratch-dir` manager flag; empty preserves `os.TempDir()` behavior for local/dev runs. Wire it in the chart as:
+> ```yaml
+> # pod spec
+> volumes:
+>   - name: source-scratch
+>     emptyDir:
+>       sizeLimit: 256Mi   # transient: pulled .tgz + expanded chart + fetched subcharts, cleaned up per render
+> # manager container
+> volumeMounts:
+>   - name: source-scratch
+>     mountPath: /tmp/ddo-source   # or any writable path; pass the same via --source-scratch-dir
+> args:
+>   - --source-scratch-dir=/tmp/ddo-source
+> ```
+> If Phase 7.5's `source-cache` `emptyDir` lands first, this scratch space MAY be consolidated onto that same volume (point `--source-scratch-dir` at a subdir of the cache mount) rather than adding a second `emptyDir` — the design decision in the `helm-subchart-dependency-resolution` change ("reuse the Phase 7.5 cache emptyDir; no new volume") applies. Either way, a writable mount is **mandatory**, not optional, because of `readOnlyRootFilesystem: true`. Without it the operator cannot render ANY Helm source (not just subchart-wrapping ones), since every `Load` needs the scratch dir.
+
 **Gardener egress labels on the operator Pod (Phase 7 cross-ref — REQUIRED for kustomize/OCI egress).** The operator runs per-shoot in a `shoot--cp--*` namespace **on the seed**, where Gardener enforces a `deny-all` NetworkPolicy plus label-gated allow policies. **Verified on `a-qa-de-200` / `shoot--cp--m-qa-de-200`** (2026-07): a Pod there has **no** egress — not even DNS — unless it carries the Gardener networking labels; the running `-remote` operators (ipam-capi, metal-operator, …) all carry them. A labeled smoke Pod reached `github.com` (git-upload-pack, HTTP 200 with refs advertised), `raw.githubusercontent.com` (HTTP 200), and `keppel.global.cloud.sap` (anonymous token + real chart tag list, HTTP 200); an unlabeled Pod failed DNS resolution entirely. So chart 1's `deployment.yaml` pod template **must** stamp these labels, or both the Helm OCI pull (keppel) and the kustomize root+transitive fetches (github) fail with DNS/connection errors:
 ```yaml
 metadata:
