@@ -42,6 +42,8 @@ type Source struct {
 	Kustomize *KustomizeSource `json:"kustomize,omitempty"`
 }
 
+// HelmSource references a chart in an OCI registry. repo MUST be an oci:// reference.
+// +kubebuilder:validation:XValidation:rule="self.repo.startsWith('oci://')",message="helm repo must be an oci:// reference"
 type HelmSource struct {
 	// +kubebuilder:validation:MinLength=1
 	Repo string `json:"repo"`
