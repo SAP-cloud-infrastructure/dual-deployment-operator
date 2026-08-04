@@ -26,6 +26,7 @@ manager:
   ##
   args:
     - --leader-elect=true
+    - --source-scratch-dir=/tmp/ddo-source
 
   ## Environment variables
   ##
@@ -102,6 +103,17 @@ manager:
   ## Termination grace period seconds
   ##
   terminationGracePeriodSeconds: 10
+
+  ## Writable scratch volume for the Helm/kustomize source loader. REQUIRED because
+  ## securityContext.readOnlyRootFilesystem is true: the loader's os.MkdirTemp under
+  ## --source-scratch-dir would otherwise fail on the read-only root filesystem.
+  extraVolumeMounts:
+    - name: source-scratch
+      mountPath: /tmp/ddo-source
+  extraVolumes:
+    - name: source-scratch
+      emptyDir:
+        sizeLimit: 256Mi
 
   ## Custom Deployment labels
   ##

@@ -67,9 +67,18 @@ egress-label presence, per-shoot namespace independence).
   ClusterRole rules, manager args, probes, and egress labels are equivalent. Pattern is
   community-idiomatic (kustomize namespace transformer ≡ `helm --namespace`; `kubectl -n`
   is not the portability mechanism because it does not rewrite RBAC subject namespaces).
+- **Writable source-scratch volume** (`controller-chart-deployment` spec): the manager runs
+  `readOnlyRootFilesystem: true`, so the Helm loader's per-render `os.MkdirTemp` would fail
+  without a writable mount. Both helm and kustomize render a `source-scratch` `emptyDir`
+  (`sizeLimit: 256Mi`) mounted at `/tmp/ddo-source` plus `--source-scratch-dir=/tmp/ddo-source`;
+  the two renders are byte-identical on those lines and `readOnlyRootFilesystem: true` is
+  preserved. The operator side (`--source-scratch-dir` flag + `source.NewHelmLoader`) shipped
+  in the Phase 7.6 `helm-subchart-dependency-resolution` change; this closes the chart-side gap
+  it flagged. Distinct from the deferred Phase 7.5 `source-cache` volume.
 - **Gates**: `go build ./...` exit 0; `helm lint` clean; `golangci-lint` 0 issues;
-  controller+api tests pass; codegen drift = only intended `config/rbac/role.yaml`;
-  REUSE compliant (`chart/**` covered); `openspec validate deployment-chart-helm` PASS.
+  controller+api tests pass; codegen drift = only intended `config/rbac/role.yaml` +
+  `config/manager/manager.yaml`; REUSE compliant (`chart/**` covered);
+  `openspec validate deployment-chart-helm` PASS.
 
 ## Issues
 

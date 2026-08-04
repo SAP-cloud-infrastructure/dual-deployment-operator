@@ -27,7 +27,7 @@ Per design.md §9.7, the operator ships as **two charts in two repos**, mirrorin
 - Any keppel registry reference in this repo's chart.
 - The GHCR image build/publish workflow (Phase 9.5 — separate change).
 - Wiring the validating admission webhook (Phase 10 — scaffold only, deferred to v2).
-- The chart-cache `emptyDir` volume (Phase 7.5 deliverable, already separate).
+- The chart-**cache** `emptyDir` volume (Phase 7.5 deliverable, already separate). NOTE: a separate writable **source-scratch** `emptyDir` IS in scope and required — see Decisions — because `readOnlyRootFilesystem: true` otherwise breaks the loader's per-render temp dir.
 
 ## Decisions
 
@@ -52,8 +52,8 @@ Per design.md §9.7, the operator ships as **two charts in two repos**, mirrorin
 - Alternatives considered: narrow namespaced Role first — rejected (docs already prove cluster-scoped seed resources exist).
 
 **Decision: deployment.yaml post-generation customizations**
-- Chosen: Gardener egress pod labels; `--leader-elect=true` + `LeaderElectionReleaseOnCancel: true`; liveness/readiness probes + metrics port confirmed; `replicas: 1`. No chart-cache `emptyDir`.
-- Reason: these are the gaps the plain kubebuilder scaffold leaves — egress labels are a verified networking prerequisite; leader election is required for safe rolling updates; probes prevent shipping a probe-less Deployment. The `emptyDir` belongs to Phase 7.5.
+- Chosen: Gardener egress pod labels; `--leader-elect=true` + `LeaderElectionReleaseOnCancel: true`; liveness/readiness probes + metrics port confirmed; `replicas: 1`; a writable `source-scratch` `emptyDir` (mounted at `--source-scratch-dir`). No chart-**cache** `emptyDir`.
+- Reason: these are the gaps the plain kubebuilder scaffold leaves — egress labels are a verified networking prerequisite; leader election is required for safe rolling updates; probes prevent shipping a probe-less Deployment; the source-scratch volume is required because `readOnlyRootFilesystem: true` breaks the loader's per-render `os.MkdirTemp` without a writable mount. The chart-**cache** `emptyDir` (distinct) belongs to Phase 7.5.
 - Alternatives considered: relying on the plugin's raw output — rejected (no egress labels, no confirmed probes → non-functional on the seed).
 
 ## Risks / Trade-offs

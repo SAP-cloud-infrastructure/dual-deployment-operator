@@ -81,3 +81,19 @@ Chart 1's `deployment.yaml` MUST set the manager container's `livenessProbe` (HT
 
 - **WHEN** the chart's `deployment.yaml` is rendered
 - **THEN** no `source-cache` (or equivalent chart-cache) `emptyDir` volume or mount is present
+
+### Requirement: Writable source-scratch volume for the read-only rootfs
+
+The manager container runs with `securityContext.readOnlyRootFilesystem: true`, but the Helm source loader writes a per-render scratch directory (`os.MkdirTemp` under `--source-scratch-dir`) to pull and expand charts. With a read-only root filesystem and no writable volume, that write fails at runtime and the operator cannot render ANY Helm source. Chart 1's `deployment.yaml` therefore MUST mount a writable `emptyDir` (name `source-scratch`, a bounded `sizeLimit`) at a fixed path and pass that path via `--source-scratch-dir`. This scratch volume is distinct from the deferred Phase 7.5 `source-cache` volume; it is mandatory, not an optimization. The kustomize `config/*` scaffold MUST carry the same volume, mount, and arg so helm and kustomize install the same operator.
+
+#### Scenario: scratch volume, mount, and arg are rendered
+
+- **WHEN** the chart's `deployment.yaml` is rendered
+- **THEN** the manager container args include `--source-scratch-dir=<path>`
+- **AND** a writable `emptyDir` volume named `source-scratch` is mounted at that path
+- **AND** `securityContext.readOnlyRootFilesystem` remains `true`
+
+#### Scenario: kustomize config carries the same scratch volume
+
+- **WHEN** `kustomize build config/default` (and `config/dev`) is rendered
+- **THEN** the manager container has the same `--source-scratch-dir` arg, `source-scratch` mount, and `emptyDir` volume as the chart
