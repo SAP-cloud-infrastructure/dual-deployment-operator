@@ -361,17 +361,21 @@ func singleChildDir(parent string) (string, error) {
 // expanded chart at chartDir, and fails closed on dependencies the loader cannot
 // resolve deterministically. It returns needsBuild=true only when at least one
 // declared dependency is NOT already vendored under charts/ and therefore must be
-// fetched. Preconditions enforced for any dependency that needs fetching:
+// fetched.
 //
-//  1. Its repository MUST be an OCI (oci://) or file:// reference. Helm's Build()
-//     resolves those directly, but requires classic HTTP(S) dep repos to be
-//     pre-registered in a repositories.yaml and index-cached — setup the operator
-//     does not perform at reconcile time (Build would fail with ErrRepoNotFound).
-//     A chart may still declare an HTTP(S) repository AND vendor the subchart under
-//     charts/; that is accepted and needs no fetch.
-//  2. If any dependency needs fetching, a Chart.lock MUST be present, so Build()
-//     only ever runs its deterministic lock-driven path and never falls back to
-//     Update() (semver re-negotiation against the live index).
+// Two regimes:
+//
+//   - Fully vendored (no dependency needs fetching): accepted with needsBuild=false
+//     regardless of repository scheme — Helm loads the vendored subcharts directly,
+//     no Build runs. A chart may declare repository: https://... and vendor charts/.
+//   - Build required (at least one dependency is unvendored): Build() reprocesses
+//     the ENTIRE Chart.lock (hasAllRepos + downloadAll over every dependency), so
+//     EVERY declared dependency — vendored or not — must be Build-safe: an OCI
+//     (oci://) or file:// repository. A classic HTTP(S) dependency repo would make
+//     Build fail with ErrRepoNotFound (the operator does not register repos or
+//     cache indexes at reconcile time), so it is rejected fail-closed even if that
+//     particular subchart happens to be vendored. A Chart.lock is also required so
+//     Build never falls back to Update() (semver re-negotiation against the index).
 func resolveDepsPlan(chartDir string) (needsBuild bool, err error) {
 	meta, err := chartutil.LoadChartfile(filepath.Join(chartDir, "Chart.yaml"))
 	if err != nil {
@@ -382,16 +386,17 @@ func resolveDepsPlan(chartDir string) (needsBuild bool, err error) {
 	}
 	fetch := false
 	for _, d := range meta.Dependencies {
-		if vendoredSubchartExists(chartDir, d.Name) {
-			continue
-		}
-		fetch = true
-		if d.Repository != "" && !strings.HasPrefix(d.Repository, "file://") && !registry.IsOCI(d.Repository) {
-			return false, fmt.Errorf("source: chart %q dependency %q uses unsupported repository %q; subchart dependencies must use an oci:// repository or be vendored under charts/ (or republish the subchart via OCI)", meta.Name, d.Name, d.Repository)
+		if !vendoredSubchartExists(chartDir, d.Name) {
+			fetch = true
 		}
 	}
 	if !fetch {
 		return false, nil
+	}
+	for _, d := range meta.Dependencies {
+		if d.Repository != "" && !strings.HasPrefix(d.Repository, "file://") && !registry.IsOCI(d.Repository) {
+			return false, fmt.Errorf("source: chart %q dependency %q uses unsupported repository %q; when any dependency must be fetched, every dependency repository must be oci:// (or file://) because Build re-resolves the whole Chart.lock — vendor all subcharts, or republish this one via OCI", meta.Name, d.Name, d.Repository)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(chartDir, "Chart.lock")); err != nil {
 		if os.IsNotExist(err) {

@@ -87,6 +87,43 @@ func TestResolveDepsPlan(t *testing.T) {
 	if needsBuild, err := resolveDepsPlan(writeChartDir(t, "https://charts.example.com", false, true)); err != nil || needsBuild {
 		t.Fatalf("vendored HTTP dep must be accepted with no Build: needsBuild=%v err=%v", needsBuild, err)
 	}
+
+	// Regression (partial vendoring): an unvendored OCI dep forces a Build, and
+	// Build re-resolves the whole Chart.lock — so a co-declared vendored HTTP(S)
+	// dep must be rejected fail-closed rather than fail opaquely inside Build.
+	if _, err := resolveDepsPlan(writeMixedChartDir(t)); err == nil {
+		t.Fatal("expected error for mixed unvendored-OCI + vendored-HTTP deps (Build re-resolves whole lock)")
+	} else if !strings.Contains(err.Error(), "oci://") {
+		t.Fatalf("error should point at the oci:// requirement, got: %v", err)
+	}
+}
+
+// writeMixedChartDir writes a chart declaring two deps: an unvendored OCI dep
+// (forces a Build) and a vendored HTTP(S) dep. Because Build re-resolves the whole
+// Chart.lock, the HTTP(S) dep is not Build-safe even though it is vendored.
+func writeMixedChartDir(t *testing.T) string {
+	t.Helper()
+	const name = "c"
+	dir := t.TempDir()
+	chartDir := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Join(chartDir, "templates"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cy := "apiVersion: v2\nname: " + name + "\nversion: 0.1.0\n" +
+		"dependencies:\n" +
+		"  - name: ocisub\n    version: 0.1.0\n    repository: oci://example.test/charts\n" +
+		"  - name: httpsub\n    version: 0.1.0\n    repository: https://charts.example.com\n"
+	if err := os.WriteFile(filepath.Join(chartDir, "Chart.yaml"), []byte(cy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(chartDir, "Chart.lock"), []byte("dependencies: []\ndigest: sha256:x\ngenerated: \"2026-01-01T00:00:00Z\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	httpsub := &chart.Chart{Metadata: &chart.Metadata{APIVersion: chart.APIVersionV2, Name: "httpsub", Version: "0.1.0"}}
+	if _, err := chartutil.Save(httpsub, filepath.Join(chartDir, "charts")); err != nil {
+		t.Fatalf("vendor httpsub: %v", err)
+	}
+	return chartDir
 }
 
 func TestHelmLoaderResolvesUnvendoredDependency(t *testing.T) {
