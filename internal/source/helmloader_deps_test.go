@@ -23,18 +23,19 @@ import (
 	"helm.sh/helm/v3/pkg/registry"
 )
 
-// writeChartDir writes a minimal expanded chart directory. If deps is true it adds
-// a dependencies: entry to Chart.yaml; if lock is true it also writes a Chart.lock.
-func writeChartDir(t *testing.T, name string, deps, lock bool) string {
+// writeChartDir writes a minimal expanded chart dir. A non-empty depRepo adds one
+// dependency on that repository; lock writes a Chart.lock.
+func writeChartDir(t *testing.T, depRepo string, lock bool) string {
 	t.Helper()
+	const name = "c"
 	dir := t.TempDir()
 	chartDir := filepath.Join(dir, name)
 	if err := os.MkdirAll(filepath.Join(chartDir, "templates"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cy := "apiVersion: v2\nname: " + name + "\nversion: 0.1.0\n"
-	if deps {
-		cy += "dependencies:\n  - name: sub\n    version: 0.1.0\n    repository: oci://example.test/charts\n"
+	if depRepo != "" {
+		cy += "dependencies:\n  - name: sub\n    version: 0.1.0\n    repository: " + depRepo + "\n"
 	}
 	if err := os.WriteFile(filepath.Join(chartDir, "Chart.yaml"), []byte(cy), 0o644); err != nil {
 		t.Fatal(err)
@@ -47,20 +48,24 @@ func writeChartDir(t *testing.T, name string, deps, lock bool) string {
 	return chartDir
 }
 
-func TestRequireLockIfDeps(t *testing.T) {
-	// deps + no lock => error
-	if err := requireLockIfDeps(writeChartDir(t, "c", true, false)); err == nil {
+func TestRequireResolvableDeps(t *testing.T) {
+	const ociRepo = "oci://example.test/charts"
+
+	if err := requireResolvableDeps(writeChartDir(t, ociRepo, false)); err == nil {
 		t.Fatal("expected error for dependency-declaring chart without Chart.lock")
 	} else if !strings.Contains(err.Error(), "Chart.lock") {
 		t.Fatalf("error should mention Chart.lock, got: %v", err)
 	}
-	// deps + lock => ok
-	if err := requireLockIfDeps(writeChartDir(t, "c", true, true)); err != nil {
-		t.Fatalf("deps+lock should pass: %v", err)
+	if err := requireResolvableDeps(writeChartDir(t, ociRepo, true)); err != nil {
+		t.Fatalf("oci dep + lock should pass: %v", err)
 	}
-	// no deps + no lock => ok (no requirement)
-	if err := requireLockIfDeps(writeChartDir(t, "c", false, false)); err != nil {
+	if err := requireResolvableDeps(writeChartDir(t, "", false)); err != nil {
 		t.Fatalf("no-deps chart must not require a lock: %v", err)
+	}
+	if err := requireResolvableDeps(writeChartDir(t, "https://charts.example.com", true)); err == nil {
+		t.Fatal("expected error for HTTP(S)-repo dependency")
+	} else if !strings.Contains(err.Error(), "oci://") {
+		t.Fatalf("error should point at the oci:// requirement, got: %v", err)
 	}
 }
 
@@ -218,7 +223,7 @@ func pushSubchartAndParent(t *testing.T, host string, client *http.Client) strin
 // pushParentWithVendoredSub pushes a parent chart that vendors its subchart under
 // charts/ by attaching the sub as a Go chart.Chart object before Save, which causes
 // chartutil.Save to write charts/sub-0.1.0.tgz inside the archive. The parent
-// declares NO Metadata.Dependencies, so requireLockIfDeps is satisfied without a
+// declares NO Metadata.Dependencies, so requireResolvableDeps is satisfied without a
 // Chart.lock. Returns the chart name that was pushed (for use in Load).
 func pushParentWithVendoredSub(t *testing.T, host string, client *http.Client) string {
 	t.Helper()
@@ -244,7 +249,7 @@ func pushParentWithVendoredSub(t *testing.T, host string, client *http.Client) s
 		Version:    "0.1.0",
 	}}
 	// Attach sub as a vendored dependency. chartutil.Save writes it to charts/sub-0.1.0.tgz
-	// inside the parent archive. No Metadata.Dependencies entry is added so requireLockIfDeps
+	// inside the parent archive. No Metadata.Dependencies entry is added so requireResolvableDeps
 	// returns nil (no lock required) and downloader.Manager.Build() is a no-op.
 	parent.AddDependency(sub)
 
@@ -297,7 +302,7 @@ func pushNoDepChart(t *testing.T, host string, client *http.Client) string {
 
 // pushParentDepsNoLock pushes a parent that declares a dependency in Chart.yaml but
 // ships no Chart.lock and no vendored charts/. This is the fixture for the fail-closed
-// pre-check: requireLockIfDeps must reject it before Build runs.
+// pre-check: requireResolvableDeps must reject it before Build runs.
 func pushParentDepsNoLock(t *testing.T, host string, client *http.Client) string {
 	t.Helper()
 	const parentName = "lockless-parent"
