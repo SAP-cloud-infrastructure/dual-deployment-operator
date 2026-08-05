@@ -9,7 +9,7 @@
 
 ## TL;DR
 
-The `patch` transform is **fail-loud on zero matches** and every transform runs against **both** renders (seed and shoot) independently. So a `patch` whose target kind exists in only ONE render (e.g. a `ValidatingWebhookConfiguration`, which is shoot-only) **errors on the other render** and fails the whole reconcile — even though the patch is correct and matched in the render it was meant for.
+**Before this change:** the `patch` transform was **fail-loud on zero matches** and every transform runs against **both** renders (seed and shoot) independently. So a `patch` whose target kind exists in only ONE render (e.g. a `ValidatingWebhookConfiguration`, which is shoot-only) **errored on the other render** and failed the whole reconcile — even though the patch is correct and matched in the render it was meant for.
 
 This blocks the r7 pattern the design itself prescribes (§3.4.4): "the injector label is added with the existing `patch` transformation … stamped by the chart on the upstream webhook objects." A chart that lets the upstream subchart emit the VWC (shoot render) and uses a CR `patch` to add the injector `--target-label` cannot work today: the patch matches the VWC in the shoot render but finds zero matches in the seed render → `SeedTransformFailed`.
 
@@ -85,8 +85,10 @@ None of these change the delivery or source layers.
 
 ## 5. Decision framing
 
+> **As shipped (see Status at top):** form (A) was adopted but *simplified* — a zero-match `patch` is always a clean, silent no-op, with **no** controller backstop and **no** `TransformNoMatch` error (not "error on match-nothing-anywhere"). Form (B) (`scope:` CRD field) was deferred as non-breaking future work. The bullets below record the original decision framing.
+
 - Proposed as a small `internal/transform` change, prerequisite for any chart that patches a single-render-only kind — starting with `-v2`'s webhook-injector label. It is not deferrable if `-v2` webhooks are to function.
-- Prefer form (A) (no CRD change; error only on match-nothing-anywhere) unless an explicit scope field is independently wanted.
+- Prefer form (A) (no CRD change) unless an explicit scope field is independently wanted. **(Shipped: form (A) with no backstop — zero-match is always a silent no-op, consistent with `rewriteWebhookURL`/`filterKinds`.)**
 - Sequencing vs. the helm-charts side: this operator change lands before `-v2` is cut over on a live cluster. `-v2` ships the CR patch transform with a comment that it requires this enhancement; a cluster on the un-enhanced operator must not enable the CR (the reconcile would fail `SeedTransformFailed`).
 
 Rationale and evolution are recorded in `context.md` Revision 10.
