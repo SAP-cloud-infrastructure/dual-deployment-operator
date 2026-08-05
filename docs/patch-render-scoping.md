@@ -1,7 +1,7 @@
 # dual-deployment-operator — Per-Render Patch Scoping (no-op on zero-match)
 
 **Status:** Implemented — a small `internal/transform` change. Implemented shape: a zero-match `patch` is a clean, **silent no-op** (return the input manifests unchanged, no error), consistent with `rewriteWebhookURL` and `filterKinds`. No controller change, no cross-render backstop, no `TransformNoMatch` status/event (simpler than the "error if nothing matches anywhere" form described in §3–§4 below, which was the original proposal). ~3-line deletion of the fail-loud guard in `internal/transform/patch.go`. Unblocks production webhooks for shoot-only-object charts (`metal-operator-remote-v2`).
-**Scope:** `internal/transform` (the `patch` transform) + a few lines in the controller transform loop — no CRD change in the preferred form (§3). No source/loader/delivery change.
+**Scope (as shipped):** `internal/transform/patch.go` only — no controller change, no CRD change, no source/loader/delivery change. (The original proposal in §3–§4 below also touched the controller transform loop for a cross-render backstop; that backstop was dropped — see the Status note above.)
 **Motivating consumer:** [`sapcc/helm-charts` `system/metal-operator-remote-v2`](https://github.com/sapcc/helm-charts/tree/master/system/metal-operator-remote-v2) — needs a `patch` to stamp the webhook-injector target-label on a shoot-only `ValidatingWebhookConfiguration`.
 **Related design:** see `design.md` §3.4.4 (labeling webhook objects for the injector), §3.8 (injector coexistence); `context.md` "Revision 10".
 
@@ -13,7 +13,7 @@ The `patch` transform is **fail-loud on zero matches** and every transform runs 
 
 This blocks the r7 pattern the design itself prescribes (§3.4.4): "the injector label is added with the existing `patch` transformation … stamped by the chart on the upstream webhook objects." A chart that lets the upstream subchart emit the VWC (shoot render) and uses a CR `patch` to add the injector `--target-label` cannot work today: the patch matches the VWC in the shoot render but finds zero matches in the seed render → `SeedTransformFailed`.
 
-This change makes a `patch` that matches **at least one object across the renders it is applied to** succeed, instead of erroring per-render on zero matches. Preferred form: a per-render zero-match is a **no-op**, and a patch is an error only if it matches **nothing in any render**. It is **~10–20 lines** in `internal/transform` + the controller loop, no new transform type.
+This change makes a `patch` that matches nothing in a render a **clean, silent no-op** on that render, instead of erroring. **As shipped**, a zero-match is a silent no-op in every case (one render or both) — consistent with `rewriteWebhookURL` and `filterKinds`; it is a ~3-line deletion of the fail-loud guard in `internal/transform/patch.go`, with no controller change. (The original proposal below (§3–§4) additionally kept a cross-render "matched nothing anywhere" backstop in the controller; that was dropped for simplicity and cross-transform consistency — see the Status note at the top.)
 
 ---
 
@@ -64,6 +64,8 @@ Net: the design's own prescribed mechanism (§3.4.4) is not executable with the 
 `patch` cannot target a kind that exists in only one of the two renders. Because transforms are applied per-render and `patch` errors on zero matches, a shoot-only (or seed-only) target always fails on the other render. This directly contradicts design.md §3.4.4, which assumes a patch can stamp the injector label on webhook objects.
 
 ## 3. Proposed change
+
+> **As shipped (see Status at top):** form (A) below was simplified — a zero-match `patch` is a clean, silent no-op with **no** cross-render backstop and **no** controller change. The "matched nothing anywhere → error" check described in (A) was dropped so `patch` behaves identically to `rewriteWebhookURL`/`filterKinds`. §3–§4 record the original proposal for historical context.
 
 Preserve the "catch a typo'd selector" value of the zero-match guard, but scope it to the whole transform application rather than a single render. Two viable forms — the first is preferred:
 
