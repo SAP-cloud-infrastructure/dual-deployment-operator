@@ -28,3 +28,10 @@ spec:
   transformations:
     - rewriteWebhookURL:
         urlPrefix: "https://metal-operator-remote-webhook-service:443"
+    - patch:
+        target:
+          kind: ValidatingWebhookConfiguration
+        strategicMerge:
+          metadata:
+            labels:
+              dual-deployment-operator.cc.sap/webhook-injector: metal-operator

@@ -27,6 +27,7 @@ exclusions:
 ignoreLabels:
   - metal-operator-remote-webhook-injector
   - clusterctl.cluster.x-k8s.io
+  - dual-deployment-operator.cc.sap/webhook-injector
 # knownDivergences: in-scope objects present on exactly one side that are
 # expected and must not be reported as missing/extra (kind+name, justified).
 knownDivergences:
