@@ -6,6 +6,7 @@
 package transform
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -82,10 +83,37 @@ metadata:
 			},
 		},
 		{
-			name:    "zero matches fails loud",
-			spec:    &v1alpha1.PatchSpec{Target: v1alpha1.Selector{Kind: "Deployment", Name: "nope"}, StrategicMerge: mustJSON(`{}`)},
-			input:   []manifest.Manifest{dep()},
-			wantErr: "no matching resource",
+			name:  "zero matches is a clean no-op",
+			spec:  &v1alpha1.PatchSpec{Target: v1alpha1.Selector{Kind: "Deployment", Name: "nope"}, StrategicMerge: mustJSON(`{"spec":{"replicas":9}}`)},
+			input: []manifest.Manifest{dep()},
+			check: func(t *testing.T, out []manifest.Manifest) {
+				if len(out) != 1 {
+					t.Fatalf("len(out) = %d, want 1", len(out))
+				}
+				want := dep()
+				if !reflect.DeepEqual(out[0].Unstructured.Object, want.Unstructured.Object) {
+					t.Fatalf("zero-match patch mutated the manifest: got %v", out[0].Unstructured.Object)
+				}
+			},
+		},
+		{
+			name: "patch targeting absent kind no-ops the whole stream",
+			spec: &v1alpha1.PatchSpec{
+				Target:         v1alpha1.Selector{Kind: "ValidatingWebhookConfiguration"},
+				StrategicMerge: mustJSON(`{"metadata":{"labels":{"dual-deployment-operator.cc.sap/webhook-injector":"metal-operator"}}}`),
+			},
+			input: []manifest.Manifest{dep()},
+			check: func(t *testing.T, out []manifest.Manifest) {
+				if len(out) != 1 {
+					t.Fatalf("len(out) = %d, want 1", len(out))
+				}
+				if _, ok := out[0].Unstructured.GetLabels()["dual-deployment-operator.cc.sap/webhook-injector"]; ok {
+					t.Fatalf("injector label must not be added to a non-matching Deployment")
+				}
+				if out[0].Unstructured.GetKind() != "Deployment" {
+					t.Fatalf("kind = %q, want Deployment", out[0].Unstructured.GetKind())
+				}
+			},
 		},
 		{
 			name:    "both variants set is rejected",
