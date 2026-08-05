@@ -555,7 +555,7 @@ Uses **typed variants** rather than a single opaque string. Exactly one of `stra
 Semantics:
 - `strategicMerge` — arbitrary JSON object, applied as a strategic-merge patch (Kubernetes list-key aware). Implemented via `k8s.io/apimachinery/pkg/util/strategicpatch`.
 - `jsonPatch` — list of `{op, path, from?, value?}` operations following RFC 6902. `op` is one of `add`, `remove`, `replace`, `move`, `copy`, `test` (validated by CRD enum). Implemented via `github.com/evanphx/json-patch`.
-- Applied to every resource matching the selector. If zero matches, error (fail-loud: mismatched selector is a misconfiguration).
+- Applied to every resource matching the selector. A zero-match `patch` is a **clean, silent no-op** — identical to `rewriteWebhookURL` and `filterKinds` on zero match: the input manifests pass through unchanged, no error, and the reconcile is never stopped. This holds whether the selector matches in one render but not the other (the normal single-render case) or matches nothing at all. This is what lets a single-render-scoped patch (e.g. an injector label on a shoot-only `ValidatingWebhookConfiguration`, §3.4.4) succeed.
 - Idempotent: byte-identical inputs produce byte-identical outputs.
 
 **Admission-time validation** (via CRD OpenAPI schema + a CEL rule):
@@ -640,6 +640,10 @@ This label is added with the existing `patch` transformation (or, equivalently, 
 
 **Applicability**: charts that use the webhook-injector (metal-operator, ipam-capi). Charts without webhooks (boot, argora, khalkeon) add no label and run the injector-free.
 
+**Per-render patch scoping (r10).** The label patches above target objects — `ValidatingWebhookConfiguration`, `MutatingWebhookConfiguration`, conversion-webhook `CustomResourceDefinition` — that exist only in the **shoot** render. Because the reconciler applies every transformation to both renders independently, such a patch matches in the shoot render but nothing in the seed render. This is a **clean, silent per-render no-op** on the seed render, not an error (§3.4.1): the seed render's manifests pass through unchanged and the reconcile succeeds. This matches the existing zero-match behavior of `rewriteWebhookURL` and `filterKinds` — a zero-match `patch` never errors and never stops the reconcile, whether it matches in one render only or nothing at all. Before r10 the seed render failed hard (`SeedTransformFailed`) on this pattern, which is why it requires the r10 enhancement; see CONTEXT.md Revision 10 and `docs/patch-render-scoping.md`. This is the operator-side prerequisite for `metal-operator-remote-v2`'s webhook label patch — a cluster running an operator without it must not enable that CR.
+
+**Future work — explicit `scope:` field (Option C, deferred).** The r10 no-op behavior is *implicit*: a patch is scoped to a render simply by whether its selector matches there. A future, more explicit alternative is a `spec.transformations[].patch.scope: seed|shoot|both` enum (default `both`) that names the render(s) a patch applies to, so intent is declared in the CR rather than inferred from match results. It is **deferred, not foreclosed**, and is a **non-breaking upgrade**: because `scope` would default to `both`, the r10 implicit no-op semantics are exactly the `both` branch, so existing CRs keep their behavior with zero migration. It is out of scope for r10 because it adds a permanent CRD-schema field carried through v1alpha1 → v1beta1 → v1, and it pushes per-patch render-topology into the CR — against the "operator makes no routing decisions; the chart/overlay decides what each render emits" principle (§3.3, CONTEXT.md Revisions 3–4). Revisit at the v1beta1 schema step if a real need for explicit routing emerges (e.g. hard-scoping a patch whose selector would *accidentally* match in the wrong render — the only capability `scope` adds over the implicit no-op).
+
 #### 3.4.5 Menu extensibility and design stance
 
 New transformation types are added by operator releases. Not extensible at runtime.
@@ -664,6 +668,8 @@ Design history (r5 → r6 → r7):
 Candidate future types (not implemented in v1, listed to document the extension path):
 
 - `setImageTag` — override container image tag by selector; specifically useful for ipam-capi's per-cluster image tag override (see §9.4). Could be added if kustomize's `images:` transformer doesn't cover the use case.
+
+**Future work — zero-match warning across all transformations.** In v1, a transformation whose selector/target matches nothing in a render is a **silent no-op** — this holds uniformly for `patch` (r10, §3.4.1), `rewriteWebhookURL`, and `filterKinds`. A future enhancement is to have **every** transformation type emit a non-fatal **Warning event** on the CR when it matches zero resources in a render (or, more usefully, zero across both renders), so a likely-typo'd selector is surfaced without blocking delivery. This is deliberately deferred from r10 to keep that change minimal and to preserve the current cross-transformation consistency (all three no-op identically); it should be introduced for all three types together, via a shared match-count signal on the `Transformation` interface, rather than as a `patch`-only special case. It is a pure observability addition — the no-op semantics and non-blocking reconcile behavior do not change.
 
 **Not on the roadmap**:
 - Routing/split-related transformations (`setTarget`, kind-based routing, target annotations). Under two-render (§3.5), routing is determined by what each render emits, not by post-render classification.

@@ -261,6 +261,18 @@ PR #14 removes both:
 
 ---
 
+### Revision 10: Per-render patch scoping (no-op on zero-match)
+
+r7 (§3.4.4) prescribes stamping the webhook-injector `--target-label` onto webhook objects with the existing `patch` transformation. But `patch.Apply` is fail-loud on zero matches (`matched==0 → error`) and the controller applies every transform to BOTH renders independently (`dualdeploymentoperator_controller.go` step 4). A `ValidatingWebhookConfiguration` exists only in the shoot render, so a label `patch` targeting it matches in the shoot render but errors on the seed render → `SeedTransformFailed`, failing the reconcile.
+
+This surfaced with `metal-operator-remote-v2`: the VWC is emitted by the upstream `metal-operator` subchart (`shootValues.webhook.enable=true`), the upstream chart has no values hook to add a label, and a Helm wrapper can't edit a subchart's rendered output — so the injector label must come from a CR `patch`, which the current per-render fail-loud behavior makes impossible.
+
+**Change** (full doc: [`patch-render-scoping.md`](patch-render-scoping.md)): make a per-render zero-match a no-op and error only if a patch matches nothing in ANY render (preferred, no CRD change), or add an optional `scope: seed|shoot|both` field (CRD change). Preferred form keeps the typo-protection backstop at the per-transform level while letting a legitimately single-render-scoped patch succeed. ~10–20 LOC in `internal/transform/patch.go` + the controller transform loop; no new transformation type.
+
+**Prerequisite for `metal-operator-remote-v2` webhooks.** Until it ships, that chart's CR must not be enabled on a live cluster (the label patch would fail on the seed render). Sequences before `-v2` cutover, alongside the Phase 7.6 subchart-resolution work (Revision 8).
+
+---
+
 ## Alternatives considered — rendering approach
 
 Nine options were surveyed. Summary of rejections:
