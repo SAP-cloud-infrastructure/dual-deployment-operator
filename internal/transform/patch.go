@@ -28,7 +28,9 @@ type patch struct {
 func (p *patch) Type() string { return "patch" }
 
 // Apply applies the strategic-merge XOR json patch to every manifest matching
-// the target selector. Fails loud on zero matches. Never mutates input in place.
+// the target selector. A zero-match selector is a clean no-op: the input
+// manifests are returned unchanged, no error (consistent with rewriteWebhookURL
+// and filterKinds). Never mutates input in place.
 func (p *patch) Apply(manifests []manifest.Manifest) ([]manifest.Manifest, error) {
 	hasSM := p.spec.StrategicMerge != nil
 	hasJP := len(p.spec.JSONPatch) > 0
@@ -37,21 +39,16 @@ func (p *patch) Apply(manifests []manifest.Manifest) ([]manifest.Manifest, error
 	}
 
 	out := make([]manifest.Manifest, len(manifests))
-	matched := 0
 	for i, m := range manifests {
 		if !Match(m, p.spec.Target) {
 			out[i] = m
 			continue
 		}
-		matched++
 		patched, err := p.applyOne(m.Unstructured)
 		if err != nil {
 			return nil, fmt.Errorf("patch %s/%s: %w", m.Unstructured.GetKind(), m.Unstructured.GetName(), err)
 		}
 		out[i] = manifest.Manifest{Unstructured: patched, Origin: m.Origin}
-	}
-	if matched == 0 {
-		return nil, errors.New("no matching resource for patch target selector")
 	}
 	return out, nil
 }

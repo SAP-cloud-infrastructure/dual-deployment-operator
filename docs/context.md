@@ -261,6 +261,18 @@ PR #14 removes both:
 
 ---
 
+### Revision 10: Per-render patch scoping (no-op on zero-match)
+
+r7 (§3.4.4) prescribes stamping the webhook-injector `--target-label` onto webhook objects with the existing `patch` transformation. But `patch.Apply` is fail-loud on zero matches (`matched==0 → error`) and the controller applies every transform to BOTH renders independently (`dualdeploymentoperator_controller.go` step 4). A `ValidatingWebhookConfiguration` exists only in the shoot render, so a label `patch` targeting it matches in the shoot render but errors on the seed render → `SeedTransformFailed`, failing the reconcile.
+
+This surfaced with `metal-operator-remote-v2`: the VWC is emitted by the upstream `metal-operator` subchart (`shootValues.webhook.enable=true`), the upstream chart has no values hook to add a label, and a Helm wrapper can't edit a subchart's rendered output — so the injector label must come from a CR `patch`, which the current per-render fail-loud behavior makes impossible.
+
+**Change** (full doc: [`patch-render-scoping.md`](patch-render-scoping.md)): **implemented** as a per-render zero-match becoming a clean, silent no-op in `patch.Apply` — consistent with the existing zero-match behavior of `rewriteWebhookURL` and `filterKinds`. No controller change, no cross-render backstop, no `TransformNoMatch` status/event: a patch that matches nothing (in one render or in both) simply returns the input manifests unchanged. This is a ~3-line deletion of the fail-loud guard in `internal/transform/patch.go`; no new transformation type, no CRD change. The `scope: seed|shoot|both` CRD field (Option C) was considered and deferred as non-breaking future work (see `design.md` §3.4.4 and `patch-render-scoping.md` §3). An all-transform zero-match Warning event is noted as future work (`design.md` §3.4.5).
+
+**Prerequisite for `metal-operator-remote-v2` webhooks.** Until it ships, that chart's CR must not be enabled on a live cluster (the label patch would fail on the seed render). Sequences before `-v2` cutover, alongside the Phase 7.6 subchart-resolution work (Revision 8).
+
+---
+
 ## Alternatives considered — rendering approach
 
 Nine options were surveyed. Summary of rejections:
