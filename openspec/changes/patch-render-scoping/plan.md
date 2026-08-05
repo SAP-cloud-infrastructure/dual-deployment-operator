@@ -138,7 +138,7 @@ shoot-only ValidatingWebhookConfiguration) succeed instead of failing the seed
 render with SeedTransformFailed."
 ```
 
-- [ ] Task 1 complete
+- [x] Task 1 complete
 
 ---
 
@@ -206,7 +206,7 @@ git add internal/transform/patch_test.go
 git commit -m "test(transform): assert a no-op patch passes the stream to later transforms"
 ```
 
-- [ ] Task 2 complete
+- [x] Task 2 complete
 
 ---
 
@@ -256,7 +256,7 @@ git add internal/equivalence/testdata/fixtures/metal-operator internal/equivalen
 git commit -m "test(equivalence): prove injector label lands on shoot VWC only (metal-operator)"
 ```
 
-- [ ] Task 3 complete
+- [x] Task 3 complete
 
 ---
 
@@ -289,4 +289,4 @@ git add docs/patch-render-scoping.md docs/context.md
 git commit -m "docs: flip patch-render-scoping to Implemented (silent no-op shape)"
 ```
 
-- [ ] Task 4 complete
+- [x] Task 4 complete
