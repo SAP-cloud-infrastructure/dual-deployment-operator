@@ -131,12 +131,15 @@ manager:
     ## all egress (even DNS) unless these label-gated allow policies are present.
     ## Without to-dns/to-public/to-private the operator's OCI registry pulls and
     ## kustomize github fetches fail; without to-runtime-apiserver its own client
-    ## cannot reach the seed kube-apiserver (leader election + reconcile time out).
+    ## cannot reach the seed kube-apiserver (leader election + reconcile time out);
+    ## without to-kube-apiserver-tcp-443 it cannot reach the SHOOT kube-apiserver
+    ## ClusterIP to apply the shoot render (shoot applies time out).
     labels:
       networking.gardener.cloud/to-dns: allowed
       networking.gardener.cloud/to-public-networks: allowed
       networking.gardener.cloud/to-private-networks: allowed
       networking.gardener.cloud/to-runtime-apiserver: allowed
+      networking.resources.gardener.cloud/to-kube-apiserver-tcp-443: allowed
     # annotations: {}
 
 ## RBAC configuration

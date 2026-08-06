@@ -34,7 +34,7 @@ The plugin owns `chart/**`; a `--force` regeneration overwrites the files below,
 edits MUST be re-applied afterward (verify with `helm template`):
 
 - **Image** (`values.yaml`): `manager.image.repository = ghcr.io/SAP-cloud-infrastructure/dual-deployment-operator` (keppel-free; the wrapper overrides to the mirror).
-- **Gardener egress labels** (`values.yaml` `manager.pod.labels`): `networking.gardener.cloud/to-dns`, `to-public-networks`, `to-private-networks`, `to-runtime-apiserver: allowed` — required for pod egress under the seed's deny-all NetworkPolicy (`to-runtime-apiserver` is what lets the operator reach the seed kube-apiserver; without it leader election times out).
+- **Gardener egress labels** (`values.yaml` `manager.pod.labels`): `networking.gardener.cloud/to-dns`, `to-public-networks`, `to-private-networks`, `to-runtime-apiserver`, and `networking.resources.gardener.cloud/to-kube-apiserver-tcp-443: allowed` — required for pod egress under the seed's deny-all NetworkPolicy (`to-runtime-apiserver` lets the operator reach the seed kube-apiserver for leader election; `to-kube-apiserver-tcp-443` lets it reach the shoot kube-apiserver ClusterIP to apply the shoot render — without either, the respective calls time out).
 - **Manager binding** (`templates/rbac/manager-rolebinding.yaml`): renders a `ClusterRoleBinding` at `rbac.namespaced=false` (default) and a `RoleBinding` at `rbac.namespaced=true`.
 - **Broad seed-applier RBAC**: driven by `+kubebuilder:rbac` markers in `internal/controller/` → `config/rbac/role.yaml`; regenerate with `make manifests` before re-running the plugin.
 
