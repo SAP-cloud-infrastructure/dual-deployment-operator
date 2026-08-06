@@ -129,11 +129,14 @@ manager:
     ## Gardener egress labels — REQUIRED. The operator runs per-shoot in a
     ## shoot--cp--* namespace on the seed, where a deny-all NetworkPolicy blocks
     ## all egress (even DNS) unless these label-gated allow policies are present.
-    ## Without them the operator's OCI registry pulls and kustomize github fetches fail.
+    ## Without to-dns/to-public/to-private the operator's OCI registry pulls and
+    ## kustomize github fetches fail; without to-runtime-apiserver its own client
+    ## cannot reach the seed kube-apiserver (leader election + reconcile time out).
     labels:
       networking.gardener.cloud/to-dns: allowed
       networking.gardener.cloud/to-public-networks: allowed
       networking.gardener.cloud/to-private-networks: allowed
+      networking.gardener.cloud/to-runtime-apiserver: allowed
     # annotations: {}
 
 ## RBAC configuration
