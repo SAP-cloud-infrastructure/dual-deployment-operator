@@ -66,15 +66,16 @@ func (r *DualDeploymentOperatorReconciler) buildShootApplierOrDefault(ctx contex
 // +kubebuilder:rbac:groups=dual-deployment-operator.cc.sap,resources=dualdeploymentoperators,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=dual-deployment-operator.cc.sap,resources=dualdeploymentoperators/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=dual-deployment-operator.cc.sap,resources=dualdeploymentoperators/finalizers,verbs=update
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Broad seed-applier grant: the operator applies each seed render via SSA, so its
-// ServiceAccount must manage the seed-render kinds. bind;escalate on RBAC are
+// ServiceAccount must manage the seed-render kinds. secrets are included because a
+// seed render can carry Secrets (e.g. the metal-operator-remote-kubeconfig
+// token-requestor shell that shootAccess reads, and macdb). bind;escalate on RBAC are
 // required because the render itself creates Roles/ClusterRoles (Kubernetes
 // privilege-escalation prevention). See design.md 3.6.7 / controller-chart-rbac spec.
-// +kubebuilder:rbac:groups="",resources=serviceaccounts;configmaps;services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=serviceaccounts;configmaps;services;secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets;daemonsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies;ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings;clusterroles;clusterrolebindings,verbs=get;list;watch;create;update;patch;delete;bind;escalate
