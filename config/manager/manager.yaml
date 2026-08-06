@@ -24,7 +24,7 @@ spec:
         networking.gardener.cloud/to-public-networks: allowed
         networking.gardener.cloud/to-private-networks: allowed
         networking.gardener.cloud/to-runtime-apiserver: allowed
-        networking.resources.gardener.cloud/to-kube-apiserver-tcp-443: allowed
+        networking.resources.gardener.cloud/to-all-istio-ingresses-istio-ingressgateway-tcp-9443: allowed
     spec:
       # TODO(user): Uncomment the following code to configure the nodeAffinity expression
       # according to the platforms which are supported by your solution.
