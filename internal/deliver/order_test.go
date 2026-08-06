@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	ddov1alpha1 "github.com/SAP-cloud-infrastructure/dual-deployment-operator/api/v1alpha1"
 	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/internal/manifest"
@@ -93,6 +94,28 @@ func TestManifestFromStatusReconstructsGVKAndMeta(t *testing.T) {
 	}
 	if u.GetName() != "my-dep" {
 		t.Errorf("Name = %q, want my-dep", u.GetName())
+	}
+}
+
+func TestIdentityKeyIgnoresNamespaceForClusterScoped(t *testing.T) {
+	// A cluster-scoped VWC persisted in status with a bogus namespace (from a chart
+	// that stamped .Release.Namespace) must key identically to the same VWC rendered
+	// with an empty namespace — otherwise prune sees a phantom orphan and deletes it.
+	st := rs("admissionregistration.k8s.io/v1", "ValidatingWebhookConfiguration", "kube-system", "vwc")
+	m := manifest.Manifest{Unstructured: &unstructured.Unstructured{}}
+	m.Unstructured.SetGroupVersionKind(schema.GroupVersionKind{Group: "admissionregistration.k8s.io", Version: "v1", Kind: "ValidatingWebhookConfiguration"})
+	m.Unstructured.SetName("vwc")
+
+	if StatusIdentityKey(st) != ManifestIdentityKey(m) {
+		t.Errorf("keys differ: status=%q manifest=%q (must match for cluster-scoped regardless of namespace)",
+			StatusIdentityKey(st), ManifestIdentityKey(m))
+	}
+}
+
+func TestManifestFromStatusStripsNamespaceForClusterScoped(t *testing.T) {
+	st := rs("admissionregistration.k8s.io/v1", "ValidatingWebhookConfiguration", "kube-system", "vwc")
+	if got := ManifestFromStatus(st).Unstructured.GetNamespace(); got != "" {
+		t.Errorf("Namespace = %q, want empty (cluster-scoped)", got)
 	}
 }
 

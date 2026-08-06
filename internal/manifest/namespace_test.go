@@ -48,6 +48,16 @@ func TestApplyNamespaceSkipsClusterScoped(t *testing.T) {
 	}
 }
 
+func TestApplyNamespaceStripsClusterScopedBogusNamespace(t *testing.T) {
+	for _, kind := range []string{"ValidatingWebhookConfiguration", "ClusterRole", "CustomResourceDefinition"} {
+		ms := []Manifest{nsManifest(kind, "obj", "kube-system")}
+		ApplyNamespace(ms, "target-ns")
+		if got := ms[0].Unstructured.GetNamespace(); got != "" {
+			t.Errorf("%s: namespace = %q, want empty (cluster-scoped bogus namespace must be stripped)", kind, got)
+		}
+	}
+}
+
 func TestApplyNamespaceEmptyTargetIsNoOp(t *testing.T) {
 	ms := []Manifest{nsManifest("ConfigMap", "cm", "")}
 	ApplyNamespace(ms, "")
