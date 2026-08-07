@@ -37,6 +37,12 @@ default: build-all
 IMG ?= controller:latest
 KUBECTL ?= kubectl
 KUSTOMIZE ?= go run sigs.k8s.io/kustomize/kustomize/v5
+# source_repository OCI label required by Keppel cloud-infrastructure-dev manifest policy (else push is rejected).
+SOURCE_REPO ?= https://github.com/SAP-cloud-infrastructure/dual-deployment-operator
+# Target platform for the pushed image; the seed clusters are amd64, so cross-build from arm64 dev machines.
+PLATFORM ?= linux/amd64
+# buildx builder using the plain docker driver + containerd image store, so --load cross-loads amd64 fast (a docker-container builder round-trips a tarball and crawls). Override to your active builder if desktop-linux is absent.
+BUILDX_BUILDER ?= desktop-linux
 
 .PHONY: manifests
 manifests: install-controller-gen
@@ -60,11 +66,11 @@ uninstall: manifests
 .PHONY: deploy
 deploy: manifests
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
-	$(KUSTOMIZE) build config/default | $(KUBECTL) apply -f -
+	$(KUSTOMIZE) build config/dev | $(KUBECTL) apply -f -
 
 .PHONY: undeploy
 undeploy:
-	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found -f -
+	$(KUSTOMIZE) build config/dev | $(KUBECTL) delete --ignore-not-found -f -
 
 .PHONY: build-installer
 build-installer: manifests generate
@@ -74,7 +80,7 @@ build-installer: manifests generate
 
 .PHONY: docker-build
 docker-build:
-	docker build -t $(IMG) .
+	docker buildx build --builder $(BUILDX_BUILDER) --platform $(PLATFORM) --provenance=false --sbom=false --label source_repository=$(SOURCE_REPO) --load -t $(IMG) .
 
 .PHONY: docker-push
 docker-push:

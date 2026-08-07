@@ -23,7 +23,6 @@ go.work
 go.work.sum
 
 # Kubebuilder / operator-sdk
-config/dev/
 testbin/
 
 # Editors

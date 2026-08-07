@@ -62,6 +62,17 @@ Repository: [`sapcc/helm-charts`](https://github.com/sapcc/helm-charts)
 
 Each wrapper chart's structure and Makefile target is analyzed in `design.md` §1.2 and §4.
 
+### Per-shoot deployment pipeline (verified mechanics)
+
+How these `-remote` wrapper charts get installed into different `shoot--cp--*` namespaces —
+the Concourse `helm-chart-pipeline` + `cc/kube-secrets` structure (namespace template,
+`filter` fan-out, `cluster_settings` overrides, and the
+`values/helm/<class>/<region>/<shoot>/<release>.yaml` path convention) — is documented in
+[`deployment-pipeline.md`](deployment-pipeline.md). This is the model `chart 2`
+(`dual-deployment-operator-remote`) plugs into unchanged, and the reason `chart 1` is
+namespace-agnostic. Sources: `github.wdf.sap.corp/cc/kube-secrets` (branch `master`) +
+`sapcc/helm-charts`.
+
 ---
 
 ## webhook-injector (companion controller)

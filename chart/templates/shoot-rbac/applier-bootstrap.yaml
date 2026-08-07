@@ -1,0 +1,83 @@
+{{- /*
+Shoot-RBAC applier bootstrap (design.md 3.6.7): the operator applies its shoot render
+AS the token-requestor ServiceAccount, which cannot grant itself RBAC (Kubernetes
+privilege-escalation prevention). A privileged principal must seed both the SA and its
+apply permissions first. This ManagedResource is delivered by gardener-resource-manager
+(GRM) from the shoot-CP namespace on the seed to the shoot (GRM holds cluster-admin-
+equivalent there), creating (1) the shoot ServiceAccount the token-requestor Secret mints
+a token for, and (2) a broad apply-scoped ClusterRole + binding for that SA. All three are
+delivered as one atomic unit because the token, the RBAC, and the identity all hinge on
+that SA existing (design.md:942).
+
+This lives in the operator install chart (not the workload chart) because it is operator
+install-time plumbing tied to the operator being present, identical for every managed
+workload, and parameterized only by the shoot SA name/namespace. The webhook-injector
+shoot RBAC (workload-specific SA subject) stays in the workload chart.
+
+Gated off by default; the wrapper chart enables it and supplies the SA values.
+*/ -}}
+{{- if .Values.shootRbac.enabled }}
+{{- $saName := required "shootRbac.serviceAccountName is required when shootRbac.enabled" .Values.shootRbac.serviceAccountName }}
+{{- $saNamespace := required "shootRbac.serviceAccountNamespace is required when shootRbac.enabled" .Values.shootRbac.serviceAccountNamespace }}
+{{- $objects := printf `apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: %s
+  namespace: %s
+  labels:
+    dual-deployment-operator.cc.sap/bootstrap: "true"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dual-deployment-operator-shoot-applier
+  labels:
+    dual-deployment-operator.cc.sap/bootstrap: "true"
+rules:
+- apiGroups: ["apiextensions.k8s.io"]
+  resources: ["customresourcedefinitions"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "bind", "escalate"]
+- apiGroups: ["admissionregistration.k8s.io"]
+  resources: ["validatingwebhookconfigurations", "mutatingwebhookconfigurations"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["serviceaccounts", "configmaps", "secrets", "services", "namespaces"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dual-deployment-operator-shoot-applier
+  labels:
+    dual-deployment-operator.cc.sap/bootstrap: "true"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dual-deployment-operator-shoot-applier
+subjects:
+- kind: ServiceAccount
+  name: %s
+  namespace: %s
+` $saName $saNamespace $saName $saNamespace }}
+apiVersion: resources.gardener.cloud/v1alpha1
+kind: ManagedResource
+metadata:
+  name: dual-deployment-operator-shoot-rbac-bootstrap
+  namespace: {{ default .Release.Namespace .Values.shootRbac.namespace }}
+spec:
+  secretRefs:
+  - name: dual-deployment-operator-shoot-rbac-bootstrap
+  keepObjects: false
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dual-deployment-operator-shoot-rbac-bootstrap
+  namespace: {{ default .Release.Namespace .Values.shootRbac.namespace }}
+type: Opaque
+data:
+  objects.yaml: {{ $objects | b64enc }}
+{{- end }}

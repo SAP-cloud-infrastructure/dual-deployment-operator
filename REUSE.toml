@@ -50,6 +50,7 @@ path = [
   "go.mod",
   "go.sum",
   "config/**",
+  "chart/**",
   "dist/**",
   "docs/**",
   "hack/**",

@@ -37,15 +37,22 @@ func IsClusterScoped(kind string) bool {
 }
 
 // ApplyNamespace stamps ns onto each namespaced manifest that lacks an explicit
-// metadata.namespace. Cluster-scoped kinds and resources that already declare a
-// namespace are left unchanged. An empty ns is a no-op.
+// metadata.namespace. Cluster-scoped kinds are normalized to an empty namespace
+// (a chart that stamps a bogus namespace on a cluster-scoped kind — e.g. the
+// upstream metal-operator VWC using .Release.Namespace — would otherwise break
+// status-diff prune identity, since the live cluster-scoped object has no
+// namespace). Namespaced resources that already declare a namespace are left
+// unchanged. An empty ns still normalizes cluster-scoped kinds.
 func ApplyNamespace(manifests []Manifest, ns string) {
-	if ns == "" {
-		return
-	}
 	for i := range manifests {
 		u := manifests[i].Unstructured
 		if IsClusterScoped(u.GetKind()) {
+			if u.GetNamespace() != "" {
+				u.SetNamespace("")
+			}
+			continue
+		}
+		if ns == "" {
 			continue
 		}
 		if u.GetNamespace() != "" {

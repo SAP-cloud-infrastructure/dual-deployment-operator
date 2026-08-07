@@ -93,9 +93,20 @@ func ManifestFromStatus(rs ddov1alpha1.ResourceStatus) manifest.Manifest {
 		Version: gv.Version,
 		Kind:    rs.Kind,
 	})
-	u.SetNamespace(rs.Namespace)
+	u.SetNamespace(identityNamespace(rs.Kind, rs.Namespace))
 	u.SetName(rs.Name)
 	return manifest.Manifest{Unstructured: u}
+}
+
+// identityNamespace returns the namespace to use in an identity key: always empty
+// for cluster-scoped kinds, so a status persisted with a bogus namespace (e.g. a
+// chart stamping .Release.Namespace on a VWC) keys identically to the namespace-less
+// live object and does not trigger a phantom prune.
+func identityNamespace(kind, ns string) string {
+	if manifest.IsClusterScoped(kind) {
+		return ""
+	}
+	return ns
 }
 
 // StatusIdentityKey returns a version-independent identity key for a ResourceStatus:
@@ -106,11 +117,11 @@ func StatusIdentityKey(rs ddov1alpha1.ResourceStatus) string {
 	if err != nil {
 		gv = schema.GroupVersion{}
 	}
-	return strings.Join([]string{gv.Group, rs.Kind, rs.Namespace, rs.Name}, "/")
+	return strings.Join([]string{gv.Group, rs.Kind, identityNamespace(rs.Kind, rs.Namespace), rs.Name}, "/")
 }
 
 // ManifestIdentityKey returns the same version-independent key for a Manifest.
 func ManifestIdentityKey(m manifest.Manifest) string {
 	gvk := m.Unstructured.GroupVersionKind()
-	return strings.Join([]string{gvk.Group, gvk.Kind, m.Unstructured.GetNamespace(), m.Unstructured.GetName()}, "/")
+	return strings.Join([]string{gvk.Group, gvk.Kind, identityNamespace(gvk.Kind, m.Unstructured.GetNamespace()), m.Unstructured.GetName()}, "/")
 }

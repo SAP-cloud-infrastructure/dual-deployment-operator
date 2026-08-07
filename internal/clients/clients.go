@@ -6,11 +6,16 @@ package clients
 
 import (
 	"errors"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// shootRequestTimeout bounds every request to the shoot apiserver so an unreachable
+// shoot fails fast and requeues instead of hanging the reconcile indefinitely.
+const shootRequestTimeout = 30 * time.Second
 
 // ErrShootCredentialsNotReady signals the token-requestor Secret exists but Gardener
 // has not populated token/CA yet (absent or empty). Benign; caller maps it to a wait.
@@ -39,5 +44,6 @@ func ShootRESTConfig(secret *corev1.Secret, tokenKey, caKey, server string) (*re
 		Host:            server,
 		BearerToken:     string(token),
 		TLSClientConfig: rest.TLSClientConfig{CAData: caData},
+		Timeout:         shootRequestTimeout,
 	}, nil
 }

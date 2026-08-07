@@ -1,0 +1,242 @@
+## String to partially override chart.fullname template (will maintain the release name)
+##
+# nameOverride: ""
+
+## String to fully override chart.fullname template
+##
+# fullnameOverride: ""
+
+## Configure the controller manager deployment
+##
+manager:
+  ## Set to false to skip manager installation
+  ##
+  enabled: true
+
+  replicas: 1
+
+  image:
+    repository: ghcr.io/SAP-cloud-infrastructure/dual-deployment-operator
+    ## Image tag (defaults to Chart.appVersion if not set)
+    ##
+    # tag: ""
+    pullPolicy: IfNotPresent
+
+  ## Arguments
+  ##
+  args:
+    - --leader-elect=true
+    - --source-scratch-dir=/var/run/ddo-source
+
+  ## Environment variables
+  ##
+  env:
+    - name: POD_NAMESPACE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+
+  ## Env overrides (--set manager.envOverrides.VAR=value)
+  ## Same name in env above: this value takes precedence.
+  ##
+  envOverrides: {}
+
+  ## Image pull secrets
+  ##
+  # imagePullSecrets:
+  #   - name: myregistrykey
+
+  ## Pod-level security settings
+  ##
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+
+  ## Container-level security settings
+  ##
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+      - ALL
+    readOnlyRootFilesystem: true
+
+  ## Resource limits and requests
+  ##
+  resources:
+    limits:
+      cpu: 500m
+      memory: 128Mi
+    requests:
+      cpu: 10m
+      memory: 64Mi
+
+  ## Manager pod's affinity
+  ##
+  affinity: {}
+
+  ## Manager pod's node selector
+  ##
+  nodeSelector: {}
+
+  ## Manager pod's tolerations
+  ##
+  tolerations: []
+
+  ## Deployment strategy
+  ##
+  # strategy:
+  #   type: RollingUpdate
+  #   rollingUpdate:
+  #     maxSurge: 25%
+  #     maxUnavailable: 25%
+
+  ## Priority class name
+  ##
+  # priorityClassName: ""
+
+  ## Topology spread constraints
+  ##
+  # topologySpreadConstraints: []
+
+  ## Termination grace period seconds
+  ##
+  terminationGracePeriodSeconds: 10
+
+  ## Writable scratch volume for the Helm/kustomize source loader. REQUIRED because
+  ## securityContext.readOnlyRootFilesystem is true: the loader's os.MkdirTemp under
+  ## --source-scratch-dir would otherwise fail on the read-only root filesystem.
+  extraVolumeMounts:
+    - name: source-scratch
+      mountPath: /var/run/ddo-source
+  extraVolumes:
+    - name: source-scratch
+      emptyDir:
+        sizeLimit: 256Mi
+
+  ## Custom Deployment labels
+  ##
+  # labels: {}
+
+  ## Custom Deployment annotations
+  ##
+  # annotations: {}
+
+  ## Custom Pod labels and annotations
+  ##
+  pod:
+    ## Gardener egress labels — REQUIRED. The operator runs per-shoot in a
+    ## shoot--cp--* namespace on the seed, where a deny-all NetworkPolicy blocks
+    ## all egress (even DNS) unless these label-gated allow policies are present.
+    ## Without to-dns/to-public/to-private the operator's OCI registry pulls and
+    ## kustomize github fetches fail; without to-runtime-apiserver its own client
+    ## cannot reach the seed kube-apiserver (leader election + reconcile time out);
+    ## without to-all-istio-ingresses-istio-ingressgateway-tcp-9443 it cannot reach
+    ## the SHOOT kube-apiserver via its external host (routed through the istio
+    ## ingress LB by SNI) to apply the shoot render — this mirrors the prod
+    ## metal-operator-remote label set.
+    labels:
+      networking.gardener.cloud/to-dns: allowed
+      networking.gardener.cloud/to-public-networks: allowed
+      networking.gardener.cloud/to-private-networks: allowed
+      networking.gardener.cloud/to-runtime-apiserver: allowed
+      networking.resources.gardener.cloud/to-all-istio-ingresses-istio-ingressgateway-tcp-9443: allowed
+    # annotations: {}
+
+## RBAC configuration
+##
+rbac:
+  ## RBAC resource scope
+  ## - false (default): ClusterRole/ClusterRoleBinding (all namespaces)
+  ## - true: Role/RoleBinding (release namespace only)
+  ##
+  namespaced: false
+
+  ## Helper roles for CRD management (admin/editor/viewer)
+  ##
+  helpers:
+    ## Install convenience admin/editor/viewer roles for CRDs
+    ## Default true to stay in sync with the kustomize config/default install.
+    ##
+    enabled: true
+
+## Shoot-side applier RBAC bootstrap (design.md 3.6.7).
+## When enabled, the chart emits a GRM ManagedResource (delivered from the shoot-CP
+## namespace on the seed to the shoot) that seeds a broad apply-scoped ClusterRole +
+## binding for the operator's shoot ServiceAccount. Required because the operator
+## applies its shoot render as that SA, which cannot grant itself RBAC.
+## Off by default; the wrapper chart enables it and supplies the SA values.
+shootRbac:
+  enabled: false
+  ## Token-requestor ServiceAccount the operator applies the shoot render AS — the
+  ## operator's OWN applier identity. MUST be dedicated to the operator, NOT a
+  ## ServiceAccount that any workload render also creates/deletes: the operator
+  ## authenticates as this SA, and if a workload teardown deletes it the operator
+  ## self-deauthenticates mid-cleanup (401) and the finalizer deadlocks.
+  serviceAccountName: "dual-deployment-operator-shoot-applier"
+  ## Namespace of that ServiceAccount on the shoot.
+  serviceAccountNamespace: "kube-system"
+  ## Name of the token-requestor Secret the operator reads for shoot credentials
+  ## (spec.shootAccess.secretName). Defaults to dual-deployment-operator-shoot-access.
+  # secretName: ""
+  ## Namespace to place the ManagedResource + token-requestor Secret in (the shoot-CP
+  ## namespace on the seed). Defaults to the release namespace.
+  # namespace: ""
+
+## ServiceAccount configuration
+##
+serviceAccount:
+  # Install default ServiceAccount provided
+  enabled: true
+
+  ## Existing ServiceAccount name (only when enabled=false)
+  ## Note: When enabled=true, respects nameOverride/fullnameOverride
+  ##
+  # name: ""
+
+  ## Custom ServiceAccount annotations
+  ##
+  # annotations: {}
+
+  ## Custom ServiceAccount labels
+  ##
+  # labels: {}
+
+## Custom Resource Definitions
+##
+crd:
+  # Install CRDs with the chart
+  enabled: true
+  # Keep CRDs when uninstalling
+  keep: true
+
+## Controller metrics endpoint.
+## Enable to expose /metrics endpoint
+##
+metrics:
+  enabled: true
+  # Metrics server port
+  port: 8443
+  # Enable secure metrics: HTTPS with certs/auth (true) or HTTP (false).
+  # Note: Metrics authn/authz needs ClusterRole access.
+  secure: true
+
+## Cert-manager integration for TLS certificates.
+## Required for webhook certificates and metrics endpoint certificates.
+##
+certManager:
+  enabled: false
+
+## Prometheus ServiceMonitor for metrics scraping.
+## Requires prometheus-operator to be installed in the cluster.
+##
+prometheus:
+  enabled: false
+
+## Network policies for controlling traffic flow.
+## Enable to restrict ingress to the controller manager.
+##
+networkPolicy:
+  enabled: false
+
