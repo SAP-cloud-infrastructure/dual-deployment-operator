@@ -406,14 +406,16 @@ Expected: `0`, then `0`.
 Run: `helm template t chart/ --set shootRbac.enabled=true 2>&1 | grep -i "serviceAccountName is required"`
 Expected: rendering fails with the required-value error (same for a missing `serviceAccountNamespace`).
 
-- [x] **Step 3: Assert enabled render emits the bootstrap MR + generic-named token-requestor Secret**
+- [x] **Step 3: Assert enabled render emits the bootstrap MR (SA + ClusterRole + binding) + generic-named token-requestor Secret**
 
 Run:
 ```bash
+payload=$(helm template t chart/ --set shootRbac.enabled=true --set shootRbac.serviceAccountName=sa --set shootRbac.serviceAccountNamespace=kube-system | grep "objects.yaml:" | awk '{print $2}')
+echo "$payload" | base64 -d | grep -E "^kind:"   # expect ServiceAccount, ClusterRole, ClusterRoleBinding
 helm template t chart/ --set shootRbac.enabled=true --set shootRbac.serviceAccountName=sa --set shootRbac.serviceAccountNamespace=kube-system | \
-  grep -E "kind: ManagedResource|name: dual-deployment-operator-shoot-applier|name: dual-deployment-operator-shoot-access|purpose: token-requestor"
+  grep -E "kind: ManagedResource|name: dual-deployment-operator-shoot-access|purpose: token-requestor"
 ```
-Expected: the ManagedResource, the shoot-applier ClusterRole/binding name, the generic Secret name, and the token-requestor label all appear.
+Expected: the MR payload contains the `ServiceAccount` (name `sa`, namespace `kube-system`), the `dual-deployment-operator-shoot-applier` ClusterRole/binding; and the generic-named token-requestor Secret + label appear. The bootstrap creates the SA itself (design.md:942) — no per-workload render does.
 
 - [x] **Step 4: Assert the Secret name is overridable**
 

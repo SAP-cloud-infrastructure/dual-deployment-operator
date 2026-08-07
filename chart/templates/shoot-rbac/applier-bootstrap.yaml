@@ -1,10 +1,13 @@
 {{- /*
 Shoot-RBAC applier bootstrap (design.md 3.6.7): the operator applies its shoot render
 AS the token-requestor ServiceAccount, which cannot grant itself RBAC (Kubernetes
-privilege-escalation prevention). A privileged principal must seed its apply permissions
-first. This ManagedResource is delivered by gardener-resource-manager (GRM) from the
-shoot-CP namespace on the seed to the shoot (GRM holds cluster-admin-equivalent there),
-creating a broad apply-scoped ClusterRole + binding for the operator's shoot SA.
+privilege-escalation prevention). A privileged principal must seed both the SA and its
+apply permissions first. This ManagedResource is delivered by gardener-resource-manager
+(GRM) from the shoot-CP namespace on the seed to the shoot (GRM holds cluster-admin-
+equivalent there), creating (1) the shoot ServiceAccount the token-requestor Secret mints
+a token for, and (2) a broad apply-scoped ClusterRole + binding for that SA. All three are
+delivered as one atomic unit because the token, the RBAC, and the identity all hinge on
+that SA existing (design.md:942).
 
 This lives in the operator install chart (not the workload chart) because it is operator
 install-time plumbing tied to the operator being present, identical for every managed
@@ -16,7 +19,15 @@ Gated off by default; the wrapper chart enables it and supplies the SA values.
 {{- if .Values.shootRbac.enabled }}
 {{- $saName := required "shootRbac.serviceAccountName is required when shootRbac.enabled" .Values.shootRbac.serviceAccountName }}
 {{- $saNamespace := required "shootRbac.serviceAccountNamespace is required when shootRbac.enabled" .Values.shootRbac.serviceAccountNamespace }}
-{{- $objects := printf `apiVersion: rbac.authorization.k8s.io/v1
+{{- $objects := printf `apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: %s
+  namespace: %s
+  labels:
+    dual-deployment-operator.cc.sap/bootstrap: "true"
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: dual-deployment-operator-shoot-applier
@@ -50,7 +61,7 @@ subjects:
 - kind: ServiceAccount
   name: %s
   namespace: %s
-` $saName $saNamespace }}
+` $saName $saNamespace $saName $saNamespace }}
 apiVersion: resources.gardener.cloud/v1alpha1
 kind: ManagedResource
 metadata:
