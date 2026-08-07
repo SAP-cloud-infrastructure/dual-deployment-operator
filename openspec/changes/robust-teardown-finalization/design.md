@@ -157,12 +157,32 @@ bytes are ever logged.
 
 Observability-only; no behavior change; no new dependency.
 
+## User documentation
+
+The `force-delete` annotation is an operator-facing operational contract and MUST be
+documented, not left as an implementation detail. Add a "Deleting a DualDeploymentOperator"
+section to `docs/design.md` (the operator's authoritative behavior doc) covering:
+
+- Normal deletion: shoot + seed torn down in reverse of `spec.applyOrder`, then the finalizer
+  is removed.
+- Blocked deletion: when the shoot is unreachable, seed cleanup still completes but the
+  finalizer is **retained** and the CR stays `Terminating`; the `ShootCleanup=Blocked`
+  condition + `ShootCleanupBlocked` event explain why and name the escape hatch.
+- Force-delete: set `dual-deployment-operator.cc.sap/force-delete: "true"` on the CR to complete
+  deletion when the shoot is permanently gone. Documents that this **orphans the remaining
+  shoot resources** (an explicit, deliberate action), that it is preferable to a raw
+  `kubectl patch ... finalizers:[]` (which would also skip seed cleanup), and that it emits a
+  `ShootCleanupForceDeleted` event/condition for audit.
+- Example: `kubectl annotate dualdeploymentoperator <name> dual-deployment-operator.cc.sap/force-delete=true`.
+
 ## Scope
 
 - `internal/controller/` — `reconcileDelete` control flow (no hard-return, `nil`-applier guard,
   separate seed/shoot error tracking, block/override finalizer switch), `ForceDeleteAnnotation`
   const, the three signal helpers, and apply/prune/delete logging.
 - `internal/source/` — source-pull + render-cache hit/miss logging.
+- `docs/design.md` — new "Deleting a DualDeploymentOperator" section documenting the deletion
+  states and the `force-delete` annotation contract (see User documentation).
 - No `api/v1alpha1/` change. No `internal/deliver/` change. No new CRD status field. No timeout
   const. No `deleteRender` skip parameter. No credential-preservation predicate.
 

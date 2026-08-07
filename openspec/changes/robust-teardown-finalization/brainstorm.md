@@ -116,8 +116,13 @@ Fix `reconcileDelete` (Option C) and add reconcile-pipeline logging. Nothing els
   reconciler is chart- and GRM-agnostic.
 - **Logging is observability-only**: structured `logr` logs following K8s message-style
   guidelines; no behavior change; no secret or token bytes ever logged.
+- **Keep the `force-delete` annotation and document it for users** (user decision): the
+  annotation is retained (not dropped). Its value over a raw `kubectl patch finalizers:[]` is
+  that it runs one more reconcile pass (completing seed cleanup and emitting an audited
+  `ShootCleanupForceDeleted` signal) rather than deleting the object outright and skipping seed
+  cleanup. Because it is an operator-facing operational contract, it MUST be documented in
+  `docs/design.md` (deletion states + the annotation + an example).
 
 ## Open Questions
 
-- [ ] Confirm the override contract `dual-deployment-operator.cc.sap/force-delete: "true"`
-      (key name + string value) — owner: user (design/spec review).
+- (none)
