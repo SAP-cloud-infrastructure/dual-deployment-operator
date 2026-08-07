@@ -10,60 +10,50 @@ SPDX-License-Identifier: Apache-2.0
 `kubectl delete dualdeploymentoperator <name>` can deadlock: `reconcileDelete` builds the
 shoot applier **first** and **hard-returns** when it fails (shoot unreachable / shootAccess
 Secret absent), so seed teardown never runs and the finalizer is never removed — the CR is
-stuck `Terminating` forever.
+stuck `Terminating` forever, requiring a manual `kubectl patch ... finalizers:[]` wipe that
+silently orphans shoot resources.
 
-The issue was originally filed against a *self-deadlock*: the shootAccess Secret used to be
-part of the workload's **seed render** (a Gardener token-requestor Secret shell), so DDO's own
-seed teardown deleted the very credential its shoot teardown needed — a guaranteed deadlock on
-every delete. **That is now structurally fixed** by feature-branch commits
-`7bb8fb9`/`9c09682`/`906d936`, which moved the token-requestor Secret + shoot-applier RBAC into
-the **operator install chart** (`chart/templates/shoot-rbac/`, `shootRbac.enabled`). The
-credential no longer lives in any CR's seed render, so seed teardown can never delete it. What
-remains is the **generic** case: a genuinely unreachable/gone shoot at CR-delete time still
-hard-returns and deadlocks. This change fixes that.
+The issue was originally filed against a *self-deadlock* (the shootAccess Secret used to be
+part of the workload's seed render, so DDO's own seed teardown deleted the credential its
+shoot teardown needed). **That self-deadlock is now gone by construction**: feature-branch
+commits `7bb8fb9`/`9c09682`/`906d936` moved the token-requestor Secret + shoot-applier RBAC
+into the **operator install chart** (`chart/templates/shoot-rbac/`, `shootRbac.enabled`), so
+the credential no longer lives in any CR's seed render.
 
-Investigation surfaced a second, deeper defect: the CR's `spec.applyOrder` field
-(`SeedFirst`/`ShootFirst`, **default `ShootFirst`**) conflates two unrelated concerns —
-*apply-convergence sequencing* and *teardown-dependency ordering* — and reverse-order
-deletion is the mechanism that triggers the deadlock. The verified-correct value for any
-operator whose shoot credential is produced by its own seed render is `SeedFirst`; the only
-real consumer (`metal-operator-remote-v2`) hardcodes `applyOrder: SeedFirst`.
+What remains is the **generic** bug: if the shoot is genuinely unreachable/gone at CR-delete
+time — shoot API down, network partition, shoot being torn down, or the operator install chart
+uninstalled first (removing the credential Secret) — the shoot-applier build fails and
+`reconcileDelete` hard-returns, deadlocking the delete. This is realistic (a CR is often
+deleted *because* its shoot is going away) and reachable, so it is worth fixing.
 
-The agreed change fixes both, coherently and minimally, while the CRD is still pre-live (no
-live CRs, so a schema tweak is cheap): (1) flip the `applyOrder` default to `SeedFirst` and
-narrow its contract to apply-time only; (2) decouple the delete path from `applyOrder` —
-always attempt shoot cleanup first, then run seed cleanup unconditionally (no
-credential-preservation predicate needed — the credential is no longer in the seed render);
-don't hard-return on shoot-client build failure. When shoot cleanup is incomplete, **retain
-the finalizer indefinitely** (no blind timeout) and surface a loud `ShootCleanupBlocked`
-condition; orphaning happens **only** when an operator sets an explicit
-`dual-deployment-operator.cc.sap/force-delete: "true"` annotation — a supported, signalled
-replacement for the unsafe bare `kubectl patch finalizers:[]`. No credential-lifecycle
-redesign, no second finalizer, no skip-predicate.
+The change is deliberately **narrow and generic**: it is purely a `reconcileDelete` behavior
+fix plus reconcile-pipeline logging. It does **not** touch `spec.applyOrder` (no default flip,
+no reframing, no delete-order change), makes **no** CRD schema change, and adds **no**
+credential-preservation logic. Concretely:
 
-Key constraints that shaped the approach:
-- The real invariant is simple: **shoot access must exist before any shoot operation**, on
-  both apply and delete. This is a credential dependency, not a symmetric create/reverse-
-  destroy ownership dependency.
-- Unlike the GRM precedent it replaces (gardener-resource-manager kept retrying shoot
-  cleanup asynchronously after `helm uninstall`), this operator has **no post-finalizer
-  retry agent** — once the finalizer is gone, nothing retries. A blind timeout would
-  therefore turn a transient shoot outage into *permanent, unretried* orphaning. So the
-  operator **blocks** (retains the finalizer) until cleanup succeeds or a human explicitly
-  consents to orphaning — the conservative, never-silently-orphan stance.
-- The credential now lives in the operator install chart, not the workload seed render, so
-  the elaborate credential-preservation logic of earlier revisions is unnecessary.
+1. **Don't hard-return on shoot-client build failure.** Record `ShootUnreachable`
+   (event + `Ready=False`), then **proceed to seed cleanup** (which no longer touches the
+   shoot credential — it lives in the install chart).
+2. **Block until clean, with an explicit human override.** While shoot cleanup is incomplete,
+   **retain the finalizer indefinitely** (no blind timeout) and surface a loud
+   `ShootCleanupBlocked` condition + event. Remove the finalizer only when shoot cleanup
+   succeeds/was unneeded, OR when an operator sets
+   `dual-deployment-operator.cc.sap/force-delete: "true"` — an explicit, auditable,
+   supported replacement for the bare `kubectl patch finalizers:[]`, signalled distinctly as
+   `ShootCleanupForceDeleted`.
+3. **Reconcile-pipeline observability logging.** Structured logs at the key stages (source
+   pull of the upstream chart/kustomization, render/validation, render-cache hit/miss,
+   per-target apply/prune/delete), following K8s logging message-style guidelines.
 
 ## Alternatives Considered
 
-The load-bearing axis is **what to do when shoot cleanup cannot complete**: block
-(retain the finalizer until clean or a human consents) vs. bounded timeout (auto-remove the
-finalizer after a delay, orphaning shoot resources). Options A/B are timeout variants; the
-chosen approach blocks.
+The load-bearing axis is **what to do when shoot cleanup cannot complete**: block (retain the
+finalizer until clean or a human consents) vs. bounded timeout (auto-remove the finalizer
+after a delay, orphaning shoot resources). Options A/B are timeout variants; the chosen
+approach blocks.
 
 ### Option A: Bounded timeout then orphan (issue-doc / earlier Oracle design)
-- **Approach**: Don't hard-return on shoot-client build failure; classify shoot-cleanup need;
-  run seed cleanup with a skip-predicate preserving the shootAccess Secret until shoot cleanup
+- **Approach**: Don't hard-return; run seed cleanup; retain the finalizer until shoot cleanup
   completes **or a 30 min timeout (from `deletionTimestamp`) expires**, then remove the
   finalizer with a distinct `ShootCleanupAbandoned` signal.
 - **Pros**: The CR always eventually disappears without human action; matches Flux
@@ -77,100 +67,87 @@ chosen approach blocks.
   finalizer with cleanup outstanding is exactly what finalizers exist to prevent, and the
   missing retry agent makes the timeout's orphaning unrecoverable.
 
-### Option B: Timeout-only, no credential preservation
-- **Approach**: Don't hard-return; bound teardown by timeout, but skip the preserve
-  predicate — delete all seed resources every pass and let the shoot applier fail benignly
-  until the timeout expires.
-- **Pros**: Simplest possible diff (no predicate, no classify step).
-- **Cons**: Reintroduces the exact self-deadlock one phase later — once seed cleanup deletes
-  the shootAccess Secret, shoot cleanup can never succeed even if the shoot IS reachable, so
-  it always burns the full window and always orphans. The issue doc's own pitfalls section
-  explicitly calls this out.
-- **Why not chosen**: Turns a correctness bug into a "wait then orphan" path even in the
-  happy, shoot-reachable case. Rejected.
+### Option B: Immediate best-effort — delete finalizer regardless of shoot outcome
+- **Approach**: Don't hard-return; attempt shoot cleanup once, then remove the finalizer
+  unconditionally (best-effort shoot delete).
+- **Pros**: Simplest; delete never hangs.
+- **Cons**: Silently orphans shoot resources on any transient outage, with no retry and only
+  a fire-and-forget attempt. Worst of both worlds for reliability.
+- **Why not chosen**: Silent orphaning is precisely the danger the original manual
+  finalizer-wipe posed; automating it is not an improvement.
 
-### Option C: Full applyOrder removal / rebuild, or a two-finalizer credential-lifecycle model
-- **Approach**: Either remove `ShootFirst` from the enum entirely, or introduce a second
-  finalizer (e.g. `shoot-cleanup`) so seed teardown and finalizer removal are decoupled from
-  shoot teardown, and/or move the shootAccess Secret out of the seed render so the credential
-  outlives teardown naturally.
-- **Pros**: Cleanest separation of concerns long-term; each cluster's teardown owns its own
-  finalizer; an explicit credential-lifecycle contract.
-- **Cons**: Largest change; two-finalizer add/remove wiring on create + both delete paths;
-  removing `ShootFirst` presumes no future externally-provisioned-credential use case ever
-  needs it; blurs `applyOrder` semantics across finalizers; over-engineered for a single
-  teardown flow that is fundamentally sequential.
-- **Why not chosen**: More machinery than the bug warrants. The credential dependency is
-  real but sequential, and (post credential-ownership move) the self-deadlock is gone by
-  construction; decoupling deletion from `applyOrder` + block-until-clean gives most of the
-  value with far less churn. Deferred as a possible future model if more consumers with
-  externally-managed credentials appear.
+### Option C: Broaden scope — reframe `applyOrder`, flip its default, decouple deletion
+- **Approach**: Also narrow `spec.applyOrder` to apply-time only, flip its default
+  `ShootFirst`→`SeedFirst`, and decouple `reconcileDelete` from `applyOrder` (fixed teardown
+  order).
+- **Pros**: Would make the API "coherent" if `applyOrder`'s dual apply+delete role were
+  considered a defect.
+- **Cons**: Re-examination showed the premises don't hold. (a) With the credential in the
+  install chart, `ShootFirst` no longer *deadlocks* first deploy — it merely defers the seed
+  render for a cycle or two until Gardener fills the token; the v2 chart comment itself was
+  softened to "avoids a first-deploy ordering surprise," not "prevents a deadlock." So the
+  default flip is a preference, not a fix. (b) Reverse-order deletion driven by `applyOrder`
+  is a **wanted generic capability** — a future consumer may have a real teardown ordering
+  dependency — so it is intended contract, not conflation. (c) Flipping the generic default to
+  suit the metal case (which already sets `SeedFirst` explicitly in its chart) embeds a
+  preference and contradicts "keep DDO generic."
+- **Why not chosen**: Out of scope for a bug fix, and its correctness justification collapsed
+  under re-examination. `applyOrder` is left entirely untouched.
 
 ## Agreed Approach
 
-**Block until clean, with an explicit human override** (never silently orphan) + the
-`applyOrder` API framing correction. Chosen over the timeout variants (A/B) because this
-operator has no post-finalizer retry agent, so a blind timeout would permanently orphan shoot
-resources on a merely transient outage; chosen over Option C because the credential dependency
-is sequential and does not justify a second finalizer or a credential-lifecycle redesign in a
-bug fix. The "stuck `Terminating` forever" complaint that motivated the issue is addressed not
-by a timer but by a *documented, low-friction* override annotation that replaces the unsafe
-bare `kubectl patch finalizers:[]`.
+**Narrow, generic deadlock fix + logging.** `reconcileDelete` stops hard-returning on
+shoot-client build failure and instead proceeds to seed cleanup; the finalizer is retained
+(blocking, never silently orphaning) with a loud signal until shoot cleanup succeeds or a
+human sets the `force-delete` annotation. Reverse-order deletion and everything about
+`spec.applyOrder` are left exactly as they are today (generic capability, no change). Add
+reconcile-pipeline logging. No CRD schema change; purely `internal/controller` behavior +
+logging.
+
+Chosen over the timeout variants (A/B) because this operator has no post-finalizer retry
+agent, so a blind timeout / best-effort delete would permanently and silently orphan shoot
+resources on a merely transient outage. Chosen over the broadened scope (C) because the
+`applyOrder` changes are not part of this bug and their justification collapsed under
+re-examination.
 
 Concretely:
 
-1. **`applyOrder` API reframing** — flip `+kubebuilder:default` from `ShootFirst` to
-   `SeedFirst`; narrow the field's doc comment so it governs *apply-convergence sequencing
-   only*, not deletion order. Keep `ShootFirst` in the enum, documented as valid only when
-   shoot credentials exist independently of the seed render.
-2. **Deletion decoupled from `applyOrder`** — `reconcileDelete` no longer branches on
-   `applyOrder`. Teardown is always **shoot-first-then-seed**: classify shoot-cleanup need
-   from `Status.ShootResources` (minus retained CRDs); build the shoot applier only when
-   needed; on build failure record `ShootUnreachable` (event + `Ready=False`) but **do not
-   return** — fall through to seed cleanup.
-3. **No credential-preservation predicate (simplification)** — seed cleanup deletes
-   `Status.SeedResources` unconditionally (minus retained CRDs). The shootAccess Secret now
-   lives in the operator install chart (`shootRbac.enabled`), not the workload seed render, so
-   DDO's seed teardown can never delete its own shoot credential — there is nothing to preserve.
-   (Feature-branch commits `7bb8fb9`/`9c09682`/`906d936`.)
-4. **Block until clean, with explicit human override** — no blind timeout. Remove the
-   finalizer when shoot cleanup succeeded/unneeded AND full seed cleanup done; OR when the
-   operator has set `dual-deployment-operator.cc.sap/force-delete: "true"` AND seed cleanup
-   (incl. the credential) done — emitting a distinct `ShootCleanupForceDeleted` event +
-   `ShootCleanup{Reason: ForceDeleted}` condition. Otherwise **retain the finalizer
-   indefinitely**, `RequeueAfter=30s` (keep retrying — the operator's only retry mechanism),
-   and surface a loud `ShootCleanupBlocked` condition + event naming the override annotation.
+1. **No hard-return on shoot-client build failure** — `reconcileDelete` records
+   `ShootUnreachable` (event + `Ready=False`) and falls through to seed cleanup instead of
+   returning early. Seed cleanup no longer touches the shoot credential (install-chart-owned),
+   so it is safe to run whether or not the shoot is reachable.
+2. **Reverse-order deletion unchanged** — `reconcileDelete` continues to tear down in the
+   reverse of `spec.applyOrder` exactly as today. This is a generic capability, not modified.
+3. **Block until clean, with explicit human override** — no blind timeout. Remove the
+   finalizer when shoot cleanup succeeded/unneeded AND seed cleanup done; OR when the operator
+   has set `dual-deployment-operator.cc.sap/force-delete: "true"` AND seed cleanup done —
+   emitting a distinct `ShootCleanupForceDeleted` event + `ShootCleanup{Reason: ForceDeleted}`
+   condition. Otherwise **retain the finalizer indefinitely**, `RequeueAfter=30s` (keep
+   retrying — the operator's only retry mechanism), and surface a loud `ShootCleanupBlocked`
+   condition + event naming the override annotation.
+4. **Reconcile-pipeline observability logging** — structured logs at source pull,
+   render/validation, render-cache hit/miss, and per-target apply/prune/delete stages.
 
 ## Key Decisions
 
 - **DDO stays generic; the metal case is only the motivating worst case**: rationale — all
   reconciler behavior keys off generic CR fields (`spec.shootAccess.secretName`,
   `Status.SeedResources`/`ShootResources`), never operator name / chart labels / `metal-*`
-  identifiers. The teardown fix is generic for ALL DDO consumers. A consumer that puts the
-  shootAccess Secret in its own seed render would reintroduce the self-deadlock for itself; its
-  escape hatch is the generic `force-delete` override — no metal-specific handling.
-  Metal-specific deployment facts (hardcoded `applyOrder: SeedFirst`, GRM shoot-RBAC bootstrap,
-  token-requestor Secret in the install chart) stay in the chart; this change adds no
-  chart-aware or GRM-aware logic.
-- **Flip `applyOrder` default to `SeedFirst` now** (user-confirmed, belongs in this change):
-  rationale — the current default (`ShootFirst`) is actively wrong for the common fleet case
-  (seed-rendered credential → deadlocks first deploy); the CRD is pre-live so the schema change
-  is free; bundling it here keeps the `applyOrder` correction atomic (apply default + delete
-  decoupling are two halves of the same fix); leaves the API coherent. Generic default, not a
-  metal carve-out. Requires `make manifests generate` (CRD bases + zz_generated).
-- **Keep `ShootFirst` in the enum, don't remove it**: rationale — no proven guarantee that a
-  future externally-provisioned-credential operator won't want it; removal is larger churn
-  for no present benefit. Decouple deletion from it instead.
-- **Deletion is always shoot-first-then-seed, independent of `applyOrder`**: rationale — the
-  credential dependency (shoot access must exist before touching the shoot) is unidirectional
-  on both apply and delete; encoding delete order as "reverse of apply order" is the root
-  conceptual bug.
-- **No credential-preservation predicate; no `deleteRender` skip param** (simplification):
+  identifiers. Metal-specific deployment facts (hardcoded `applyOrder: SeedFirst`, GRM
+  shoot-RBAC bootstrap, token-requestor Secret in the install chart) stay in the chart; this
+  change adds no chart-aware or GRM-aware logic.
+- **Leave `spec.applyOrder` entirely untouched** (user decision, post re-examination): no
+  default flip, no doc-comment reframing, no delete-order decoupling. Reverse-order deletion
+  driven by `applyOrder` is a **wanted generic capability** (a future consumer may have a real
+  teardown ordering dependency). The earlier "flip the default / narrow to apply-time only"
+  proposal was dropped because, with the credential now install-chart-owned, `ShootFirst` no
+  longer deadlocks first deploy (it only briefly defers the seed render), so the flip was a
+  preference — not a fix — and would embed a preference into a generic default.
+- **The self-deadlock is gone by construction; no credential-preservation predicate**:
   rationale — the shootAccess Secret now lives in the operator install chart, not the workload
-  seed render (feature-branch commits `7bb8fb9`/`9c09682`/`906d936`), so DDO's seed teardown can
-  never delete its own shoot credential. The self-deadlock is eliminated by construction; the
-  intricate preserve-the-Secret logic of earlier revisions is unnecessary. Seed cleanup deletes
-  `Status.SeedResources` unconditionally (minus retained CRDs).
+  seed render, so DDO's seed teardown can never delete its own shoot credential. Seed cleanup
+  deletes `Status.SeedResources` unconditionally (minus retained CRDs). The remaining fix is
+  purely about not hard-returning when the shoot itself is unreachable.
 - **Block until clean, not a bounded timeout** (user decision): rationale — unlike the GRM
   precedent, nothing retries shoot cleanup after the finalizer is removed, so a blind timeout
   would turn a transient shoot outage into permanent, unretried orphaning. Retaining the
@@ -178,18 +155,21 @@ Concretely:
 - **Explicit `force-delete` annotation as the only orphaning path**: rationale — the "stuck
   `Terminating` forever" complaint is addressed by a documented, low-friction override
   (`dual-deployment-operator.cc.sap/force-delete: "true"`) that replaces the unsafe bare
-  `kubectl patch finalizers:[]`. Orphaning happens only by explicit human consent, and is
-  signalled distinctly.
+  `kubectl patch finalizers:[]`. Orphaning happens only by explicit human consent, signalled
+  distinctly.
 - **Distinct `ShootCleanupBlocked` (waiting) vs `ShootCleanupForceDeleted` (overridden)
   signals**: rationale — make both the blocked state and any orphaning explicit and auditable
   via `kubectl get`; `RetentionPolicy{CRDs:Retain}` explains only intended CRD retention, not
   leftover non-CRD shoot resources (Deployments, RBAC, webhooks), which are the real orphan
   risk the force-delete signal surfaces.
-- **Add reconcile-pipeline observability logging** (bundled scope): rationale — the deadlock was
-  hard to diagnose live partly because the reconcile pipeline is quiet. Add structured logs at
-  the key stages (source pull of the upstream chart/kustomization, render/validation, render-cache
-  hit/miss, per-target apply/prune/delete) following the K8s logging message-style guidelines.
-  Observability-only; no behavior change.
+- **No CRD schema change; purely `internal/controller` behavior + logging**: rationale — the
+  fix is behavioral (control flow in `reconcileDelete`) plus an annotation (no schema field)
+  plus logging. No `api/v1alpha1` change, no `make manifests generate` churn.
+- **Add reconcile-pipeline observability logging** (bundled scope): rationale — the deadlock
+  was hard to diagnose live partly because the reconcile pipeline is quiet at stage
+  boundaries. Add structured logs (source pull, render/validation, render-cache hit/miss,
+  apply/prune/delete) following K8s logging message-style guidelines. Observability-only; no
+  behavior change; no secret/token bytes logged.
 
 ## Open Questions
 
