@@ -161,6 +161,22 @@ rbac:
     ##
     enabled: true
 
+## Shoot-side applier RBAC bootstrap (design.md 3.6.7).
+## When enabled, the chart emits a GRM ManagedResource (delivered from the shoot-CP
+## namespace on the seed to the shoot) that seeds a broad apply-scoped ClusterRole +
+## binding for the operator's shoot ServiceAccount. Required because the operator
+## applies its shoot render as that SA, which cannot grant itself RBAC.
+## Off by default; the wrapper chart enables it and supplies the SA values.
+shootRbac:
+  enabled: false
+  ## Token-requestor ServiceAccount the operator applies the shoot render as.
+  serviceAccountName: ""
+  ## Namespace of that ServiceAccount on the shoot.
+  serviceAccountNamespace: "kube-system"
+  ## Namespace to place the ManagedResource + Secret in (the shoot-CP namespace on
+  ## the seed). Defaults to the release namespace.
+  # namespace: ""
+
 ## ServiceAccount configuration
 ##
 serviceAccount:
