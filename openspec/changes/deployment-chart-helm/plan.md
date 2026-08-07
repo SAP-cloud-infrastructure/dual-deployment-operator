@@ -383,7 +383,7 @@ git commit -m "chore: REUSE headers for chart, per-shoot namespace assertions, r
 
 ## Task 8: Shoot-RBAC bootstrap + token-requestor Secret in chart 1 (ownership moved from workload chart)
 
-> **Scope note (added mid-implementation):** the shoot-applier RBAC bootstrap ManagedResource and the Gardener token-requestor Secret — originally scoped to the `sapcc/helm-charts` workload chart — were moved INTO chart 1 because both are operator install-time plumbing identical for every workload (see design.md "Decision: Shoot-RBAC bootstrap + token-requestor Secret ownership"; spec `controller-chart-shoot-rbac`). These templates are **hand-authored**, NOT plugin-generated, so they must be re-applied after any `kubebuilder edit --force` (recorded in `chart/README.md`). Shipped by commits `7bb8fb9`, `9c09682`, `906d936`.
+> **Scope note (added mid-implementation):** the shoot-applier RBAC bootstrap ManagedResource and the Gardener token-requestor Secret — originally scoped to the `sapcc/helm-charts` workload chart — were moved INTO chart 1 because both are operator install-time plumbing identical for every workload (see design.md "Decision: Shoot-RBAC bootstrap + token-requestor Secret ownership"; spec `controller-chart-shoot-rbac`). These templates are **hand-authored**, NOT plugin-generated, so they must be re-applied after any `kubebuilder edit --force` (recorded in `chart/README.md`). Shipped by commits `7bb8fb9` (bootstrap MR), `9c09682` (token-requestor Secret), `906d936` (generic Secret name), `c41aa6c` (bootstrap creates the SA), `1274dd8` (dedicated applier-SA default).
 
 **Files:**
 - Create: `chart/templates/shoot-rbac/applier-bootstrap.yaml` — GRM `ManagedResource` (+ backing Secret) seeding the broad apply-scoped shoot `ClusterRole`+binding for the operator's shoot SA.
@@ -401,10 +401,16 @@ helm template t chart/ | grep -c "purpose: token-requestor"                     
 ```
 Expected: `0`, then `0`.
 
-- [x] **Step 2: Assert enabling requires the shoot SA coordinates (fail-closed)**
+- [x] **Step 2: Assert enabling defaults to a dedicated operator-owned SA; explicit-empty fails fast**
 
-Run: `helm template t chart/ --set shootRbac.enabled=true 2>&1 | grep -i "serviceAccountName is required"`
-Expected: rendering fails with the required-value error (same for a missing `serviceAccountNamespace`).
+Run:
+```bash
+# Enabling alone succeeds and defaults the applier SA to the dedicated operator-owned identity:
+helm template t chart/ --set shootRbac.enabled=true | grep "objects.yaml:" | awk '{print $2}' | base64 -d | grep -m1 -A2 "kind: ServiceAccount" | grep "name: dual-deployment-operator-shoot-applier"
+# The required guard still fires when a coordinate is explicitly emptied:
+helm template t chart/ --set shootRbac.enabled=true --set shootRbac.serviceAccountName="" 2>&1 | grep -i "serviceAccountName is required"
+```
+Expected: the default SA renders as `dual-deployment-operator-shoot-applier`; explicitly emptying `serviceAccountName` (or `serviceAccountNamespace`) fails with the required-value error. The default is dedicated — NOT the workload SA — to avoid the CR-delete self-deauthentication finalizer deadlock (design.md §3.6.7/§3.7).
 
 - [x] **Step 3: Assert enabled render emits the bootstrap MR (SA + ClusterRole + binding) + generic-named token-requestor Secret**
 
@@ -440,7 +446,7 @@ Expected: `0 chart(s) failed`. `chart/README.md` lists `templates/shoot-rbac/` i
 - `controller-chart-image` — "keppel-free ghcr default + AppVersion tag" → Task 4 Steps 2–4; "overridable / subchart override" → Task 4 Step 5.
 - `controller-chart-rbac` — "broad ClusterRole/Binding" → Task 6 Steps 1–2; "leader-election lease" → covered by generated leader-election Role (Task 6 Step 1 scope) + Task 1; "ClusterRoleBinding subject release namespace + static names" → Task 6 Steps 3–4.
 - `controller-chart-deployment` — "per-shoot release namespace" → Task 7 Steps 1–2; "Gardener egress labels" → Task 5 Steps 2–3; "leader election + replicas 1" → Task 1 + Task 5 Steps 4–5; "probes + metrics + no cache volume" → Task 5 Steps 4–5.
-- `controller-chart-shoot-rbac` (added mid-implementation) — "bootstrap off by default" → Task 8 Step 1; "enabling requires shoot SA coordinates" → Task 8 Step 2; "enabled bootstrap emits GRM ManagedResource seeding shoot applier RBAC" → Task 8 Step 3; "token-requestor Secret with generic default name" → Task 8 Step 3; "Secret name overridable" → Task 8 Step 4.
+- `controller-chart-shoot-rbac` (added mid-implementation) — "bootstrap off by default" → Task 8 Step 1; "applier SA defaults to a dedicated operator-owned identity; explicit-empty fails fast" → Task 8 Step 2; "enabled bootstrap emits GRM ManagedResource seeding the SA + shoot applier RBAC" → Task 8 Step 3; "token-requestor Secret with generic default name" → Task 8 Step 3; "Secret name overridable" → Task 8 Step 4.
 
 **Placeholder scan:** No TBD/TODO; every code/edit step shows exact content or an exact command with expected output. Fallback branches (e.g. Task 6 Step 2 "if narrower, add markers") give the concrete remediation, not a vague "handle it".
 
