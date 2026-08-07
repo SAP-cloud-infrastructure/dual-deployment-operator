@@ -101,9 +101,10 @@ chosen approach blocks.
   needs it; blurs `applyOrder` semantics across finalizers; over-engineered for a single
   teardown flow that is fundamentally sequential.
 - **Why not chosen**: More machinery than the bug warrants. The credential dependency is
-  real but sequential; decoupling deletion from `applyOrder` + preserving the Secret gives
-  most of the value with far less churn. Deferred as a possible future model if more
-  consumers with externally-managed credentials appear.
+  real but sequential, and (post credential-ownership move) the self-deadlock is gone by
+  construction; decoupling deletion from `applyOrder` + block-until-clean gives most of the
+  value with far less churn. Deferred as a possible future model if more consumers with
+  externally-managed credentials appear.
 
 ## Agreed Approach
 
