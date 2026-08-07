@@ -15,17 +15,27 @@ commits `db11b6b`, `505fbdd`, `844d65f`). Helm renders use the prebuilt
 
 | Dimension    | Status |
 |--------------|--------|
-| Completeness | 45/45 plan steps complete; 4/4 spec capabilities implemented |
-| Correctness  | 4/4 capabilities' requirements satisfied by rendered chart + config |
+| Completeness | 51/51 plan steps complete (Tasks 1–8); 5/5 spec capabilities implemented |
+| Correctness  | 5/5 capabilities' requirements satisfied by rendered chart + config |
 | Coherence    | Design followed; helm↔kustomize install parity achieved; `openspec validate` PASS |
+
+> **Scope revision (recorded after initial verification):** Task 8 + the
+> `controller-chart-shoot-rbac` capability were added mid-implementation when ownership
+> of the shoot-applier RBAC bootstrap `ManagedResource` and the Gardener token-requestor
+> `Secret` moved from the `sapcc/helm-charts` workload chart into chart 1 (commits
+> `7bb8fb9`, `9c09682`, `906d936`). Design Non-Goals, brainstorm scope, the plan, and this
+> report were updated to match. The corresponding templates were deleted from the workload
+> chart (`metal-operator-remote-v2`) in `sapcc/helm-charts` (committed there, not pushed).
 
 Final assessment: **All checks passed. Ready for archive.**
 
 ## Completeness
 
-**Plan tasks**: all 45 checkboxes in `plan.md` complete. Tasks 1–7 were executed and
-each verified against disk this session (build/lint/helm/test), then the trailing
-completion checkboxes were marked.
+**Plan tasks**: all 51 checkboxes in `plan.md` complete (Tasks 1–8). Tasks 1–7 were
+executed and each verified against disk this session (build/lint/helm/test), then the
+trailing completion checkboxes were marked. Task 8 (shoot-rbac, added mid-implementation)
+was implemented and shipped as commits `7bb8fb9`/`9c09682`/`906d936`, then verified via
+`helm template`/`helm lint`.
 
 **Spec coverage** — one delta capability per spec file, all implemented:
 
@@ -39,6 +49,10 @@ completion checkboxes were marked.
 - `controller-chart-deployment` — three Gardener egress pod labels; `/healthz` +
   `/readyz` probes; `--leader-elect=true`; `replicas: 1`; no chart-cache volume;
   namespace-agnostic (per-shoot); kustomize parity requirement.
+- `controller-chart-shoot-rbac` — `chart/templates/shoot-rbac/` provisions the shoot-applier
+  bootstrap GRM `ManagedResource` and the Gardener token-requestor `Secret`, gated
+  `shootRbac.enabled` (default off); Secret defaults to the generic
+  `dual-deployment-operator-shoot-access`, overridable via `shootRbac.secretName`.
 
 ## Correctness
 
@@ -49,6 +63,7 @@ Requirement→evidence mapping (all rendered/asserted):
 - **RBAC**: rendered `kind: ClusterRoleBinding` at default (`rbac.namespaced=false`), `RoleBinding` at `true`; subject in the release namespace; applier `ClusterRole` rules byte-identical to `config/rbac/role.yaml` (125 lines) covering deployments/services/configmaps/serviceaccounts/roles/rolebindings/clusterroles/clusterrolebindings/networkpolicies/CRDs/webhookconfigs + `bind;escalate`.
 - **Deployment**: 3 `networking.gardener.cloud/to-*: allowed` labels; both probes; `--leader-elect=true`, `--health-probe-bind-address`, `--metrics-bind-address`; `replicas: 1`; no `source-cache` volume.
 - **Leader election**: `cmd/main.go` sets `LeaderElectionReleaseOnCancel: true`.
+- **Shoot-RBAC bootstrap + token-requestor Secret**: default render emits 0 `ManagedResource` and 0 `token-requestor` Secrets; `--set shootRbac.enabled=true` without `shootRbac.serviceAccountName` fails fast (`required` error); with the SA coordinates supplied it emits the `dual-deployment-operator-shoot-rbac-bootstrap` `ManagedResource` (+ backing Secret) whose objects carry the broad apply-scoped `dual-deployment-operator-shoot-applier` `ClusterRole`+binding, and the `dual-deployment-operator-shoot-access` token-requestor `Secret` (labels `resources.gardener.cloud/purpose: token-requestor`, `class: shoot`; empty `token`/`bundle.crt`); `--set shootRbac.secretName=<custom>` renames the Secret. Templates are hand-authored under `chart/templates/shoot-rbac/` (not plugin-generated), recorded in `chart/README.md` for `--force` re-apply.
 
 Scenario coverage: rendered-manifest assertions cover the spec scenarios
 (default/disabled CRD, image default/override, ClusterRoleBinding vs RoleBinding toggle,

@@ -22,8 +22,12 @@ Per design.md §9.7, the operator ships as **two charts in two repos**, mirrorin
 - Confirm `--leader-elect=true`, `LeaderElectionReleaseOnCancel: true`, liveness/readiness probes, and metrics port are wired and surfaced in chart 1's `deployment.yaml`.
 - `helm lint chart/` and `helm template chart/` succeed; `make manifests generate` stays drift-free; build/lint/test green.
 
+**In scope (added after the ownership decision below):**
+- The shoot-applier RBAC bootstrap `ManagedResource` and the shoot token-requestor `Secret` — provisioned by chart 1 under `chart/templates/shoot-rbac/`, gated `shootRbac.enabled` (default off). See "Decision: Shoot-RBAC bootstrap + token-requestor Secret ownership" below.
+
 **Non-Goals:**
-- Chart 2 (`dual-deployment-operator-remote`), the `shoot-rbac-bootstrap` ManagedResource, and the `remote-access` token-requestor Secret — all live in `sapcc/helm-charts`.
+- Chart 2 (`dual-deployment-operator-remote`) itself — lives in `sapcc/helm-charts` (consumes chart 1 as a subchart and sets the `shootRbac.*` values + CR instances).
+- Workload-specific shoot RBAC (e.g. the webhook-injector ServiceAccount subject) — stays in the per-workload chart, not chart 1.
 - Any keppel registry reference in this repo's chart.
 - The GHCR image build/publish workflow (Phase 9.5 — separate change).
 - Wiring the validating admission webhook (Phase 10 — scaffold only, deferred to v2).
@@ -37,9 +41,15 @@ Per design.md §9.7, the operator ships as **two charts in two repos**, mirrorin
 - Alternatives considered: hand-authored `chart/` — rejected (diverges from the generation rule, cannot regenerate cleanly, drifts from `config/*`).
 
 **Decision: Scope = chart 1 only**
-- Chosen: deliver only the controller chart in this repo.
+- Chosen: deliver only the controller chart in this repo (chart 2 itself stays in `sapcc/helm-charts`).
 - Reason: chart 2 belongs to `sapcc/helm-charts` per the fleet's upstream/wrapper ownership boundary; user scoped this change to chart 1.
 - Alternatives considered: bundling chart 2 documentation or the Phase 9.5 publish workflow — rejected (out of scope; separate review surfaces).
+
+**Decision: Shoot-RBAC bootstrap + token-requestor Secret ownership** (revised mid-implementation)
+- Chosen: the shoot-applier RBAC bootstrap (`ManagedResource` → broad apply-scoped shoot `ClusterRole`+binding for the operator's shoot ServiceAccount) AND the Gardener token-requestor `Secret` are provisioned by **chart 1** under `chart/templates/shoot-rbac/`, gated `shootRbac.enabled` (default `false`), parameterized by `shootRbac.{serviceAccountName,serviceAccountNamespace,secretName,namespace}`. The token-requestor Secret defaults to the workload-agnostic name `dual-deployment-operator-shoot-access`.
+- Reason: both are operator install-time plumbing — they exist *because the operator is present*, are identical for every managed workload, and are keyed only by the shoot ServiceAccount. Housing them in the operator install chart (rather than each per-workload chart) removes duplication across the fleet, keeps the credential name uniform, and lets the operator only ever *read* the Secret. This reverses the original plan, which placed both in the downstream `sapcc/helm-charts` workload chart (`-remote`). The corresponding templates were deleted from the workload chart (`metal-operator-remote-v2`) in `sapcc/helm-charts`, and its controller-manager volume now references the Secret name via a configurable value (no hard link). Workload-specific shoot RBAC (webhook-injector SA subject) stays in the workload chart.
+- Alternatives considered: keep both in the workload chart (original scope) — rejected because it duplicates identical bootstrap/Secret logic per operator and couples the credential name to a workload; require an explicit (empty + `required`) Secret name — rejected in favor of a generic default that is still overridable.
+- Implemented by branch commits `7bb8fb9` (bootstrap MR), `9c09682` (token-requestor Secret), `906d936` (generic default name).
 
 **Decision: Registry-agnostic image, neutral ghcr.io default**
 - Chosen: `manager.image.repository: ghcr.io/SAP-cloud-infrastructure/dual-deployment-operator`, `manager.image.tag` defaults to `.Chart.AppVersion`; no keppel host in this repo.
