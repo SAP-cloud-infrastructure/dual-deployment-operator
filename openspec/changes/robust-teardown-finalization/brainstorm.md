@@ -116,7 +116,10 @@ Fix `reconcileDelete` (Option C) and add reconcile-pipeline logging. Nothing els
   shoot-RBAC bootstrap, install-chart-owned token-requestor Secret) live in the chart; the
   reconciler is chart- and GRM-agnostic.
 - **Logging is observability-only**: structured `logr` logs following K8s message-style
-  guidelines; no behavior change; no secret or token bytes ever logged.
+  guidelines; no behavior change; no secret or token bytes ever logged. Beyond the per-target
+  apply/prune/delete summaries, the **per-resource apply status** (each delivered resource's
+  resulting health + message) is logged at `V(1)` — `applyAll` collects this today but logs
+  nothing, so a `Degraded` resource is invisible in logs, only in the CR status subresource.
 - **Keep the `force-delete` annotation and document it for users** (user decision): the
   annotation is retained (not dropped). Its value over a raw `kubectl patch finalizers:[]` is
   that it runs one more reconcile pass (completing seed cleanup and emitting an audited

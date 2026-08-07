@@ -11,6 +11,8 @@ The system MUST emit structured log lines at the boundaries of the reconcile pip
 
 The following stages MUST be instrumented: source pull of the upstream chart or kustomization (start and result, with source kind, ref, and resolved content id); render and validation per mode (with mode and manifest count); render-cache hit vs. miss (with resolved content id and hit/miss); and per-target apply, prune, and delete (with cluster, and counts such as applied/degraded/pruned/deleted). In `reconcileDelete` specifically, the log MUST record the finalizer decision (whether shoot cleanup completed, whether the `force-delete` override was honored, or whether the reconcile is blocking and retrying).
 
+In addition to the per-target apply summary, the system MUST log the **apply status of each individual delivered resource** at `V(1)`: for every `applier.Apply` result the log line MUST record the target cluster, the resource kind/name/namespace, the resulting health (`Healthy`/`Progressing`/`Degraded`/`Unknown`), and any operator-authored message. This makes a `Degraded` or `Progressing` resource visible in logs rather than only in the CR's `status.seedResources`/`status.shootResources`. The message field carries only operator-authored health/conflict text — never rendered values or secrets.
+
 This requirement is observability-only: it MUST NOT change reconcile behavior and MUST NOT add any CRD `status` field.
 
 #### Scenario: source pull is logged with its resolved id
@@ -25,6 +27,13 @@ This requirement is observability-only: it MUST NOT change reconcile behavior an
 - **THEN** a structured log line records the resolved content id and `cache=hit`
 - **WHEN** a render is not in the cache and is rendered fresh
 - **THEN** a structured log line records the resolved content id and `cache=miss`
+
+#### Scenario: per-resource apply status is logged
+
+- **WHEN** the reconciler applies a delivered resource to its target cluster
+- **THEN** a `V(1)` structured log line records the cluster, the resource kind/name/namespace, and its resulting health
+- **AND** when the health is `Degraded` or `Progressing`, the operator-authored message is included
+- **AND** the line contains no rendered values or secrets
 
 #### Scenario: delete finalizer decision is logged
 

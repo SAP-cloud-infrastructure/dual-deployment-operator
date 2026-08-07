@@ -154,8 +154,19 @@ bytes are ever logged.
 | Source pull (OCI chart / git kustomization) — start + result | `internal/source` | `sourceKind`, `ref`, `resolvedID` |
 | Render + validation, per mode | `internal/controller` / `internal/source` | `mode`, `manifests`, `transform` |
 | Render-cache hit / miss | `internal/source` (`Deps.RenderCache`) | `resolvedID`, `cache` |
-| Apply / prune summary, per target | `internal/controller` | `cluster`, `applied`, `degraded`, `pruned` |
+| Apply summary, per target (V(0)) | `internal/controller` | `cluster`, `applied`, `degraded` |
+| **Per-resource apply status (V(1))** | `internal/controller` (`applyAll`) | `cluster`, `kind`, `name`, `namespace`, `health`, `message` |
+| Prune summary, per target | `internal/controller` | `cluster`, `pruned` |
 | Delete progress + finalizer decision | `internal/controller` (`reconcileDelete`) | `cluster`, `deleted`, `shootDone`, `forceDelete` |
+
+Per-resource apply status closes a concrete gap: `applyAll` today collects each resource's
+`ResourceStatus{Health, Message}` into `status.seedResources`/`status.shootResources` but logs
+nothing, so a `Degraded` resource is invisible in logs. Each `applier.Apply` result SHALL be
+logged at `V(1)` with its kind/name/namespace, resulting `health`
+(`Healthy`/`Progressing`/`Degraded`/`Unknown`), and any `message` — so the apply status of every
+delivered resource is observable from logs, not only from the CR's status subresource. The
+`message` field is operator-authored (health/conflict text), never rendered values or secrets.
+
 
 Observability-only; no behavior change; no new dependency.
 
