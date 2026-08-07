@@ -27,9 +27,11 @@ live CRs, so a schema tweak is cheap): (1) flip the `applyOrder` default to `See
 narrow its contract to apply-time only; (2) decouple the delete path from `applyOrder` —
 always attempt shoot cleanup first while **preserving the shootAccess Secret**, then run
 seed cleanup; remove the finalizer when shoot cleanup succeeds (or is unneeded) and seed
-cleanup completes, or after a bounded retry window (`remoteDeleteTimeout`, 30 min, measured
-from `deletionTimestamp`) with a distinct `ShootCleanupAbandoned` event + condition. No
-credential-lifecycle redesign, no second finalizer.
+cleanup completes. When shoot cleanup is incomplete, **retain the finalizer indefinitely**
+(no blind timeout) and surface a loud `ShootCleanupBlocked` condition; orphaning happens
+**only** when an operator sets an explicit `dual-deployment-operator.cc.sap/force-delete:
+"true"` annotation — a supported, signalled replacement for the unsafe bare
+`kubectl patch finalizers:[]`. No credential-lifecycle redesign, no second finalizer.
 
 Key constraints that shaped the approach:
 - The real invariant is simple: **shoot access must exist before any shoot operation**, on
@@ -37,27 +39,36 @@ Key constraints that shaped the approach:
   destroy ownership dependency.
 - Unlike the GRM precedent it replaces (gardener-resource-manager kept retrying shoot
   cleanup asynchronously after `helm uninstall`), this operator has **no post-finalizer
-  retry agent** — once the finalizer is gone, nothing retries. A *bounded finalizer* (retry
-  then explicit abandonment) is therefore the correct compromise, not fire-and-forget.
+  retry agent** — once the finalizer is gone, nothing retries. A blind timeout would
+  therefore turn a transient shoot outage into *permanent, unretried* orphaning. So the
+  operator **blocks** (retains the finalizer) until cleanup succeeds or a human explicitly
+  consents to orphaning — the conservative, never-silently-orphan stance.
 - Building the shoot client dereferences **only** the shootAccess Secret's `token` /
   `bundle.crt` keys plus `spec.shootAccess.server` (a CR field) — so preserving that single
   Secret is provably sufficient to keep the credential usable during retries.
 
 ## Alternatives Considered
 
-### Option A: Narrow bounded finalization only (issue-doc / earlier Oracle design)
-- **Approach**: Implement bounded finalization exactly as the issue doc prescribes —
-  classify shoot-cleanup need, don't hard-return on shoot-client build failure, run seed
-  cleanup with a skip-predicate preserving the shootAccess Secret until shoot cleanup
-  completes or a 30 min timeout expires, then remove the finalizer with a distinct
-  `ShootCleanupAbandoned` signal. **Keep `applyOrder` and reverse-order deletion as-is.**
-- **Pros**: Smallest diff; no CRD schema change; directly follows the code's real
-  dependency; matches Flux `WaitForTermination` / Gardener grace-then-force precedent.
-- **Cons**: Leaves a pre-live CRD default (`ShootFirst`) that deadlocks first deploy for
-  the only verified consumer, so every real CR must keep force-overriding it; preserves the
-  misleading `applyOrder` = "apply order + reverse delete order" overloading.
-- **Why not chosen**: It unblocks the bug but leaves the design *incoherent* — a default
-  that is known-wrong and an overloaded field — while a schema fix is still free (pre-live).
+The load-bearing axis is **what to do when shoot cleanup cannot complete**: block
+(retain the finalizer until clean or a human consents) vs. bounded timeout (auto-remove the
+finalizer after a delay, orphaning shoot resources). Options A/B are timeout variants; the
+chosen approach blocks.
+
+### Option A: Bounded timeout then orphan (issue-doc / earlier Oracle design)
+- **Approach**: Don't hard-return on shoot-client build failure; classify shoot-cleanup need;
+  run seed cleanup with a skip-predicate preserving the shootAccess Secret until shoot cleanup
+  completes **or a 30 min timeout (from `deletionTimestamp`) expires**, then remove the
+  finalizer with a distinct `ShootCleanupAbandoned` signal.
+- **Pros**: The CR always eventually disappears without human action; matches Flux
+  `WaitForTermination` / Gardener grace-then-force precedent.
+- **Cons**: This operator has **no post-finalizer retry agent** (unlike the GRM system it
+  replaces, whose async seed-side reconciler kept retrying shoot cleanup after `helm
+  uninstall`). A blind timeout therefore turns a *transient* shoot outage into *permanent,
+  unretried* orphaning — strictly worse than the precedent. Orphaning is silent-ish (only an
+  event/condition a human may not be watching).
+- **Why not chosen**: The user chose the never-silently-orphan stance. Auto-removing a
+  finalizer with cleanup outstanding is exactly what finalizers exist to prevent, and the
+  missing retry agent makes the timeout's orphaning unrecoverable.
 
 ### Option B: Timeout-only, no credential preservation
 - **Approach**: Don't hard-return; bound teardown by timeout, but skip the preserve
@@ -66,10 +77,10 @@ Key constraints that shaped the approach:
 - **Pros**: Simplest possible diff (no predicate, no classify step).
 - **Cons**: Reintroduces the exact self-deadlock one phase later — once seed cleanup deletes
   the shootAccess Secret, shoot cleanup can never succeed even if the shoot IS reachable, so
-  it always burns the full 30 min and always orphans. The issue doc's own pitfalls section
+  it always burns the full window and always orphans. The issue doc's own pitfalls section
   explicitly calls this out.
-- **Why not chosen**: Turns a correctness bug into a "wait 30 min then orphan" path even in
-  the happy, shoot-reachable case. Rejected.
+- **Why not chosen**: Turns a correctness bug into a "wait then orphan" path even in the
+  happy, shoot-reachable case. Rejected.
 
 ### Option C: Full applyOrder removal / rebuild, or a two-finalizer credential-lifecycle model
 - **Approach**: Either remove `ShootFirst` from the enum entirely, or introduce a second
@@ -89,11 +100,14 @@ Key constraints that shaped the approach:
 
 ## Agreed Approach
 
-**Coherent minimal fix** (a refinement of Option A that also corrects the API framing).
-Chosen over pure Option A because the CRD is still pre-live, so fixing the misleading
-`applyOrder` default is cheap now and leaves the design coherent rather than merely
-unblocked; chosen over Option C because the credential dependency is sequential and does not
-justify a second finalizer or a credential-lifecycle redesign in a bug fix.
+**Block until clean, with an explicit human override** (never silently orphan) + the
+`applyOrder` API framing correction. Chosen over the timeout variants (A/B) because this
+operator has no post-finalizer retry agent, so a blind timeout would permanently orphan shoot
+resources on a merely transient outage; chosen over Option C because the credential dependency
+is sequential and does not justify a second finalizer or a credential-lifecycle redesign in a
+bug fix. The "stuck `Terminating` forever" complaint that motivated the issue is addressed not
+by a timer but by a *documented, low-friction* override annotation that replaces the unsafe
+bare `kubectl patch finalizers:[]`.
 
 Concretely:
 
@@ -108,14 +122,15 @@ Concretely:
    return** — fall through to seed cleanup.
 3. **Credential preservation** — seed cleanup runs with a predicate that preserves exactly
    the shootAccess Secret (matched by namespaced identity) while shoot cleanup is incomplete
-   and the timeout has not expired. Verified sufficient: `ShootRESTConfig` reads only that
-   Secret's `token`/`bundle.crt` plus `spec.shootAccess.server`.
-4. **Bounded finalizer** — `const remoteDeleteTimeout = 30 * time.Minute`, measured from
-   `cr.DeletionTimestamp` (no new status field). Remove the finalizer when shoot cleanup
-   succeeded/unneeded AND full seed cleanup done; OR when the window is exceeded AND seed
-   cleanup (incl. the credential) done — emitting a distinct `ShootCleanupAbandoned` Warning
-   event + a dedicated `ShootCleanup=False` status condition. Otherwise `RequeueAfter=30s`
-   (retain, keep retrying — the operator's only retry mechanism).
+   and no force-delete override is present. Verified sufficient: `ShootRESTConfig` reads only
+   that Secret's `token`/`bundle.crt` plus `spec.shootAccess.server`.
+4. **Block until clean, with explicit human override** — no blind timeout. Remove the
+   finalizer when shoot cleanup succeeded/unneeded AND full seed cleanup done; OR when the
+   operator has set `dual-deployment-operator.cc.sap/force-delete: "true"` AND seed cleanup
+   (incl. the credential) done — emitting a distinct `ShootCleanupForceDeleted` event +
+   `ShootCleanup{Reason: ForceDeleted}` condition. Otherwise **retain the finalizer
+   indefinitely**, `RequeueAfter=30s` (keep retrying — the operator's only retry mechanism),
+   and surface a loud `ShootCleanupBlocked` condition + event naming the override annotation.
 
 ## Key Decisions
 
@@ -143,20 +158,25 @@ Concretely:
   shoot client dereferences only that Secret's `token`/`bundle.crt` + a CR field; no
   namespace object or auxiliary resource is needed. Match by namespaced identity (it is a
   namespaced Secret in the CR's own namespace, not cluster-scoped).
-- **Bounded finalizer, not fire-and-forget**: rationale — unlike the GRM precedent, nothing
-  retries shoot cleanup after the finalizer is removed, so a bounded retry-then-abandon is
-  the correct compromise between "deadlock forever" and "silently orphan immediately".
-- **Distinct `ShootCleanupAbandoned` event + `ShootCleanup` condition on timeout**: rationale —
-  make orphaning explicit and auditable via `kubectl get`; `RetentionPolicy{CRDs:Retain}`
-  explains only intended CRD retention, not leftover non-CRD shoot resources (Deployments,
-  RBAC, webhooks), which are the real orphan risk this signal surfaces.
-- **`remoteDeleteTimeout` stays a package const (30 min)**: rationale — mirrors the existing
-  `requeueInterval` const; a timeout is policy, not correctness. Make it a manager flag only
-  later if a consumer needs a different risk tolerance.
+- **Block until clean, not a bounded timeout** (user decision): rationale — unlike the GRM
+  precedent, nothing retries shoot cleanup after the finalizer is removed, so a blind timeout
+  would turn a transient shoot outage into permanent, unretried orphaning. Retaining the
+  finalizer indefinitely (the conservative, generic-Kubernetes stance) never silently orphans.
+- **Explicit `force-delete` annotation as the only orphaning path**: rationale — the "stuck
+  `Terminating` forever" complaint is addressed by a documented, low-friction override
+  (`dual-deployment-operator.cc.sap/force-delete: "true"`) that replaces the unsafe bare
+  `kubectl patch finalizers:[]`. Orphaning happens only by explicit human consent, and is
+  signalled distinctly.
+- **Distinct `ShootCleanupBlocked` (waiting) vs `ShootCleanupForceDeleted` (overridden)
+  signals**: rationale — make both the blocked state and any orphaning explicit and auditable
+  via `kubectl get`; `RetentionPolicy{CRDs:Retain}` explains only intended CRD retention, not
+  leftover non-CRD shoot resources (Deployments, RBAC, webhooks), which are the real orphan
+  risk the force-delete signal surfaces.
 - **No `internal/deliver` change; `deleteRender` gains a controller-local `skip` param**:
   rationale — one caller, YAGNI; don't extract a reusable predicate helper prematurely.
 
 ## Open Questions
 
-- [ ] Confirm 30 min is the right bounded window for production shoot outages, or whether it
-      should be shorter/longer — owner: user (deferred; const is trivially tunable later).
+- [ ] Annotation key/value ergonomics — confirm `dual-deployment-operator.cc.sap/force-delete:
+      "true"` is the desired override contract (key name + string value), or whether a
+      different key/semantics is preferred — owner: user (design/spec review).

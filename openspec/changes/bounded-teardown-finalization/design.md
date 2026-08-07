@@ -93,11 +93,13 @@ if !shootDone {
     }
 }
 
-// 3. Timeout + credential-preservation decision.
-forceOrphan := !shootDone && time.Since(cr.DeletionTimestamp.Time) >= remoteDeleteTimeout
+// 3. Force-delete override + credential-preservation decision.
+//    NO blind timer: the finalizer is retained indefinitely while shoot cleanup is
+//    incomplete, UNLESS a human has explicitly consented to orphaning via annotation.
+forceDelete := cr.Annotations[ForceDeleteAnnotation] == "true"
 skip := preserveShootCredential(cr)
-if shootDone || forceOrphan {
-    skip = nil                                 // done or abandoning -> delete the credential too
+if shootDone || forceDelete {
+    skip = nil                                 // done or force-deleting -> delete the credential too
 }
 
 // 4. Seed cleanup with preserve predicate. Real seed errors -> retry via backoff.
@@ -106,17 +108,20 @@ if agg := kerrors.NewAggregate(seedErrs); agg != nil {
     return ctrl.Result{}, agg
 }
 
-// 5. Finalizer policy.
+// 5. Finalizer policy — block until clean, or explicit human override.
 switch {
 case shootDone:
     controllerutil.RemoveFinalizer(cr, FinalizerName)
     return ctrl.Result{}, r.Update(ctx, cr)
-case forceOrphan:
-    recordShootCleanupAbandoned(cr, shootErr)  // distinct Warning event + ShootCleanup condition
+case forceDelete:
+    recordForceDeleted(cr, shootErr)           // distinct Warning event + ShootCleanup condition
     controllerutil.RemoveFinalizer(cr, FinalizerName)
     return ctrl.Result{}, r.Update(ctx, cr)
 default:
-    return ctrl.Result{RequeueAfter: 30 * time.Second}, nil   // retain, keep retrying
+    // Shoot cleanup incomplete and no override: RETAIN the finalizer indefinitely,
+    // keep retrying, and surface a loud, auditable ShootCleanupBlocked condition.
+    recordShootCleanupBlocked(cr, shootErr)
+    return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 ```
 
@@ -142,32 +147,43 @@ func preserveShootCredential(cr *ddov1alpha1.DualDeploymentOperator) func(ddov1a
 only `secret.Data["token"]`, `secret.Data["bundle.crt"]`, and `spec.shootAccess.server`
 (a CR field). No namespace object or auxiliary resource is dereferenced.
 
-### 4. Timeout & signals
+### 4. Override annotation & signals
 
-- `const remoteDeleteTimeout = 30 * time.Minute` (package-level, mirrors `requeueInterval`).
-  Measured from `cr.DeletionTimestamp` — no new status field, no CRD status-schema change.
+- `const ForceDeleteAnnotation = "dual-deployment-operator.cc.sap/force-delete"`. When set to
+  `"true"` on the CR, the operator deletes the shootAccess Secret too and removes the finalizer
+  even though shoot cleanup is incomplete — an explicit, auditable human consent to orphaning.
+  This replaces the scary bare `kubectl patch ... finalizers:[]` with a supported, signalled
+  action. **No blind timeout**: the finalizer is retained indefinitely until shoot cleanup
+  succeeds or an operator opts in via this annotation.
 - `recordShootUnreachable(cr, err)`: existing Warning event (`ShootUnreachable`) + `Ready=False`;
   now non-fatal (falls through to seed cleanup).
-- `recordShootCleanupAbandoned(cr, shootErr)`: **new distinct** Warning event
-  (`ShootCleanupAbandoned`) + dedicated status condition
-  `{Type: "ShootCleanup", Status: False, Reason: "Abandoned"}` noting non-CRD shoot resources
-  may be orphaned. `Ready` is left unchanged.
+- `recordShootCleanupBlocked(cr, shootErr)`: **new** Warning event (`ShootCleanupBlocked`) +
+  dedicated status condition `{Type: "ShootCleanup", Status: False, Reason: "Blocked"}` stating
+  the CR deletion is waiting on shoot cleanup and naming the annotation escape hatch. Emitted
+  each retry while blocked. `Ready` is left unchanged.
+- `recordForceDeleted(cr, shootErr)`: **new distinct** Warning event (`ShootCleanupForceDeleted`)
+  + condition `{Type: "ShootCleanup", Status: False, Reason: "ForceDeleted"}` noting non-CRD
+  shoot resources may be orphaned by explicit operator override.
 
 ## Scope
 
-- `api/v1alpha1/` — default flip + doc comment; regen CRD bases + `zz_generated`.
-- `internal/controller/` — delete control flow, `deleteRender` skip param, predicate, signals.
-- No `internal/deliver/` change. No new CRD status field. `remoteDeleteTimeout` stays a const.
+- `api/v1alpha1/` — `applyOrder` default flip + doc comment; regen CRD bases + `zz_generated`.
+  (The force-delete override is an annotation — no CRD schema field, no status-schema change.)
+- `internal/controller/` — delete control flow, `deleteRender` skip param, credential predicate,
+  `ForceDeleteAnnotation` const, block/override signals.
+- No `internal/deliver/` change. No new CRD status field. No timeout const (blocking model).
 
 ## Testing (TDD, RED first)
 
 Replace the existing test `retains finalizer and sets ShootUnreachable when Secret is missing`
 (`…_controller_test.go:404`) — it encodes the buggy behavior. New coverage:
 
-1. **Missing Secret, shoot pending, before timeout**: seed resources deleted **except** the
-   shootAccess Secret; finalizer retained; `ShootUnreachable` set; `RequeueAfter=30s`.
-2. **Missing Secret, after timeout** (old `deletionTimestamp`): full seed cleanup incl. the
-   Secret; finalizer removed; `ShootCleanupAbandoned` event + `ShootCleanup` condition.
+1. **Missing Secret, shoot pending, no override**: seed resources deleted **except** the
+   shootAccess Secret; finalizer **retained**; `ShootUnreachable` + `ShootCleanupBlocked` set;
+   `RequeueAfter=30s`. (Deletion does not complete — blocking model.)
+2. **Missing Secret, force-delete annotation set** (`dual-deployment-operator.cc.sap/force-delete: "true"`):
+   full seed cleanup incl. the Secret; finalizer removed; `ShootCleanupForceDeleted` event +
+   `ShootCleanup{Reason: ForceDeleted}` condition.
 3. **No deletable shoot statuses** (only retained CRDs): shoot applier **not** built; seed
    cleanup runs; finalizer removed.
 4. **Happy path**: shoot reachable → shoot then seed pruned → finalizer removed (keep).
@@ -176,6 +192,11 @@ Replace the existing test `retains finalizer and sets ShootUnreachable when Secr
 ## Effort / risk
 
 Medium (~1–2 days incl. tests + codegen). Confidence high: the current default is actively
-wrong for the only verified consumer, and reverse-delete coupling is the root conceptual bug.
-Follows Kubebuilder finalizer guidance (retry external cleanup, idempotent) and Flux/Gardener
-bounded-deletion precedent, adapted for the absence of a post-finalizer retry agent.
+wrong for the common fleet case, and reverse-delete coupling is the root conceptual bug.
+Follows generic Kubernetes finalizer guidance (retain until external cleanup succeeds; never
+auto-remove a finalizer with cleanup outstanding) — the blocking model is the conservative,
+never-silently-orphan stance. Orphaning is possible **only** via an explicit human-set
+`force-delete` annotation, which replaces the unsafe bare `kubectl patch finalizers:[]`. This
+deliberately diverges from the Flux `WaitForTermination` timeout precedent because this
+operator has **no post-finalizer retry agent** (unlike the GRM system it replaces): a blind
+timeout here would turn a transient shoot outage into permanent, unretried orphaning.
