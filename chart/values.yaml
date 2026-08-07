@@ -169,8 +169,12 @@ rbac:
 ## Off by default; the wrapper chart enables it and supplies the SA values.
 shootRbac:
   enabled: false
-  ## Token-requestor ServiceAccount the operator applies the shoot render as.
-  serviceAccountName: ""
+  ## Token-requestor ServiceAccount the operator applies the shoot render AS — the
+  ## operator's OWN applier identity. MUST be dedicated to the operator, NOT a
+  ## ServiceAccount that any workload render also creates/deletes: the operator
+  ## authenticates as this SA, and if a workload teardown deletes it the operator
+  ## self-deauthenticates mid-cleanup (401) and the finalizer deadlocks.
+  serviceAccountName: "dual-deployment-operator-shoot-applier"
   ## Namespace of that ServiceAccount on the shoot.
   serviceAccountNamespace: "kube-system"
   ## Name of the token-requestor Secret the operator reads for shoot credentials
