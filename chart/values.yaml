@@ -173,8 +173,11 @@ shootRbac:
   serviceAccountName: ""
   ## Namespace of that ServiceAccount on the shoot.
   serviceAccountNamespace: "kube-system"
-  ## Namespace to place the ManagedResource + Secret in (the shoot-CP namespace on
-  ## the seed). Defaults to the release namespace.
+  ## Name of the token-requestor Secret the operator reads for shoot credentials
+  ## (spec.shootAccess.secretName). Defaults to <release>-remote-kubeconfig.
+  # secretName: ""
+  ## Namespace to place the ManagedResource + token-requestor Secret in (the shoot-CP
+  ## namespace on the seed). Defaults to the release namespace.
   # namespace: ""
 
 ## ServiceAccount configuration
