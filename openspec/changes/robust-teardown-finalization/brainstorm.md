@@ -106,9 +106,10 @@ Fix `reconcileDelete` (Option C) and add reconcile-pipeline logging. Nothing els
   by the operator install chart (`chart/templates/shoot-rbac/`, `shootRbac.enabled`), not by any
   CR's seed render, so DDO's seed teardown can never delete its own shoot access. Seed cleanup
   deletes `Status.SeedResources` unconditionally (minus retained CRDs).
-- **No CRD schema change; purely `internal/controller` + `internal/source`**: the fix is
-  control-flow plus an annotation (no schema field) plus logging. No `api/v1alpha1` change, no
-  `make manifests generate`.
+- **No CRD *spec/status* schema change**: the teardown fix is control-flow plus an annotation
+  (no schema field) plus logging. The only `api/v1alpha1` change is the printer-column markers
+  (see the printer-columns decision below), which are marker-only and require
+  `make manifests`; they do not alter the spec or status shape.
 - **DDO stays generic**: all behavior keys off generic CR fields (`spec.shootAccess.secretName`,
   `Status.SeedResources`/`ShootResources`), never operator name / chart labels / `metal-*`
   identifiers. Metal-specific deployment facts (hardcoded `applyOrder: SeedFirst`, GRM
@@ -122,6 +123,16 @@ Fix `reconcileDelete` (Option C) and add reconcile-pipeline logging. Nothing els
   `ShootCleanupForceDeleted` signal) rather than deleting the object outright and skipping seed
   cleanup. Because it is an operator-facing operational contract, it MUST be documented in
   `docs/design.md` (deletion states + the annotation + an example).
+- **Promote reconcile status to CRD printer-columns** (user decision, bundled scope): the CRD
+  declares no `additionalPrinterColumns`, so `kubectl get ddo` and Lens/Freelens list views
+  show only NAME + AGE — the `Ready` status lives only in `status.conditions[]` and is invisible
+  without opening the object. Add `+kubebuilder:printcolumn` markers for Ready / Reason / Age
+  (marker-only on the existing type; no spec/status field change; regenerated via
+  `make manifests`). The detailed `ShootCleanup` teardown state is intentionally not given its
+  own column in v1 (it surfaces as `Ready=False`; detail stays in conditions/events).
+  Bundled here rather than split out because it is small, observability-related (pairs with the
+  logging scope), and cheap pre-live; the trade-off is that this change now carries one
+  `api/v1alpha1` marker change + `make manifests generate`.
 
 ## Open Questions
 

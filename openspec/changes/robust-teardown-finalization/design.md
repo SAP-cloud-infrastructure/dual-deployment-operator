@@ -27,12 +27,14 @@ wipe) is both a correctness bug (deadlock) and a safety bug (the manual wipe sil
 
 ## Scope stance
 
-A behavioral bug fix in `reconcileDelete` plus reconcile-pipeline logging. Deliberately **not**
-in scope:
+A behavioral bug fix in `reconcileDelete`, reconcile-pipeline logging, and status
+printer-columns for list-view observability. Deliberately **not** in scope:
 
 - No `spec.applyOrder` change — default, doc-comment, and the reverse-order teardown it drives
   are all left exactly as today. Reverse-order deletion is a wanted generic capability.
-- No CRD schema change — the override is an annotation, not a spec field.
+- No CRD *spec* schema change — the force-delete override is an annotation, not a spec field.
+  (The printer-columns are marker-only additions on the existing type; they change the CRD's
+  `additionalPrinterColumns`, not the spec/status shape.)
 - No `internal/deliver` change; no credential-preservation logic (the shootAccess Secret is
   install-chart-owned, so seed teardown never touches it).
 
@@ -157,6 +159,35 @@ bytes are ever logged.
 
 Observability-only; no behavior change; no new dependency.
 
+## 4. Status printer-columns (list-view observability)
+
+The CRD currently declares **no** `additionalPrinterColumns`, so `kubectl get ddo` and
+Lens/Freelens list views show only NAME + AGE — the `Ready` status lives only in
+`status.conditions[]` and is invisible without opening the object. Add
+`+kubebuilder:printcolumn` markers to the `DualDeploymentOperator` type so the reconcile
+status surfaces in the table/list view:
+
+```go
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+```
+
+- **Ready** — True/False/Unknown from the `Ready` condition (the primary at-a-glance signal).
+- **Reason** — `ReconcileSuccess` / `Progressing` / `ResourcesDegraded` / `ShootUnreachable`
+  (the reasons the reconciler sets on the `Ready` condition).
+- **Age** — standard creation age.
+
+Scope decision: the detailed teardown state (`ShootCleanup` condition = `Blocked`/`ForceDeleted`)
+is intentionally **not** given its own column in v1 — a blocked teardown already surfaces as
+`Ready=False`, and the `ShootCleanup` condition + events carry the detail. Keeping the column
+set to Ready/Reason/Age avoids column sprawl; a dedicated `ShootCleanup` column can be added
+later if operators want it.
+
+This is a **marker-only** change on the existing type — it alters the CRD's
+`additionalPrinterColumns`, not the spec or status schema. Regenerated via `make manifests`
+into `config/crd/bases/*`.
+
 ## User documentation
 
 The `force-delete` annotation is an operator-facing operational contract and MUST be
@@ -181,10 +212,14 @@ section to `docs/design.md` (the operator's authoritative behavior doc) covering
   separate seed/shoot error tracking, block/override finalizer switch), `ForceDeleteAnnotation`
   const, the three signal helpers, and apply/prune/delete logging.
 - `internal/source/` — source-pull + render-cache hit/miss logging.
+- `api/v1alpha1/dualdeploymentoperator_types.go` — `+kubebuilder:printcolumn` markers only
+  (Ready / Reason / Age). Regenerate with `make manifests` (updates
+  `config/crd/bases/*.yaml`). Marker-only: no spec or status schema field change.
 - `docs/design.md` — new "Deleting a DualDeploymentOperator" section documenting the deletion
   states and the `force-delete` annotation contract (see User documentation).
-- No `api/v1alpha1/` change. No `internal/deliver/` change. No new CRD status field. No timeout
-  const. No `deleteRender` skip parameter. No credential-preservation predicate.
+- No `spec.applyOrder` change. No `internal/deliver/` change. No new CRD spec/status field. No
+  timeout const. No `deleteRender` skip parameter. No credential-preservation predicate. The
+  only `api/v1alpha1` change is the printer-column markers above.
 
 ## Testing (TDD, RED first)
 
@@ -202,6 +237,10 @@ is **replaced**.
    delete; `ShootFirst` → seed-then-shoot delete (guards the unchanged generic capability).
 5. **Logging**: verified by inspection that each stage emits at the specified level and that no
    token/secret bytes appear in output (not asserted line-by-line).
+6. **Printer-columns**: after `make manifests`, the generated CRD
+   (`config/crd/bases/*.yaml`) declares `additionalPrinterColumns` for Ready / Reason / Age
+   with the specified JSONPaths; verified by asserting the generated YAML (or a `kubectl get ddo`
+   header check in envtest).
 
 ## Effort / risk
 
