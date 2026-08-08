@@ -187,6 +187,7 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 	pruneSeed := func() error {
 		retained, err := r.prune(ctx, r.SeedApplier, prevSeedResources, seedManifests, cr, ownedBy)
 		seedStatuses = append(seedStatuses, retained...)
+		logger.Info("Pruned orphans", "cluster", "seed", "retained", len(retained))
 		return err
 	}
 
@@ -246,6 +247,7 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 	pruneShoot := func() error {
 		retained, err := r.prune(ctx, shootApplier, prevShootResources, shootManifests, cr, ownedBy)
 		shootStatuses = append(shootStatuses, retained...)
+		logger.Info("Pruned orphans", "cluster", "shoot", "retained", len(retained))
 		return err
 	}
 	if shootFirst {
