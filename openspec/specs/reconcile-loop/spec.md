@@ -186,7 +186,11 @@ After apply and prune, the reconciler SHALL populate `status.seedResources`, `st
 
 ### Requirement: Finalizer-driven deletion with reverse cross-render order
 
-The reconciler SHALL add a finalizer on first reconcile and, on CR deletion, tear down resources in the reverse of `spec.applyOrder`. Shoot resources SHALL be deleted explicitly via the shoot client (respecting `spec.retentionPolicy.crds` for CRDs); seed resources are removed by owner-reference garbage collection. The finalizer SHALL be removed only once shoot deletion is confirmed complete (every shoot resource deleted or observed NotFound). If the shoot is unreachable during CR deletion, the operator SHALL NOT remove the finalizer and SHALL NOT assume the resources are gone: "unreachable" is indistinguishable from "transiently down" and does not imply "deleted." Instead it SHALL surface a `ShootUnreachable` condition and Kubernetes Event on the CR and requeue, keeping the CR in `Terminating` until either the shoot becomes reachable and cleanup completes, or an operator manually removes the finalizer. This deliberately prevents silently orphaning live shoot resources; the trade-off (a CR can remain in `Terminating` if the shoot is genuinely gone and no one clears the finalizer) is accepted and surfaced rather than auto-resolved.
+The reconciler SHALL add a finalizer on first reconcile and, on CR deletion, tear down resources in the reverse of `spec.applyOrder`. Building the shoot client SHALL NOT be a precondition for teardown: if the shoot client cannot be built or reached, the reconciler SHALL record a `ShootUnreachable` condition and Kubernetes Event and SHALL still proceed with seed cleanup (seed teardown does not depend on shoot reachability). Shoot resources SHALL be deleted explicitly via the shoot client when it is available (respecting `spec.retentionPolicy.crds` for CRDs); seed resources SHALL be deleted on every pass regardless of shoot reachability. The two renders SHALL continue to be torn down in the reverse of `spec.applyOrder`.
+
+The reconciler SHALL remove the finalizer only when shoot cleanup is confirmed complete (every shoot resource deleted or observed NotFound), OR when the operator has explicitly consented to abandoning shoot cleanup by setting the annotation `dual-deployment-operator.cc.sap/force-delete: "true"` on the CR. While shoot cleanup is outstanding and no such annotation is present, the reconciler SHALL retain the finalizer, requeue, and surface a `ShootCleanup` condition with reason `Blocked` plus a `ShootCleanupBlocked` Kubernetes Event naming the override annotation — keeping the CR in `Terminating` rather than silently orphaning live shoot resources. The reconciler SHALL NOT auto-remove the finalizer after any timeout: this operator has no post-finalizer retry agent, so a timeout would turn a transient shoot outage into permanent, unretried orphaning.
+
+When the `force-delete` annotation is set with shoot cleanup outstanding, the reconciler SHALL complete seed cleanup, remove the finalizer, and surface a `ShootCleanup` condition with reason `ForceDeleted` plus a distinct `ShootCleanupForceDeleted` Kubernetes Event recording that remaining shoot resources may be orphaned by explicit operator action. This annotation-driven path is the supported alternative to a raw `kubectl patch ... finalizers:[]`, which would delete the CR outright and skip seed cleanup.
 
 #### Scenario: Finalizer added on first reconcile
 
@@ -200,19 +204,41 @@ The reconciler SHALL add a finalizer on first reconcile and, on CR deletion, tea
 - **AND** CustomResourceDefinitions on the shoot are retained
 - **AND** the finalizer is removed only after shoot deletion succeeds
 
-#### Scenario: Finalizer retained when reachable shoot delete fails
+#### Scenario: Reverse cross-render order honored on deletion
 
-- **WHEN** the shoot is reachable but one or more shoot deletes fail during CR deletion
-- **THEN** the finalizer is not removed
-- **AND** the reconcile requeues to retry
+- **WHEN** a CR with `spec.applyOrder: ShootFirst` (or unset) is deleted and the shoot is reachable
+- **THEN** the seed render's resources are deleted before the shoot render's resources
+- **WHEN** a CR with `spec.applyOrder: SeedFirst` is deleted and the shoot is reachable
+- **THEN** the shoot render's resources are deleted before the seed render's resources
 
-#### Scenario: Unreachable shoot blocks finalizer removal and is surfaced
+#### Scenario: Unreachable shoot does not block seed cleanup
 
 - **WHEN** the shoot client cannot be built or reached during CR deletion
-- **THEN** the finalizer is NOT removed and the shoot resources are NOT assumed gone
-- **AND** a `ShootUnreachable` condition and a Kubernetes Event are set on the CR
+- **THEN** seed resources are still deleted on that reconcile pass (no early return)
+- **AND** a `ShootUnreachable` condition and Kubernetes Event are set on the CR
+- **AND** the shoot resources are NOT assumed gone
+
+#### Scenario: Finalizer blocks until shoot cleanup completes
+
+- **WHEN** shoot cleanup is outstanding (shoot unreachable, or one or more shoot deletes failed) and the `force-delete` annotation is NOT set
+- **THEN** the finalizer is NOT removed
+- **AND** a `ShootCleanup` condition with reason `Blocked` and a `ShootCleanupBlocked` Event are set, naming the `dual-deployment-operator.cc.sap/force-delete` annotation
 - **AND** the reconcile requeues so cleanup completes if the shoot returns
-- **AND** the CR stays in `Terminating` until the shoot is reachable or an operator manually removes the finalizer
+- **AND** the CR stays in `Terminating`
+
+#### Scenario: No timeout auto-removes the finalizer
+
+- **WHEN** shoot cleanup remains outstanding for an arbitrarily long time and no `force-delete` annotation is set
+- **THEN** the finalizer is never auto-removed on the basis of elapsed time
+- **AND** the CR remains in `Terminating`, still retrying, until the shoot is reachable or the operator sets the annotation
+
+#### Scenario: force-delete annotation completes deletion and orphans shoot resources deliberately
+
+- **WHEN** the shoot is unreachable and the operator sets `dual-deployment-operator.cc.sap/force-delete: "true"` on the CR
+- **THEN** seed cleanup completes
+- **AND** the finalizer is removed and the CR is deleted
+- **AND** a `ShootCleanup` condition with reason `ForceDeleted` and a distinct `ShootCleanupForceDeleted` Event are set, recording that remaining shoot resources may be orphaned
+
 
 ### Requirement: Reconciler replaces the no-op behavior
 
