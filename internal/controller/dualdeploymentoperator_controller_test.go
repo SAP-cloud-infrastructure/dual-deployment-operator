@@ -401,10 +401,31 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 			}
 		}
 
-		It("retains finalizer and sets ShootUnreachable when Secret is missing", func() {
-			// Given: CR with finalizer and deletion timestamp, no Secret in cluster.
-			cr := newDeleteCR("test-del-unreachable")
+		It("proceeds with seed cleanup, blocks the finalizer, and sets ShootCleanupBlocked when the shoot is unreachable", func() {
+			// Given: a CR being deleted with a seed resource to clean up and a shoot
+			// resource pending, but no shootAccess Secret (shoot client build fails).
+			cr := newDeleteCR("test-del-blocked")
+			ownedBy := manifest.OwnedByValue(cr.Namespace, cr.Name)
+
+			// A seed resource owned by this CR that MUST be deleted even though the shoot is unreachable.
+			seedCM := &unstructured.Unstructured{}
+			seedCM.SetGroupVersionKind(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"})
+			seedCM.SetName("seed-cm-del-blocked")
+			seedCM.SetNamespace(deleteNS)
+			seedCM.SetLabels(map[string]string{manifest.OwnedByLabel: ownedBy})
+			Expect(k8sClient.Create(ctx, seedCM)).To(Succeed())
+
 			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
+			// Record the seed ConfigMap and one shoot resource in status so teardown attempts both.
+			got := &ddov1alpha1.DualDeploymentOperator{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), got)).To(Succeed())
+			got.Status.SeedResources = []ddov1alpha1.ResourceStatus{
+				{Kind: "ConfigMap", APIVersion: "v1", Namespace: deleteNS, Name: "seed-cm-del-blocked", Health: ddov1alpha1.HealthHealthy},
+			}
+			got.Status.ShootResources = []ddov1alpha1.ResourceStatus{
+				{Kind: "ConfigMap", APIVersion: "v1", Namespace: "kube-system", Name: "shoot-cm", Health: ddov1alpha1.HealthHealthy},
+			}
+			Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
 
 			fakeRecorder := events.NewFakeRecorder(10)
 			r := &DualDeploymentOperatorReconciler{
@@ -418,32 +439,76 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 				},
 			}
 
-			// When: delete the CR (sets DeletionTimestamp).
+			// When: delete the CR (sets DeletionTimestamp) and reconcile.
 			Expect(k8sClient.Delete(ctx, cr)).To(Succeed())
-
-			// Trigger reconcileDelete directly via Reconcile.
 			result, err := r.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: cr.Name, Namespace: cr.Namespace},
 			})
 
-			// Then: no error returned (requeue via RequeueAfter), requeue 30s.
+			// Then: no error, requeue 30s (blocking model).
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(Equal(30 * time.Second))
 
-			// Finalizer must still be present.
+			// Seed resource was deleted despite the unreachable shoot (no hard-return).
+			seedGet := &unstructured.Unstructured{}
+			seedGet.SetGroupVersionKind(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"})
+			getErr := k8sClient.Get(ctx, types.NamespacedName{Namespace: deleteNS, Name: "seed-cm-del-blocked"}, seedGet)
+			Expect(apierrors.IsNotFound(getErr)).To(BeTrue(), "seed resource must be deleted even when shoot unreachable")
+
+			// Finalizer retained; ShootUnreachable + ShootCleanup=Blocked set.
+			after := &ddov1alpha1.DualDeploymentOperator{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), after)).To(Succeed())
+			Expect(controllerutil.ContainsFinalizer(after, FinalizerName)).To(BeTrue(),
+				"finalizer must NOT be removed while shoot cleanup is blocked")
+			blocked := meta.FindStatusCondition(after.Status.Conditions, "ShootCleanup")
+			Expect(blocked).NotTo(BeNil(), "ShootCleanup condition must be set")
+			Expect(blocked.Status).To(Equal(metav1.ConditionFalse))
+			Expect(blocked.Reason).To(Equal("Blocked"))
+			Expect(fakeRecorder.Events).To(Receive(ContainSubstring("ShootUnreachable")))
+		})
+
+		It("removes the finalizer and sets ShootCleanupForceDeleted when the force-delete annotation is set", func() {
+			// Given: a CR being deleted with a shoot resource pending, unreachable shoot,
+			// and the force-delete annotation set.
+			cr := newDeleteCR("test-del-force")
+			cr.Annotations = map[string]string{ForceDeleteAnnotation: "true"}
+			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
 			got := &ddov1alpha1.DualDeploymentOperator{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), got)).To(Succeed())
-			Expect(controllerutil.ContainsFinalizer(got, FinalizerName)).To(BeTrue(),
-				"finalizer must NOT be removed when shoot is unreachable")
+			got.Status.ShootResources = []ddov1alpha1.ResourceStatus{
+				{Kind: "ConfigMap", APIVersion: "v1", Namespace: "kube-system", Name: "shoot-cm", Health: ddov1alpha1.HealthHealthy},
+			}
+			Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
 
-			// ShootUnreachable condition must be set.
-			cond := meta.FindStatusCondition(got.Status.Conditions, "Ready")
-			Expect(cond).NotTo(BeNil(), "Ready condition must be set")
-			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(cond.Reason).To(Equal("ShootUnreachable"))
+			fakeRecorder := events.NewFakeRecorder(10)
+			r := &DualDeploymentOperatorReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: fakeRecorder,
+				SeedApplier: &deliver.SSAApplier{
+					Client:       k8sClient,
+					FieldManager: FieldManagerName,
+					Cluster:      "seed",
+				},
+			}
 
-			// A warning Event must have been emitted.
-			Expect(fakeRecorder.Events).To(Receive(ContainSubstring("ShootUnreachable")))
+			// When: delete the CR and reconcile.
+			Expect(k8sClient.Delete(ctx, cr)).To(Succeed())
+			_, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: cr.Name, Namespace: cr.Namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Finalizer removed (CR either gone, or present without the finalizer).
+			after := &ddov1alpha1.DualDeploymentOperator{}
+			getErr := k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), after)
+			if getErr == nil {
+				Expect(controllerutil.ContainsFinalizer(after, FinalizerName)).To(BeFalse(),
+					"finalizer must be removed under force-delete")
+			} else {
+				Expect(apierrors.IsNotFound(getErr)).To(BeTrue())
+			}
+			Expect(fakeRecorder.Events).To(Receive(ContainSubstring("ShootCleanupForceDeleted")))
 		})
 
 		It("deletes non-CRD shoot resources, retains CRDs, removes finalizer on success", func() {
