@@ -648,5 +648,64 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(survivor), survivor)).
 				To(Succeed(), "foreign-owned resource must NOT be deleted during teardown")
 		})
+
+		It("tears down in the reverse of spec.applyOrder", func() {
+			assertOrder := func(applyOrder string, wantFirst string) {
+				cr := newDeleteCR("test-del-order-" + strings.ToLower(applyOrder))
+				cr.Spec.ApplyOrder = applyOrder
+				Expect(k8sClient.Create(ctx, cr)).To(Succeed())
+				got := &ddov1alpha1.DualDeploymentOperator{}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), got)).To(Succeed())
+				got.Status.SeedResources = []ddov1alpha1.ResourceStatus{
+					{Kind: "ConfigMap", APIVersion: "v1", Namespace: deleteNS, Name: "seed-order-cm", Health: ddov1alpha1.HealthHealthy},
+				}
+				got.Status.ShootResources = []ddov1alpha1.ResourceStatus{
+					{Kind: "ConfigMap", APIVersion: "v1", Namespace: "kube-system", Name: "shoot-order-cm", Health: ddov1alpha1.HealthHealthy},
+				}
+				Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+
+				var order []string
+				r := &DualDeploymentOperatorReconciler{
+					Client:      k8sClient,
+					Scheme:      k8sClient.Scheme(),
+					Recorder:    events.NewFakeRecorder(10),
+					SeedApplier: &recordingApplier{cluster: "seed", order: &order},
+					shootApplierFor: func(_ context.Context, _ *ddov1alpha1.DualDeploymentOperator) (deliver.Applier, error) {
+						return &recordingApplier{cluster: "shoot", order: &order}, nil
+					},
+				}
+
+				Expect(k8sClient.Delete(ctx, cr)).To(Succeed())
+				_, err := r.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: cr.Name, Namespace: cr.Namespace},
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(order).To(HaveLen(2))
+				Expect(order[0]).To(Equal(wantFirst),
+					"deletion must process renders in the reverse of applyOrder=%s", applyOrder)
+			}
+
+			assertOrder("SeedFirst", "shoot")
+			assertOrder("ShootFirst", "seed")
+		})
 	})
 })
+
+// recordingApplier records the order in which each cluster's Delete is invoked.
+type recordingApplier struct {
+	cluster string
+	order   *[]string
+}
+
+func (a *recordingApplier) Apply(_ context.Context, m manifest.Manifest, _ string) (ddov1alpha1.ResourceStatus, error) {
+	return ddov1alpha1.ResourceStatus{Kind: m.Unstructured.GetKind(), Name: m.Unstructured.GetName()}, nil
+}
+
+func (a *recordingApplier) Delete(_ context.Context, _ manifest.Manifest, _ string) error {
+	*a.order = append(*a.order, a.cluster)
+	return nil
+}
+
+func (a *recordingApplier) Get(_ context.Context, _ manifest.Manifest) (*unstructured.Unstructured, error) {
+	return nil, apierrors.NewNotFound(schema.GroupResource{}, "")
+}
