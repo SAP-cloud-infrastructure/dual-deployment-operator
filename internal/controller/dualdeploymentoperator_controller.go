@@ -41,6 +41,12 @@ const (
 	FieldManagerName = "dual-deployment-operator"
 
 	requeueInterval = 10 * time.Minute
+
+	// ForceDeleteAnnotation, when set to "true" on a CR being deleted, tells the
+	// reconciler to remove the finalizer even though shoot cleanup is incomplete —
+	// an explicit, auditable operator consent to orphaning remaining shoot resources.
+	// It is the supported alternative to a raw `kubectl patch ... finalizers:[]`.
+	ForceDeleteAnnotation = "dual-deployment-operator.cc.sap/force-delete"
 )
 
 // DualDeploymentOperatorReconciler reconciles a DualDeploymentOperator object.
@@ -116,11 +122,13 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 	if err != nil {
 		return r.errStatus(ctx, cr, "SeedRenderFailed", err)
 	}
+	logger.Info("Rendered source", "mode", string(source.ModeSeed), "manifests", len(seedManifests))
 
 	shootManifests, err := src.Render(ctx, source.ModeShoot, cr.Spec.ShootNamespace)
 	if err != nil {
 		return r.errStatus(ctx, cr, "ShootRenderFailed", err)
 	}
+	logger.Info("Rendered source", "mode", string(source.ModeShoot), "manifests", len(shootManifests))
 
 	// 3. Build the ordered transformation list.
 	transforms, err := transform.Build(cr.Spec.Transformations)
@@ -172,7 +180,7 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 
 	applySeed := func() {
 		var err error
-		seedStatuses, err = r.applyAll(ctx, r.SeedApplier, seedManifests, ownedBy)
+		seedStatuses, err = r.applyAll(ctx, "seed", r.SeedApplier, seedManifests, ownedBy)
 		if err != nil {
 			applyErrs = append(applyErrs, err)
 		}
@@ -181,6 +189,7 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 	pruneSeed := func() error {
 		retained, err := r.prune(ctx, r.SeedApplier, prevSeedResources, seedManifests, cr, ownedBy)
 		seedStatuses = append(seedStatuses, retained...)
+		logger.Info("Pruned orphans", "cluster", "seed", "retained", len(retained))
 		return err
 	}
 
@@ -211,7 +220,7 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 	// shootPhase == "ready": apply the shoot render, then gate seed per applyOrder.
 	if shootFirst {
 		var shootErr error
-		shootStatuses, shootErr = r.applyAll(ctx, shootApplier, shootManifests, ownedBy)
+		shootStatuses, shootErr = r.applyAll(ctx, "shoot", shootApplier, shootManifests, ownedBy)
 		if shootErr != nil {
 			applyErrs = append(applyErrs, shootErr)
 		}
@@ -229,7 +238,7 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 	} else {
 		applySeed()
 		var shootErr error
-		shootStatuses, shootErr = r.applyAll(ctx, shootApplier, shootManifests, ownedBy)
+		shootStatuses, shootErr = r.applyAll(ctx, "shoot", shootApplier, shootManifests, ownedBy)
 		if shootErr != nil {
 			applyErrs = append(applyErrs, shootErr)
 		}
@@ -240,6 +249,7 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 	pruneShoot := func() error {
 		retained, err := r.prune(ctx, shootApplier, prevShootResources, shootManifests, cr, ownedBy)
 		shootStatuses = append(shootStatuses, retained...)
+		logger.Info("Pruned orphans", "cluster", "shoot", "retained", len(retained))
 		return err
 	}
 	if shootFirst {
@@ -272,27 +282,36 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 // Event are set, and the CR is requeued. Seed and shoot resources are both deleted
 // explicitly (the applier sets no owner references).
 func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, cr *ddov1alpha1.DualDeploymentOperator) (ctrl.Result, error) {
-	shootApplier, err := r.buildShootApplierOrDefault(ctx, cr)
-	if err != nil {
-		if r.Recorder != nil {
-			r.Recorder.Eventf(cr, nil, corev1.EventTypeWarning, "ShootUnreachable",
-				"RetainFinalizer", "%s", "Shoot API server unreachable during deletion; retaining finalizer and retrying")
-		}
-		meta.SetStatusCondition(&cr.Status.Conditions, metav1.Condition{
-			Type:    "Ready",
-			Status:  metav1.ConditionFalse,
-			Reason:  "ShootUnreachable",
-			Message: fmt.Sprintf("shoot unreachable during deletion: %v", err),
-		})
-		if uErr := r.Status().Update(ctx, cr); uErr != nil {
-			log.FromContext(ctx).Error(uErr, "Failed to update status after ShootUnreachable")
-		}
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
-
+	logger := log.FromContext(ctx)
 	ownedBy := manifest.OwnedByValue(cr.Namespace, cr.Name)
 
+	deletable := func(statuses []ddov1alpha1.ResourceStatus) int {
+		n := 0
+		for _, rs := range statuses {
+			if rs.Kind == "CustomResourceDefinition" && cr.Spec.RetentionPolicy.CRDs != "Delete" {
+				continue
+			}
+			n++
+		}
+		return n
+	}
+
+	// Build the shoot applier only when shoot cleanup is needed: an unreachable shoot
+	// must not block deletion of a CR that has nothing deletable on the shoot.
+	shootPending := deletable(cr.Status.ShootResources)
+	var shootApplier deliver.Applier
+	var buildErr error
+	if shootPending > 0 {
+		shootApplier, buildErr = r.buildShootApplierOrDefault(ctx, cr)
+		if buildErr != nil {
+			r.recordShootUnreachable(cr, buildErr)
+		}
+	}
+
 	deleteRender := func(applier deliver.Applier, statuses []ddov1alpha1.ResourceStatus) []error {
+		if applier == nil {
+			return nil
+		}
 		var errs []error
 		for _, rs := range deliver.SortStatusForDelete(statuses) {
 			if rs.Kind == "CustomResourceDefinition" && cr.Spec.RetentionPolicy.CRDs != "Delete" {
@@ -305,24 +324,54 @@ func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, 
 		return errs
 	}
 
-	// Tear down in the reverse of spec.applyOrder. Seed resources are deleted
-	// explicitly (not via owner-reference GC — the applier sets no ownerRefs, and
-	// cluster-scoped seed resources cannot be owned by a namespaced CR anyway).
-	var errs []error
+	var shootErrs, seedErrs []error
 	if cr.Spec.ApplyOrder == "SeedFirst" {
-		errs = append(errs, deleteRender(shootApplier, cr.Status.ShootResources)...)
-		errs = append(errs, deleteRender(r.SeedApplier, cr.Status.SeedResources)...)
+		shootErrs = deleteRender(shootApplier, cr.Status.ShootResources)
+		seedErrs = deleteRender(r.SeedApplier, cr.Status.SeedResources)
 	} else {
-		errs = append(errs, deleteRender(r.SeedApplier, cr.Status.SeedResources)...)
-		errs = append(errs, deleteRender(shootApplier, cr.Status.ShootResources)...)
+		seedErrs = deleteRender(r.SeedApplier, cr.Status.SeedResources)
+		shootErrs = deleteRender(shootApplier, cr.Status.ShootResources)
 	}
 
-	if agg := kerrors.NewAggregate(errs); agg != nil {
+	if agg := kerrors.NewAggregate(seedErrs); agg != nil {
 		return ctrl.Result{}, agg
 	}
 
-	controllerutil.RemoveFinalizer(cr, FinalizerName)
-	return ctrl.Result{}, r.Update(ctx, cr)
+	// shootDone: nothing was pending, or the build succeeded and every delete succeeded.
+	shootDone := shootPending == 0 || (buildErr == nil && len(shootErrs) == 0)
+	forceDelete := cr.Annotations[ForceDeleteAnnotation] == "true"
+
+	outcome := "blocked"
+	switch {
+	case shootDone:
+		outcome = "completed"
+	case forceDelete:
+		outcome = "forceDeleted"
+	}
+	logger.Info("Processed CR deletion",
+		"outcome", outcome,
+		"seedPending", deletable(cr.Status.SeedResources), "seedDeleteErrors", len(seedErrs),
+		"shootPending", shootPending, "shootDeleteErrors", len(shootErrs),
+		"shootDone", shootDone, "forceDelete", forceDelete)
+
+	switch {
+	case shootDone:
+		controllerutil.RemoveFinalizer(cr, FinalizerName)
+		return ctrl.Result{}, r.Update(ctx, cr)
+	case forceDelete:
+		r.recordShootCleanupForceDeleted(cr, kerrors.NewAggregate(shootErrs))
+		if uErr := r.Status().Update(ctx, cr); uErr != nil {
+			logger.Error(uErr, "Failed to update status before force-delete finalizer removal")
+		}
+		controllerutil.RemoveFinalizer(cr, FinalizerName)
+		return ctrl.Result{}, r.Update(ctx, cr)
+	default:
+		r.recordShootCleanupBlocked(cr, kerrors.NewAggregate(shootErrs))
+		if uErr := r.Status().Update(ctx, cr); uErr != nil {
+			logger.Error(uErr, "Failed to update status while blocked on shoot cleanup")
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
 }
 
 // buildShootApplier constructs a shoot SSAApplier from the Gardener token-requestor
@@ -365,16 +414,25 @@ var errShootCredentialsNotReady = errors.New("shoot credentials not yet populate
 
 // applyAll calls applier.Apply for every manifest in ms, continues on error,
 // aggregates results, and returns the []ResourceStatus for all of them.
-func (r *DualDeploymentOperatorReconciler) applyAll(ctx context.Context, applier deliver.Applier, ms []manifest.Manifest, ownedBy string) ([]ddov1alpha1.ResourceStatus, error) {
+func (r *DualDeploymentOperatorReconciler) applyAll(ctx context.Context, cluster string, applier deliver.Applier, ms []manifest.Manifest, ownedBy string) ([]ddov1alpha1.ResourceStatus, error) {
+	logger := log.FromContext(ctx)
 	out := make([]ddov1alpha1.ResourceStatus, 0, len(ms))
 	var errs []error
+	var degraded int
 	for _, m := range ms {
 		st, err := applier.Apply(ctx, m, ownedBy)
 		if err != nil {
 			errs = append(errs, err)
 		}
+		if st.Health == ddov1alpha1.HealthDegraded {
+			degraded++
+		}
+		logger.V(1).Info("Applied resource",
+			"cluster", cluster, "kind", st.Kind, "name", st.Name, "namespace", st.Namespace,
+			"health", st.Health)
 		out = append(out, st)
 	}
+	logger.Info("Applied render", "cluster", cluster, "applied", len(out), "degraded", degraded)
 	return out, kerrors.NewAggregate(errs)
 }
 
@@ -387,6 +445,55 @@ func (r *DualDeploymentOperatorReconciler) setCondition(cr *ddov1alpha1.DualDepl
 		Reason:             reason,
 		Message:            message,
 		LastTransitionTime: metav1.Now(),
+	})
+}
+
+// recordShootUnreachable records the non-fatal "shoot could not be reached/built during
+// deletion" signal: a Warning event + Ready=False. Deletion still proceeds to seed cleanup.
+func (r *DualDeploymentOperatorReconciler) recordShootUnreachable(cr *ddov1alpha1.DualDeploymentOperator, err error) {
+	if r.Recorder != nil {
+		r.Recorder.Eventf(cr, nil, corev1.EventTypeWarning, "ShootUnreachable",
+			"RetainFinalizer", "%s", "Shoot API server unreachable during deletion; proceeding with seed cleanup and retaining finalizer")
+	}
+	meta.SetStatusCondition(&cr.Status.Conditions, metav1.Condition{
+		Type:    "Ready",
+		Status:  metav1.ConditionFalse,
+		Reason:  "ShootUnreachable",
+		Message: fmt.Sprintf("shoot unreachable during deletion: %v", err),
+	})
+}
+
+// recordShootCleanupBlocked records that CR deletion is waiting on shoot cleanup: a Warning
+// event + a dedicated ShootCleanup=False/Blocked condition naming the override annotation.
+func (r *DualDeploymentOperatorReconciler) recordShootCleanupBlocked(cr *ddov1alpha1.DualDeploymentOperator, cause error) {
+	if r.Recorder != nil {
+		r.Recorder.Eventf(cr, nil, corev1.EventTypeWarning, "ShootCleanupBlocked",
+			"RetainFinalizer", "Shoot cleanup incomplete; retaining finalizer. Set annotation %s=true to force deletion (orphans remaining shoot resources)", ForceDeleteAnnotation)
+	}
+	meta.SetStatusCondition(&cr.Status.Conditions, metav1.Condition{
+		Type:    "ShootCleanup",
+		Status:  metav1.ConditionFalse,
+		Reason:  "Blocked",
+		Message: fmt.Sprintf("waiting on shoot cleanup; set %s=true to force: %v", ForceDeleteAnnotation, cause),
+	})
+}
+
+// recordShootCleanupForceDeleted records that the operator explicitly consented to abandoning
+// shoot cleanup: a distinct Warning event + ShootCleanup=False/ForceDeleted condition.
+func (r *DualDeploymentOperatorReconciler) recordShootCleanupForceDeleted(cr *ddov1alpha1.DualDeploymentOperator, cause error) {
+	if r.Recorder != nil {
+		r.Recorder.Eventf(cr, nil, corev1.EventTypeWarning, "ShootCleanupForceDeleted",
+			"ForceDelete", "%s", "Finalizer removed via force-delete annotation; remaining shoot resources may be orphaned")
+	}
+	msg := "shoot cleanup abandoned by operator force-delete; shoot resources may be orphaned"
+	if cause != nil {
+		msg = fmt.Sprintf("%s (last error: %v)", msg, cause)
+	}
+	meta.SetStatusCondition(&cr.Status.Conditions, metav1.Condition{
+		Type:    "ShootCleanup",
+		Status:  metav1.ConditionFalse,
+		Reason:  "ForceDeleted",
+		Message: msg,
 	})
 }
 
