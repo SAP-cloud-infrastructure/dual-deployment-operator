@@ -60,7 +60,7 @@ git add internal/controller/dualdeploymentoperator_controller.go
 git commit -m "feat(controller): add ForceDeleteAnnotation const"
 ```
 
-- [ ] Task 1 complete
+- [x] Task 1 complete
 
 ---
 
@@ -138,7 +138,7 @@ git add internal/controller/dualdeploymentoperator_controller.go
 git commit -m "feat(controller): add ShootCleanup signal helpers for teardown"
 ```
 
-- [ ] Task 2 complete
+- [x] Task 2 complete
 
 ---
 
@@ -266,7 +266,7 @@ git add internal/controller/dualdeploymentoperator_controller_test.go
 git commit -m "test(controller): RED for block-until-clean teardown + force-delete override"
 ```
 
-- [ ] Task 3 complete
+- [x] Task 3 complete
 
 ---
 
@@ -363,7 +363,7 @@ git add internal/controller/dualdeploymentoperator_controller.go
 git commit -m "fix(controller): block-until-clean teardown; no hard-return on unreachable shoot"
 ```
 
-- [ ] Task 4 complete
+- [x] Task 4 complete
 
 ---
 
@@ -412,7 +412,7 @@ git add internal/controller/dualdeploymentoperator_controller.go
 git commit -m "feat(controller): log per-resource apply status at V(1) + apply summary"
 ```
 
-- [ ] Task 5 complete
+- [x] Task 5 complete
 
 ---
 
@@ -446,7 +446,7 @@ git add internal/controller/dualdeploymentoperator_controller.go
 git commit -m "feat(controller): log prune summaries per target"
 ```
 
-- [ ] Task 6 complete
+- [x] Task 6 complete
 
 ---
 
@@ -488,7 +488,7 @@ git add internal/source/
 git commit -m "feat(source): log source pull and render-cache hit/miss"
 ```
 
-- [ ] Task 7 complete
+- [x] Task 7 complete
 
 ---
 
@@ -525,7 +525,7 @@ git add api/v1alpha1/dualdeploymentoperator_types.go config/crd/bases/dual-deplo
 git commit -m "feat(api): add Ready/Reason/Age printer-columns to DualDeploymentOperator CRD"
 ```
 
-- [ ] Task 8 complete
+- [x] Task 8 complete
 
 ---
 
@@ -575,7 +575,7 @@ git add docs/design.md
 git commit -m "docs: document DualDeploymentOperator deletion states and force-delete annotation"
 ```
 
-- [ ] Task 9 complete
+- [x] Task 9 complete
 
 ---
 
@@ -604,4 +604,4 @@ git add internal/controller/dualdeploymentoperator_controller_test.go
 git commit -m "test(controller): guard reverse-of-applyOrder teardown order"
 ```
 
-- [ ] Task 10 complete
+- [x] Task 10 complete
