@@ -991,7 +991,15 @@ Finalizer-driven cleanup:
 
 CRDs retention (`retentionPolicy.crds: Retain`) is the default because CRDs hold user domain data; removing them cascades to user CRs. Explicit `Delete` is available as an opt-in for teardown scenarios.
 
-**Unreachable shoot during deletion — block, do not orphan.** If the shoot client cannot be built or reached while deleting, the operator does **not** remove the finalizer and does **not** assume the shoot resources are gone. "Unreachable" is indistinguishable from "transiently down" (network blip, apiserver restart, cert/token expiry, wrong `server`) and must not be read as "deleted" — doing so would silently orphan live shoot resources with no finalizer left to drive cleanup. Instead the operator surfaces a `ShootUnreachable` condition and a Kubernetes Event on the CR and requeues, keeping the CR in `Terminating` until either the shoot becomes reachable and cleanup completes, or an operator **manually removes the finalizer**. The accepted trade-off: a CR whose shoot is genuinely gone can stay in `Terminating` until a human clears the finalizer — this is deliberately surfaced (condition + Event) rather than auto-resolved, because the operator cannot reliably distinguish "gone" from "unreachable" and silently guessing wrong leaks resources.
+**Unreachable shoot during deletion — proceed with seed cleanup, then block; never silently orphan.** If the shoot client cannot be built or reached while deleting, the operator does **not** hard-return: it records a `ShootUnreachable` condition and Event and still **proceeds with seed cleanup** (seed teardown does not depend on shoot reachability), then decides the finalizer. It does **not** remove the finalizer while shoot cleanup is outstanding and does **not** assume the shoot resources are gone — "unreachable" is indistinguishable from "transiently down" (network blip, apiserver restart, cert/token expiry, wrong `server`) and must not be read as "deleted". Instead it surfaces a `ShootCleanup` condition with reason `Blocked` and a `ShootCleanupBlocked` Event, keeps the CR in `Terminating`, and requeues — retrying until the shoot becomes reachable and cleanup completes. There is **no timeout** that auto-removes the finalizer: this operator has no post-finalizer retry agent, so a timeout would turn a transient shoot outage into permanent, unretried orphaning.
+
+**Force-delete override (shoot permanently gone).** When the shoot is genuinely gone and the CR would otherwise stay in `Terminating` forever, an operator completes deletion by setting the annotation `dual-deployment-operator.cc.sap/force-delete: "true"` on the CR:
+
+```
+kubectl annotate dualdeploymentoperator <name> dual-deployment-operator.cc.sap/force-delete=true
+```
+
+The operator then completes seed cleanup, removes the finalizer, and records a `ShootCleanup` condition with reason `ForceDeleted` plus a distinct `ShootCleanupForceDeleted` Event — an explicit, auditable acknowledgement that remaining shoot resources may be orphaned. This is the **supported** alternative to a raw `kubectl patch ... finalizers:[]`, which would delete the CR outright and skip seed cleanup. Orphaning shoot resources therefore only ever happens by deliberate human action, never automatically.
 
 ### 3.8 Coexistence with webhook-injector
 
@@ -1477,26 +1485,40 @@ The token-requestor Secret (`token` + `bundle.crt`) is provisioned by Gardener's
 
 ```go
 func (r *Reconciler) reconcileDelete(ctx, cr) (ctrl.Result, error) {
-    seedApplier := r.SeedApplier
-    shootApplier, _ := r.getShootApplier(ctx, cr.Spec.RemoteKubeconfig)
-
-    // Seed: ownerReferences cascade, but explicit delete top-level owners for determinism
-    for _, m := range cr.Status.SeedResources {
-        _ = seedApplier.Delete(ctx, m.AsManifest())
+    // Build the shoot applier; on failure, record ShootUnreachable but DO NOT return —
+    // seed cleanup does not depend on shoot reachability.
+    shootApplier, buildErr := r.buildShootApplierOrDefault(ctx, cr)
+    if buildErr != nil {
+        r.recordShootUnreachable(cr, buildErr)
     }
 
-    // Shoot: explicit delete for each, respecting retentionPolicy for CRDs
-    for _, m := range cr.Status.ShootResources {
-        if m.Kind == "CustomResourceDefinition" && cr.Spec.RetentionPolicy.CRDs == "Retain" {
-            continue
-        }
-        _ = shootApplier.Delete(ctx, m.AsManifest())
+    // Tear down in the reverse of spec.applyOrder (shoot side skipped when applier is nil).
+    // Seed and shoot delete errors are tracked separately.
+    // ... deleteRender(shootApplier, cr.Status.ShootResources) / deleteRender(SeedApplier, ...) ...
+
+    if seedErr != nil {
+        return ctrl.Result{}, seedErr // real seed failure: retry via backoff
     }
 
-    controllerutil.RemoveFinalizer(cr, FinalizerName)
-    return ctrl.Result{}, r.Update(ctx, cr)
+    shootDone := buildErr == nil && len(shootErrs) == 0
+    forceDelete := cr.Annotations[ForceDeleteAnnotation] == "true"
+
+    switch {
+    case shootDone:
+        controllerutil.RemoveFinalizer(cr, FinalizerName)
+        return ctrl.Result{}, r.Update(ctx, cr)
+    case forceDelete:
+        r.recordShootCleanupForceDeleted(cr, shootErr) // orphaning acknowledged
+        controllerutil.RemoveFinalizer(cr, FinalizerName)
+        return ctrl.Result{}, r.Update(ctx, cr)
+    default:
+        r.recordShootCleanupBlocked(cr, shootErr) // retain finalizer, keep retrying
+        return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+    }
 }
 ```
+
+The finalizer is removed only when shoot cleanup completed (or was unneeded), or when the operator set the `dual-deployment-operator.cc.sap/force-delete` annotation. Otherwise the CR stays in `Terminating` with a `ShootCleanup=Blocked` condition and is retried — never silently orphaned, never auto-removed on a timeout (see §3.7).
 
 ### 5.6 Dependencies
 
