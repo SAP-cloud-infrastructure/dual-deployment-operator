@@ -41,6 +41,12 @@ const (
 	FieldManagerName = "dual-deployment-operator"
 
 	requeueInterval = 10 * time.Minute
+
+	// ForceDeleteAnnotation, when set to "true" on a CR being deleted, tells the
+	// reconciler to remove the finalizer even though shoot cleanup is incomplete —
+	// an explicit, auditable operator consent to orphaning remaining shoot resources.
+	// It is the supported alternative to a raw `kubectl patch ... finalizers:[]`.
+	ForceDeleteAnnotation = "dual-deployment-operator.cc.sap/force-delete"
 )
 
 // DualDeploymentOperatorReconciler reconciles a DualDeploymentOperator object.
