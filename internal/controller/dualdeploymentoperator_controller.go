@@ -122,11 +122,13 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 	if err != nil {
 		return r.errStatus(ctx, cr, "SeedRenderFailed", err)
 	}
+	logger.Info("Rendered source", "mode", string(source.ModeSeed), "manifests", len(seedManifests))
 
 	shootManifests, err := src.Render(ctx, source.ModeShoot, cr.Spec.ShootNamespace)
 	if err != nil {
 		return r.errStatus(ctx, cr, "ShootRenderFailed", err)
 	}
+	logger.Info("Rendered source", "mode", string(source.ModeShoot), "manifests", len(shootManifests))
 
 	// 3. Build the ordered transformation list.
 	transforms, err := transform.Build(cr.Spec.Transformations)
@@ -178,7 +180,7 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 
 	applySeed := func() {
 		var err error
-		seedStatuses, err = r.applyAll(ctx, r.SeedApplier, seedManifests, ownedBy)
+		seedStatuses, err = r.applyAll(ctx, "seed", r.SeedApplier, seedManifests, ownedBy)
 		if err != nil {
 			applyErrs = append(applyErrs, err)
 		}
@@ -218,7 +220,7 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 	// shootPhase == "ready": apply the shoot render, then gate seed per applyOrder.
 	if shootFirst {
 		var shootErr error
-		shootStatuses, shootErr = r.applyAll(ctx, shootApplier, shootManifests, ownedBy)
+		shootStatuses, shootErr = r.applyAll(ctx, "shoot", shootApplier, shootManifests, ownedBy)
 		if shootErr != nil {
 			applyErrs = append(applyErrs, shootErr)
 		}
@@ -236,7 +238,7 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 	} else {
 		applySeed()
 		var shootErr error
-		shootStatuses, shootErr = r.applyAll(ctx, shootApplier, shootManifests, ownedBy)
+		shootStatuses, shootErr = r.applyAll(ctx, "shoot", shootApplier, shootManifests, ownedBy)
 		if shootErr != nil {
 			applyErrs = append(applyErrs, shootErr)
 		}
@@ -283,9 +285,27 @@ func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, 
 	logger := log.FromContext(ctx)
 	ownedBy := manifest.OwnedByValue(cr.Namespace, cr.Name)
 
-	shootApplier, buildErr := r.buildShootApplierOrDefault(ctx, cr)
-	if buildErr != nil {
-		r.recordShootUnreachable(cr, buildErr)
+	deletable := func(statuses []ddov1alpha1.ResourceStatus) int {
+		n := 0
+		for _, rs := range statuses {
+			if rs.Kind == "CustomResourceDefinition" && cr.Spec.RetentionPolicy.CRDs != "Delete" {
+				continue
+			}
+			n++
+		}
+		return n
+	}
+
+	// Build the shoot applier only when shoot cleanup is needed: an unreachable shoot
+	// must not block deletion of a CR that has nothing deletable on the shoot.
+	shootPending := deletable(cr.Status.ShootResources)
+	var shootApplier deliver.Applier
+	var buildErr error
+	if shootPending > 0 {
+		shootApplier, buildErr = r.buildShootApplierOrDefault(ctx, cr)
+		if buildErr != nil {
+			r.recordShootUnreachable(cr, buildErr)
+		}
 	}
 
 	deleteRender := func(applier deliver.Applier, statuses []ddov1alpha1.ResourceStatus) []error {
@@ -317,9 +337,22 @@ func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, 
 		return ctrl.Result{}, agg
 	}
 
-	shootDone := buildErr == nil && len(shootErrs) == 0
+	// shootDone: nothing was pending, or the build succeeded and every delete succeeded.
+	shootDone := shootPending == 0 || (buildErr == nil && len(shootErrs) == 0)
 	forceDelete := cr.Annotations[ForceDeleteAnnotation] == "true"
-	logger.Info("Processed CR deletion", "shootDone", shootDone, "forceDelete", forceDelete)
+
+	outcome := "blocked"
+	switch {
+	case shootDone:
+		outcome = "completed"
+	case forceDelete:
+		outcome = "forceDeleted"
+	}
+	logger.Info("Processed CR deletion",
+		"outcome", outcome,
+		"seedPending", deletable(cr.Status.SeedResources), "seedDeleteErrors", len(seedErrs),
+		"shootPending", shootPending, "shootDeleteErrors", len(shootErrs),
+		"shootDone", shootDone, "forceDelete", forceDelete)
 
 	switch {
 	case shootDone:
@@ -381,7 +414,7 @@ var errShootCredentialsNotReady = errors.New("shoot credentials not yet populate
 
 // applyAll calls applier.Apply for every manifest in ms, continues on error,
 // aggregates results, and returns the []ResourceStatus for all of them.
-func (r *DualDeploymentOperatorReconciler) applyAll(ctx context.Context, applier deliver.Applier, ms []manifest.Manifest, ownedBy string) ([]ddov1alpha1.ResourceStatus, error) {
+func (r *DualDeploymentOperatorReconciler) applyAll(ctx context.Context, cluster string, applier deliver.Applier, ms []manifest.Manifest, ownedBy string) ([]ddov1alpha1.ResourceStatus, error) {
 	logger := log.FromContext(ctx)
 	out := make([]ddov1alpha1.ResourceStatus, 0, len(ms))
 	var errs []error
@@ -395,11 +428,11 @@ func (r *DualDeploymentOperatorReconciler) applyAll(ctx context.Context, applier
 			degraded++
 		}
 		logger.V(1).Info("Applied resource",
-			"kind", st.Kind, "name", st.Name, "namespace", st.Namespace,
-			"health", st.Health, "message", st.Message)
+			"cluster", cluster, "kind", st.Kind, "name", st.Name, "namespace", st.Namespace,
+			"health", st.Health)
 		out = append(out, st)
 	}
-	logger.Info("Applied render", "applied", len(out), "degraded", degraded)
+	logger.Info("Applied render", "cluster", cluster, "applied", len(out), "degraded", degraded)
 	return out, kerrors.NewAggregate(errs)
 }
 
