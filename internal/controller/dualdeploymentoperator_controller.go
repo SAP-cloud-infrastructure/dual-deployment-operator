@@ -380,15 +380,24 @@ var errShootCredentialsNotReady = errors.New("shoot credentials not yet populate
 // applyAll calls applier.Apply for every manifest in ms, continues on error,
 // aggregates results, and returns the []ResourceStatus for all of them.
 func (r *DualDeploymentOperatorReconciler) applyAll(ctx context.Context, applier deliver.Applier, ms []manifest.Manifest, ownedBy string) ([]ddov1alpha1.ResourceStatus, error) {
+	logger := log.FromContext(ctx)
 	out := make([]ddov1alpha1.ResourceStatus, 0, len(ms))
 	var errs []error
+	var degraded int
 	for _, m := range ms {
 		st, err := applier.Apply(ctx, m, ownedBy)
 		if err != nil {
 			errs = append(errs, err)
 		}
+		if st.Health == ddov1alpha1.HealthDegraded {
+			degraded++
+		}
+		logger.V(1).Info("Applied resource",
+			"kind", st.Kind, "name", st.Name, "namespace", st.Namespace,
+			"health", st.Health, "message", st.Message)
 		out = append(out, st)
 	}
+	logger.Info("Applied render", "applied", len(out), "degraded", degraded)
 	return out, kerrors.NewAggregate(errs)
 }
 
