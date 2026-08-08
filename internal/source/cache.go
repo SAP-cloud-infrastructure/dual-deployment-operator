@@ -55,7 +55,7 @@ func (c *cachingSource) Render(ctx context.Context, mode Mode, namespace string)
 	}.String()
 
 	if m, ok := c.cache.get(key); ok {
-		l.V(1).Info("Render cache hit", "kind", c.sourceKind, "mode", string(mode))
+		l.V(1).Info("Render cache hit", "kind", c.sourceKind, "mode", string(mode), "resolvedID", id, "cache", "hit")
 		return m, nil
 	}
 	m, err := c.inner.Render(ctx, mode, namespace)
@@ -63,7 +63,7 @@ func (c *cachingSource) Render(ctx context.Context, mode Mode, namespace string)
 		return nil, err // never cache failures
 	}
 	c.cache.put(key, m)
-	l.V(1).Info("Render cache miss stored", "kind", c.sourceKind, "mode", string(mode))
+	l.V(1).Info("Render cache miss stored", "kind", c.sourceKind, "mode", string(mode), "resolvedID", id, "cache", "miss")
 	return m, nil
 }
 
