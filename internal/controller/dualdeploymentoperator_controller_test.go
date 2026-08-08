@@ -6,6 +6,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -508,7 +509,13 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 			} else {
 				Expect(apierrors.IsNotFound(getErr)).To(BeTrue())
 			}
-			Expect(fakeRecorder.Events).To(Receive(ContainSubstring("ShootCleanupForceDeleted")))
+			var forceDeletedSeen bool
+			for len(fakeRecorder.Events) > 0 {
+				if strings.Contains(<-fakeRecorder.Events, "ShootCleanupForceDeleted") {
+					forceDeletedSeen = true
+				}
+			}
+			Expect(forceDeletedSeen).To(BeTrue(), "a ShootCleanupForceDeleted event must be emitted")
 		})
 
 		It("deletes non-CRD shoot resources, retains CRDs, removes finalizer on success", func() {
