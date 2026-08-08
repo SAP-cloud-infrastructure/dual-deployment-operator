@@ -7,7 +7,7 @@
 cmd/main.go                    Manager entry (registers controllers/webhooks)
 api/<version>/*_types.go       CRD schemas (+kubebuilder markers)
 api/<version>/zz_generated.*   Auto-generated (DO NOT EDIT)
-internal/controller/*          Reconciliation logic
+internal/controller/*          Reconciliation logic; reconcileDelete blocks until shoot cleanup succeeds (sets ShootCleanup=Blocked condition + ShootCleanupBlocked event when shoot client is unreachable), completes only on success or when the dual-deployment-operator.cc.sap/force-delete: "true" annotation is present
 internal/webhook/*             Validation/defaulting (if present)
 internal/manifest/*            Multi-doc YAML parser + origin tagging
 internal/source/*              Production OCI-only Helm ChartLoader (a non-oci:// Helm repo is rejected at admission via CEL) and go-git kustomize RootResolver; two-render per reconcile; per-source authSecretRef credentials; opt-in in-memory rendered-manifest cache (Deps.RenderCache, constructed via source.NewRenderCache()) keyed by resolved content id (git SHA / OCI digest); nil cache preserves uncached behavior; fetchSHA uses full-depth fetch (not shallow) so arbitrary historical SHAs resolve. Helm loader resolves OCI subchart dependencies at pull time via downloader.Manager.Build() (Phase 7.6, shipped): Chart.lock required (Build-only, no semver renegotiation); HTTP(S)-repo subchart deps rejected fail-closed; fully-vendored charts unaffected; single-registry auth reuses the CR's authSecretRef; scratchDir (--source-scratch-dir flag, emptyDir mount) required for read-only rootfs. Kustomize side unaffected (krusty resolves remote bases itself).
