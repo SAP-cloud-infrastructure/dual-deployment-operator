@@ -396,6 +396,55 @@ func (r *DualDeploymentOperatorReconciler) setCondition(cr *ddov1alpha1.DualDepl
 	})
 }
 
+// recordShootUnreachable records the non-fatal "shoot could not be reached/built during
+// deletion" signal: a Warning event + Ready=False. Deletion still proceeds to seed cleanup.
+func (r *DualDeploymentOperatorReconciler) recordShootUnreachable(cr *ddov1alpha1.DualDeploymentOperator, err error) {
+	if r.Recorder != nil {
+		r.Recorder.Eventf(cr, nil, corev1.EventTypeWarning, "ShootUnreachable",
+			"RetainFinalizer", "%s", "Shoot API server unreachable during deletion; proceeding with seed cleanup and retaining finalizer")
+	}
+	meta.SetStatusCondition(&cr.Status.Conditions, metav1.Condition{
+		Type:    "Ready",
+		Status:  metav1.ConditionFalse,
+		Reason:  "ShootUnreachable",
+		Message: fmt.Sprintf("shoot unreachable during deletion: %v", err),
+	})
+}
+
+// recordShootCleanupBlocked records that CR deletion is waiting on shoot cleanup: a Warning
+// event + a dedicated ShootCleanup=False/Blocked condition naming the override annotation.
+func (r *DualDeploymentOperatorReconciler) recordShootCleanupBlocked(cr *ddov1alpha1.DualDeploymentOperator, cause error) {
+	if r.Recorder != nil {
+		r.Recorder.Eventf(cr, nil, corev1.EventTypeWarning, "ShootCleanupBlocked",
+			"RetainFinalizer", "Shoot cleanup incomplete; retaining finalizer. Set annotation %s=true to force deletion (orphans remaining shoot resources)", ForceDeleteAnnotation)
+	}
+	meta.SetStatusCondition(&cr.Status.Conditions, metav1.Condition{
+		Type:    "ShootCleanup",
+		Status:  metav1.ConditionFalse,
+		Reason:  "Blocked",
+		Message: fmt.Sprintf("waiting on shoot cleanup; set %s=true to force: %v", ForceDeleteAnnotation, cause),
+	})
+}
+
+// recordShootCleanupForceDeleted records that the operator explicitly consented to abandoning
+// shoot cleanup: a distinct Warning event + ShootCleanup=False/ForceDeleted condition.
+func (r *DualDeploymentOperatorReconciler) recordShootCleanupForceDeleted(cr *ddov1alpha1.DualDeploymentOperator, cause error) {
+	if r.Recorder != nil {
+		r.Recorder.Eventf(cr, nil, corev1.EventTypeWarning, "ShootCleanupForceDeleted",
+			"ForceDelete", "%s", "Finalizer removed via force-delete annotation; remaining shoot resources may be orphaned")
+	}
+	msg := "shoot cleanup abandoned by operator force-delete; shoot resources may be orphaned"
+	if cause != nil {
+		msg = fmt.Sprintf("%s (last error: %v)", msg, cause)
+	}
+	meta.SetStatusCondition(&cr.Status.Conditions, metav1.Condition{
+		Type:    "ShootCleanup",
+		Status:  metav1.ConditionFalse,
+		Reason:  "ForceDeleted",
+		Message: msg,
+	})
+}
+
 // errStatus sets a Ready=False condition with the given reason and returns a
 // requeue-with-backoff result (controller-runtime exponential backoff via returned error).
 func (r *DualDeploymentOperatorReconciler) errStatus(ctx context.Context, cr *ddov1alpha1.DualDeploymentOperator, reason string, err error) (ctrl.Result, error) {
