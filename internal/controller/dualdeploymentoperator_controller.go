@@ -202,26 +202,30 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 
 	switch shootPhase {
 	case "credsNotReady":
+		seedOut := prevSeedResources // ShootFirst: seed deferred, preserve prior inventory
 		if !shootFirst {
 			applySeed() // SeedFirst: seed does not wait on shoot
 			if err := pruneSeed(); err != nil {
 				logger.Error(err, "Failed to prune seed orphans")
 			}
+			seedOut = seedStatuses
 		}
 		r.setCondition(cr, "WaitingForShootCredentials",
 			"shoot token/CA not yet populated by Gardener; shoot render deferred")
-		return r.finishNotReady(ctx, cr, seedStatuses, shootStatuses, 30*time.Second)
+		return r.finishNotReady(ctx, cr, seedOut, shootStatuses, 30*time.Second)
 
 	case "clientFailed":
+		seedOut := prevSeedResources // ShootFirst: seed deferred, preserve prior inventory
 		if !shootFirst {
 			applySeed() // SeedFirst: seed proceeds; shoot failure only flagged
 			if err := pruneSeed(); err != nil {
 				logger.Error(err, "Failed to prune seed orphans")
 			}
+			seedOut = seedStatuses
 		}
 		r.setCondition(cr, "ShootApplyFailed",
 			fmt.Sprintf("shoot render could not be applied: %v", shootErr))
-		return r.finishNotReady(ctx, cr, seedStatuses, shootStatuses, 0)
+		return r.finishNotReady(ctx, cr, seedOut, shootStatuses, 0)
 	}
 
 	// shootPhase == "ready": apply the shoot render, then gate seed per applyOrder.
