@@ -401,8 +401,8 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 		Expect(k8sClient.Create(ctx, cr)).To(Succeed())
 		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: cr.Name, Namespace: cr.Namespace}}
 
-		// First reconcile: adds finalizer.
-		_, _ = r.Reconcile(ctx, req)
+		_, err := r.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
 
 		// Seed prior status with the orphan so it is in prevShootResources.
 		got := &ddov1alpha1.DualDeploymentOperator{}
@@ -415,7 +415,8 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 		// Reconcile: shoot render is degraded (demos.demo.cc.sap CRD) AND orphan-cm left
 		// the render. The bug: reconcile returns before prune, persists a status
 		// without orphan-cm, and never deletes it. The fix: prune runs first.
-		_, _ = r.Reconcile(ctx, req)
+		_, err = r.Reconcile(ctx, req)
+		Expect(err).To(HaveOccurred())
 
 		// Assert the orphan was actually deleted from the cluster this cycle.
 		live := &unstructured.Unstructured{}
@@ -444,7 +445,8 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 
 		Expect(k8sClient.Create(ctx, cr)).To(Succeed())
 		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: cr.Name, Namespace: cr.Namespace}}
-		_, _ = r.Reconcile(ctx, req)
+		_, err := r.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
 
 		got := &ddov1alpha1.DualDeploymentOperator{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), got)).To(Succeed())
@@ -453,7 +455,8 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 		}
 		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
 
-		_, _ = r.Reconcile(ctx, req)
+		_, err = r.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
 
 		after := &ddov1alpha1.DualDeploymentOperator{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), after)).To(Succeed())
@@ -806,7 +809,7 @@ func (a *recordingApplier) Delete(_ context.Context, _ manifest.Manifest, _ stri
 }
 
 func (a *recordingApplier) Get(_ context.Context, _ manifest.Manifest) (*unstructured.Unstructured, error) {
-    return nil, apierrors.NewNotFound(schema.GroupResource{}, "")
+	return nil, apierrors.NewNotFound(schema.GroupResource{}, "")
 }
 
 // degradingApplier delegates to an inner Applier but forces Health=Degraded
@@ -814,23 +817,23 @@ func (a *recordingApplier) Get(_ context.Context, _ manifest.Manifest) (*unstruc
 // ShootFirst degraded early-return path while keeping real Get/Delete behavior
 // (so prune can actually delete orphans on the envtest cluster).
 type degradingApplier struct {
-    inner       deliver.Applier
-    degradeName string
+	inner       deliver.Applier
+	degradeName string
 }
 
 func (a *degradingApplier) Apply(ctx context.Context, m manifest.Manifest, ownedBy string) (ddov1alpha1.ResourceStatus, error) {
-    st, err := a.inner.Apply(ctx, m, ownedBy)
-    if m.Unstructured.GetName() == a.degradeName {
-        st.Health = ddov1alpha1.HealthDegraded
-        st.Message = "forced degraded by test"
-    }
-    return st, err
+	st, err := a.inner.Apply(ctx, m, ownedBy)
+	if m.Unstructured.GetName() == a.degradeName {
+		st.Health = ddov1alpha1.HealthDegraded
+		st.Message = "forced degraded by test"
+	}
+	return st, err
 }
 
 func (a *degradingApplier) Delete(ctx context.Context, m manifest.Manifest, ownedBy string) error {
-    return a.inner.Delete(ctx, m, ownedBy)
+	return a.inner.Delete(ctx, m, ownedBy)
 }
 
 func (a *degradingApplier) Get(ctx context.Context, m manifest.Manifest) (*unstructured.Unstructured, error) {
-    return a.inner.Get(ctx, m)
+	return a.inner.Get(ctx, m)
 }
