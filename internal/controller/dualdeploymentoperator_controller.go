@@ -193,28 +193,39 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 		return err
 	}
 
+	pruneShoot := func() error {
+		retained, err := r.prune(ctx, shootApplier, prevShootResources, shootManifests, cr, ownedBy)
+		shootStatuses = append(shootStatuses, retained...)
+		logger.Info("Pruned orphans", "cluster", "shoot", "retained", len(retained))
+		return err
+	}
+
 	switch shootPhase {
 	case "credsNotReady":
+		seedOut := prevSeedResources // ShootFirst: seed deferred, preserve prior inventory
 		if !shootFirst {
 			applySeed() // SeedFirst: seed does not wait on shoot
 			if err := pruneSeed(); err != nil {
 				logger.Error(err, "Failed to prune seed orphans")
 			}
+			seedOut = seedStatuses
 		}
 		r.setCondition(cr, "WaitingForShootCredentials",
 			"shoot token/CA not yet populated by Gardener; shoot render deferred")
-		return r.finishNotReady(ctx, cr, seedStatuses, shootStatuses, 30*time.Second)
+		return r.finishNotReady(ctx, cr, seedOut, shootStatuses, 30*time.Second)
 
 	case "clientFailed":
+		seedOut := prevSeedResources // ShootFirst: seed deferred, preserve prior inventory
 		if !shootFirst {
 			applySeed() // SeedFirst: seed proceeds; shoot failure only flagged
 			if err := pruneSeed(); err != nil {
 				logger.Error(err, "Failed to prune seed orphans")
 			}
+			seedOut = seedStatuses
 		}
 		r.setCondition(cr, "ShootApplyFailed",
 			fmt.Sprintf("shoot render could not be applied: %v", shootErr))
-		return r.finishNotReady(ctx, cr, seedStatuses, shootStatuses, 0)
+		return r.finishNotReady(ctx, cr, seedOut, shootStatuses, 0)
 	}
 
 	// shootPhase == "ready": apply the shoot render, then gate seed per applyOrder.
@@ -231,8 +242,19 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 				reason = "ShootApplyFailed"
 				msg = "every resource in the shoot render failed to apply"
 			}
+			// The shoot render WAS applied this cycle, so prune its orphans before
+			// writing status — otherwise a resource that left the render is dropped
+			// from the inventory permanently. Seed was NOT applied on this path, so
+			// its prior inventory (prevSeedResources) is preserved verbatim.
+			shootPruneErr := pruneShoot()
+			if shootPruneErr != nil {
+				logger.Error(shootPruneErr, "Failed to prune shoot orphans on degraded path")
+			}
 			r.setCondition(cr, reason, msg)
-			return r.finishNotReady(ctx, cr, seedStatuses, shootStatuses, 0)
+			// finishNotReady (backoff==0) returns a requeue error; fold in the prune
+			// error so it is surfaced without overwriting the degraded condition.
+			res, ferr := r.finishNotReady(ctx, cr, prevSeedResources, shootStatuses, 0)
+			return res, kerrors.NewAggregate([]error{ferr, shootPruneErr})
 		}
 		applySeed()
 	} else {
@@ -246,12 +268,6 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 
 	// 8. Prune orphans in reverse of apply order, only for renders applied this cycle.
 	var pruneErrs []error
-	pruneShoot := func() error {
-		retained, err := r.prune(ctx, shootApplier, prevShootResources, shootManifests, cr, ownedBy)
-		shootStatuses = append(shootStatuses, retained...)
-		logger.Info("Pruned orphans", "cluster", "shoot", "retained", len(retained))
-		return err
-	}
 	if shootFirst {
 		pruneErrs = append(pruneErrs, pruneSeed())
 		pruneErrs = append(pruneErrs, pruneShoot())
