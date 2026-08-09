@@ -1,100 +1,61 @@
-# Verification Report
+# Verification Report: fix-prune-inventory-orphaning
 
-> This file is produced by the `openspec-verify-change` skill after the apply phase
-> completes, to confirm that the implementation is consistent with specs / design / plan.
-> Failed checks must be returned to the corresponding artifact for correction, then
-> verify re-run.
+Verified against implementation HEAD `54a1a5f` (worktree branch `fix-prune-inventory-orphaning-impl`), base `origin/main` `5d8c138`. This report supersedes the earlier draft written before the code-review fixes landed.
 
-**Change**: `fix-prune-inventory-orphaning`
-**Verified at**: `2026-08-09 10:50`
-**Verifier**: `Sisyphus-Junior (OpenCode claude-sonnet-4-6)`
+## Summary
 
----
+| Dimension    | Status                                  |
+|--------------|-----------------------------------------|
+| Completeness | 7/7 task groups complete; 2/2 requirements implemented |
+| Correctness  | 2/2 requirements covered; 13/13 delta scenarios accounted for; RED→GREEN proven |
+| Coherence    | Follows design decisions + per-path contract; no divergence |
 
-## 1. Structural Validation (`openspec validate --all --json`)
+**Final assessment: All checks passed. Ready for archive.**
 
-- [x] All items return `"valid": true`
+## Completeness
 
-**Result**:
+**Task completion** — all 7 task groups in `plan.md` checked `[x]`:
+1. `degradingApplier` test fake — commit `03b77e7`
+2. RED test (ShootFirst degraded orphaning) — commit `9dff6a8`
+3. GREEN (prune degraded shoot render before status write) — commit `db1d051`
+4. RED test (credsNotReady seed drop) — commit `8172a4d`
+5. GREEN (preserve seed inventory on credsNotReady/clientFailed) — commit `7315df0`
+6. Full verification (suite/lint/build/validate) — passed
+7. Plan checkboxes marked — commit `848fe50`
+Plus review-fix commit `54a1a5f` (aggregate degraded-path prune error; strengthen tests).
 
-```text
-25 items validated, 25 passed, 0 failed.
-Types: 1 change, 24 specs. All valid: true.
-INFO-level notes only (requirement text length warnings, non-blocking).
-```
+**Spec coverage** — both delta requirements implemented in `internal/controller/dualdeploymentoperator_controller.go`:
+- *Prune resources that leave a render* → `pruneShoot` hoisted before the shootPhase switch and invoked on the degraded early-return before `finishNotReady`; prune runs before every status write for renders applied this cycle.
+- *Status population and Ready condition* → `seedOut`/`prevSeedResources` preservation on `credsNotReady`/`clientFailed` (seed not applied) and `prevSeedResources` on the degraded path; no early-return persists a trimmed inventory for an un-applied render.
 
-| Item | Type | Issues |
-|---|---|---|
-| — | — | None — all valid |
+## Correctness
 
----
+**Requirement implementation mapping:**
+- Degraded `ShootFirst` path (`dualdeploymentoperator_controller.go` ~L238-257): applies shoot render, prunes it, aggregates the prune error into the returned error, preserves the `ResourcesDegraded`/`ShootApplyFailed` condition, passes `prevSeedResources` (seed not applied).
+- `credsNotReady`/`clientFailed` (~L196-229): `seedOut` defaults to `prevSeedResources`; only set to `seedStatuses` when `!shootFirst` (seed actually applied). Shoot render never pruned on these paths (shoot not applied) — its prior inventory is preserved verbatim.
+- Happy path unchanged: apply → prune → status write.
 
-## 2. Task Completion (`plan.md`)
+**Scenario coverage** (13 delta scenarios):
+- *ShootFirst degraded shoot render prunes its orphan the same cycle* → covered by test `prunes a removed shoot resource the same cycle even when the shoot render is degraded (ShootFirst)`; asserts deletion, absence from `status.shootResources`, and degraded condition survives.
+- *Skipped render preserved verbatim* / *Deferred seed inventory preserved on ShootFirst benign-wait paths* → covered by `DescribeTable` with entries for `credsNotReady` and `clientFailed`.
+- *Addition unaffected by prune ordering* → covered by design invariant + existing happy-path tests (prune iterates `prev`, not `current`; additions flow through apply).
+- Existing prune scenarios (CRD retain/delete, identity match, failed-prune self-heal) → unchanged, guarded by the pre-existing prune tests, full suite green.
 
-- [x] All trailing `- [ ] Task N complete` lines have been changed to `- [x]`
+**RED→GREEN proof:** with the production fix reverted to `4c8a8de`, both new tests FAIL (2 Failed); with the fix restored, both PASS (2 Passed). Full suite green across all packages; `golangci-lint run ./...` → 0 issues; `go build ./...` → exit 0.
 
-**Incomplete tasks** (if any):
+## Coherence
 
-| Task | Reason incomplete | Blocks archive? |
-|---|---|---|
-| — | All 7 tasks complete | — |
+**Design adherence** — matches `design.md`:
+- Option C, fix-forward (no uncached read, no live-discovery repair) — implemented as scoped.
+- Per-path contract table honored cell-for-cell: applied render → prune before status write; skipped render → preserve prior inventory, never prune.
+- Degraded-path error handling: aggregate for requeue, preserve degraded condition — implemented per the resolved open question.
 
-Confirmed via `grep "Task.*complete" openspec/changes/fix-prune-inventory-orphaning/plan.md`:
-all seven entries read `- [x] Task N complete`.
+**Code pattern consistency** — follows project conventions: structured logging per k8s message-style guidelines, `kerrors.NewAggregate` for error aggregation (consistent with the happy-path prune), Ginkgo/Gomega + envtest test patterns, `deliver.Applier` fake mirrors the existing `recordingApplier`.
 
----
+## Issues
 
-## 3. Delta Spec Sync State
+- **CRITICAL:** none
+- **WARNING:** none
+- **SUGGESTION:** none
 
-| Capability | Sync status | Notes |
-|---|---|---|
-| `reconcile-loop` | **Needs sync** | Delta adds two invariant paragraphs to "Prune resources that leave a render" requirement ("Prune runs before every status write" + "Apply-vs-skip determines prune-vs-preserve") and one paragraph to "Status population and Ready condition". Delta also adds four new scenarios: `ShootFirst degraded shoot render prunes its orphan the same cycle`, `Skipped render is preserved verbatim, not pruned`, `Deferred seed inventory is preserved on ShootFirst benign-wait paths`, `Early-return status write never trims before prune`. None of these are present in `openspec/specs/reconcile-loop/spec.md` (confirmed by grep). Sync required before or at archive. |
-
----
-
-## 4. Design / Specs Coherence Spot Check
-
-| Sample item | design description | specs counterpart | Gap |
-|---|---|---|---|
-| Prune-before-status-write invariant | "Restructure the reconcile so prune runs for every render **applied this cycle** before any status write, including the `shootFirst` degraded early-return." | Delta spec: "Prune runs before every status write, on every terminating path, for every render applied this cycle." | None — exact alignment |
-| Apply-vs-skip-determines-prune-vs-preserve | "A render **applied this cycle** is pruned before its status is written. A render **not applied this cycle** … has its prior inventory preserved verbatim and is **not** pruned." | Delta spec: "Apply-vs-skip determines prune-vs-preserve." paragraph. | None — exact alignment |
-| Prune-error aggregation on degraded path | Design: "fold `pruneShoot`'s error into the reconcile's requeue decision (aggregate, matching happy-path semantics)" | Delta spec: "a prune error SHALL be aggregated" | **Minor drift** (see warning below) |
-
-**Drift warnings** (non-blocking):
-
-- `internal/controller/dualdeploymentoperator_controller.go` — on the `shootFirst` degraded path, the prune error is logged (`logger.Error`) but **not aggregated** into the returned error. The delta spec and design say "aggregated". In practice this is harmless: `finishNotReady` with `backoff=0` already returns a non-nil error that triggers requeue, so the prune-error-requeue outcome matches the design intent. The `Ready` condition and `status.shootResources` are correctly written. Consider amending the implementation or relaxing the spec word "aggregated" → "logged" to close the gap. Non-blocking for archive.
-
----
-
-## 5. Implementation Signal
-
-- [x] No unstaged files in worktree (`git status --short` returns empty)
-- [x] All relevant commits on branch (not yet merged to `main` — expected at verify time)
-
-**Commit range** (implementation commits, `internal/controller/`):
-
-| SHA | Message |
-|---|---|
-| `03b77e7` | `test(controller): add degradingApplier fake for degraded-shoot path` |
-| `9dff6a8` | `test(controller): RED — ShootFirst degraded render orphans removed resource` |
-| `db1d051` | `fix(controller): prune degraded shoot render before status write` |
-| `8172a4d` | `test(controller): RED — ShootFirst credsNotReady drops seed inventory` |
-| `7315df0` | `fix(controller): preserve seed inventory on ShootFirst credsNotReady/clientFailed` |
-| `0dc1c32` | `test(controller): fix gofmt + errcheck lint violations in new tests` |
-
-Test suite: 28/28 controller tests pass (`go test ./internal/controller/... -run TestControllers`).
-Lint: `golangci-lint run ./internal/controller/...` → 0 issues.
-Build: `go build ./...` → exit 0.
-Full suite: `go test ./...` → all packages pass.
-
----
-
-## Overall Decision
-
-- [x] PASS WITH WARNINGS — may proceed but note: delta spec `reconcile-loop` needs sync before archive; minor prune-error-aggregation drift (non-blocking).
-
-**Next step**:
-
-1. Run `openspec sync-specs fix-prune-inventory-orphaning` to sync the `reconcile-loop` delta into the main spec, then commit.
-2. Optionally tighten the prune-error handling on the degraded path (aggregate rather than log) or relax the spec wording — non-blocking.
-3. Run `/opsx-archive` to archive the change.
+Code review (holistic, `code-reviewer`) returned **APPROVED** after one fix cycle resolving 1 IMPORTANT (prune-error aggregation) and 2 NITs (test assertions), with no new issues.
