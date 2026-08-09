@@ -193,6 +193,13 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 		return err
 	}
 
+	pruneShoot := func() error {
+		retained, err := r.prune(ctx, shootApplier, prevShootResources, shootManifests, cr, ownedBy)
+		shootStatuses = append(shootStatuses, retained...)
+		logger.Info("Pruned orphans", "cluster", "shoot", "retained", len(retained))
+		return err
+	}
+
 	switch shootPhase {
 	case "credsNotReady":
 		if !shootFirst {
@@ -231,8 +238,11 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 				reason = "ShootApplyFailed"
 				msg = "every resource in the shoot render failed to apply"
 			}
+			if err := pruneShoot(); err != nil {
+				logger.Error(err, "Failed to prune shoot orphans on degraded path")
+			}
 			r.setCondition(cr, reason, msg)
-			return r.finishNotReady(ctx, cr, seedStatuses, shootStatuses, 0)
+			return r.finishNotReady(ctx, cr, prevSeedResources, shootStatuses, 0)
 		}
 		applySeed()
 	} else {
@@ -246,12 +256,6 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 
 	// 8. Prune orphans in reverse of apply order, only for renders applied this cycle.
 	var pruneErrs []error
-	pruneShoot := func() error {
-		retained, err := r.prune(ctx, shootApplier, prevShootResources, shootManifests, cr, ownedBy)
-		shootStatuses = append(shootStatuses, retained...)
-		logger.Info("Pruned orphans", "cluster", "shoot", "retained", len(retained))
-		return err
-	}
 	if shootFirst {
 		pruneErrs = append(pruneErrs, pruneSeed())
 		pruneErrs = append(pruneErrs, pruneShoot())
