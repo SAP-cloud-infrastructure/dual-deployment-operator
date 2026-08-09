@@ -6,6 +6,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/rand"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
@@ -425,44 +427,58 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 			err := k8sClient.Get(ctx, client.ObjectKey{Namespace: cr.Spec.ShootNamespace, Name: "orphan-cm"}, live)
 			return apierrors.IsNotFound(err)
 		}, 5*time.Second, 200*time.Millisecond).Should(BeTrue(), "orphan-cm must be pruned the same cycle despite degraded shoot render")
+
+		afterDeg := &ddov1alpha1.DualDeploymentOperator{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), afterDeg)).To(Succeed())
+		for _, rs := range afterDeg.Status.ShootResources {
+			Expect(rs.Name).NotTo(Equal("orphan-cm"), "pruned orphan must be absent from status.shootResources")
+		}
+		cond := meta.FindStatusCondition(afterDeg.Status.Conditions, "Ready")
+		Expect(cond).ToNot(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(cond.Reason).To(BeElementOf("ResourcesDegraded", "ShootApplyFailed"), "degraded-resource reason must survive the prune")
 	})
 
-	It("preserves prior seed inventory on ShootFirst credsNotReady (does not empty it)", func() {
-		cr := newCR("test-preserve-seed-creds")
-		cr.Spec.ApplyOrder = "ShootFirst"
+	DescribeTable("preserves prior seed inventory on ShootFirst when the shoot render is skipped",
+		func(shootErr error) {
+			cr := newCR("test-preserve-seed-" + rand.String(5))
+			cr.Spec.ApplyOrder = "ShootFirst"
 
-		r := &DualDeploymentOperatorReconciler{
-			Client: k8sClient,
-			Scheme: k8sClient.Scheme(),
-			SeedApplier: &deliver.SSAApplier{
-				Client: k8sClient, FieldManager: FieldManagerName, Cluster: "seed",
-			},
-			SourceDeps: source.Deps{ChartLoader: envtestFakeChartLoader{dir: demoChartDir}},
-			shootApplierFor: func(_ context.Context, _ *ddov1alpha1.DualDeploymentOperator) (deliver.Applier, error) {
-				return nil, errShootCredentialsNotReady
-			},
-		}
+			r := &DualDeploymentOperatorReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+				SeedApplier: &deliver.SSAApplier{
+					Client: k8sClient, FieldManager: FieldManagerName, Cluster: "seed",
+				},
+				SourceDeps: source.Deps{ChartLoader: envtestFakeChartLoader{dir: demoChartDir}},
+				shootApplierFor: func(_ context.Context, _ *ddov1alpha1.DualDeploymentOperator) (deliver.Applier, error) {
+					return nil, shootErr
+				},
+			}
 
-		Expect(k8sClient.Create(ctx, cr)).To(Succeed())
-		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: cr.Name, Namespace: cr.Namespace}}
-		_, err := r.Reconcile(ctx, req)
-		Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: cr.Name, Namespace: cr.Namespace}}
+			_, firstErr := r.Reconcile(ctx, req)
+			_ = firstErr
 
-		got := &ddov1alpha1.DualDeploymentOperator{}
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), got)).To(Succeed())
-		got.Status.SeedResources = []ddov1alpha1.ResourceStatus{
-			{Kind: "ServiceAccount", APIVersion: "v1", Namespace: cr.Namespace, Name: "prior-sa", Health: ddov1alpha1.HealthHealthy},
-		}
-		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+			got := &ddov1alpha1.DualDeploymentOperator{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), got)).To(Succeed())
+			got.Status.SeedResources = []ddov1alpha1.ResourceStatus{
+				{Kind: "ServiceAccount", APIVersion: "v1", Namespace: cr.Namespace, Name: "prior-sa", Health: ddov1alpha1.HealthHealthy},
+			}
+			Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
 
-		_, err = r.Reconcile(ctx, req)
-		Expect(err).NotTo(HaveOccurred())
+			_, secondErr := r.Reconcile(ctx, req)
+			_ = secondErr
 
-		after := &ddov1alpha1.DualDeploymentOperator{}
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), after)).To(Succeed())
-		Expect(after.Status.SeedResources).To(HaveLen(1), "prior seed inventory must be preserved on credsNotReady")
-		Expect(after.Status.SeedResources[0].Name).To(Equal("prior-sa"))
-	})
+			after := &ddov1alpha1.DualDeploymentOperator{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), after)).To(Succeed())
+			Expect(after.Status.SeedResources).To(HaveLen(1), "prior seed inventory must be preserved when seed render is skipped")
+			Expect(after.Status.SeedResources[0].Name).To(Equal("prior-sa"))
+		},
+		Entry("credsNotReady (shoot token/CA not yet populated)", errShootCredentialsNotReady),
+		Entry("clientFailed (shoot client unbuildable)", errors.New("shoot client build failed")),
+	)
 
 	// -------------------------------------------------------------------------
 	// Task 10: finalizer-driven deletion with ShootUnreachable safety

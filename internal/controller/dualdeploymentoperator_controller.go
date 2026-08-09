@@ -242,11 +242,19 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 				reason = "ShootApplyFailed"
 				msg = "every resource in the shoot render failed to apply"
 			}
-			if err := pruneShoot(); err != nil {
-				logger.Error(err, "Failed to prune shoot orphans on degraded path")
+			// The shoot render WAS applied this cycle, so prune its orphans before
+			// writing status — otherwise a resource that left the render is dropped
+			// from the inventory permanently. Seed was NOT applied on this path, so
+			// its prior inventory (prevSeedResources) is preserved verbatim.
+			shootPruneErr := pruneShoot()
+			if shootPruneErr != nil {
+				logger.Error(shootPruneErr, "Failed to prune shoot orphans on degraded path")
 			}
 			r.setCondition(cr, reason, msg)
-			return r.finishNotReady(ctx, cr, prevSeedResources, shootStatuses, 0)
+			// finishNotReady (backoff==0) returns a requeue error; fold in the prune
+			// error so it is surfaced without overwriting the degraded condition.
+			res, ferr := r.finishNotReady(ctx, cr, prevSeedResources, shootStatuses, 0)
+			return res, kerrors.NewAggregate([]error{ferr, shootPruneErr})
 		}
 		applySeed()
 	} else {
