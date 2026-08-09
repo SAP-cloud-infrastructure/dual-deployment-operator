@@ -362,6 +362,70 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 		}, 10*time.Second, 200*time.Millisecond).Should(Succeed())
 	})
 
+	It("prunes a removed shoot resource the same cycle even when the shoot render is degraded (ShootFirst)", func() {
+		cr := newCR("test-degraded-prune")
+		cr.Spec.ApplyOrder = "ShootFirst"
+
+		// Create an owned orphan ConfigMap in the shoot namespace that the demo
+		// chart does NOT render — it must be pruned once it leaves the inventory.
+		orphan := &unstructured.Unstructured{}
+		orphan.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"})
+		orphan.SetName("orphan-cm")
+		orphan.SetNamespace(cr.Spec.ShootNamespace)
+		orphan.SetLabels(map[string]string{manifest.OwnedByLabel: manifest.OwnedByValue(cr.Namespace, cr.Name)})
+		Expect(k8sClient.Create(ctx, orphan)).To(Succeed())
+
+		// Reconciler whose shoot applier forces one rendered resource Degraded,
+		// so the ShootFirst degraded early-return path is taken.
+		r := &DualDeploymentOperatorReconciler{
+			Client: k8sClient,
+			Scheme: k8sClient.Scheme(),
+			SeedApplier: &deliver.SSAApplier{
+				Client: k8sClient, FieldManager: FieldManagerName, Cluster: "seed",
+			},
+			SourceDeps: source.Deps{ChartLoader: envtestFakeChartLoader{dir: demoChartDir}},
+			shootApplierFor: func(_ context.Context, _ *ddov1alpha1.DualDeploymentOperator) (deliver.Applier, error) {
+				return &degradingApplier{
+					inner:       &deliver.SSAApplier{Client: k8sClient, FieldManager: FieldManagerName, Cluster: "shoot"},
+					degradeName: "demos.demo.cc.sap", // the only resource shoot mode renders — forces anyFailed()
+				}, nil
+			},
+		}
+
+		// Clear the shared demo CRD so this CR owns a fresh render.
+		staleCRD := &unstructured.Unstructured{}
+		staleCRD.SetGroupVersionKind(schema.GroupVersionKind{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"})
+		staleCRD.SetName("demos.demo.cc.sap")
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, staleCRD))).To(Succeed())
+
+		Expect(k8sClient.Create(ctx, cr)).To(Succeed())
+		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: cr.Name, Namespace: cr.Namespace}}
+
+		// First reconcile: adds finalizer.
+		_, _ = r.Reconcile(ctx, req)
+
+		// Seed prior status with the orphan so it is in prevShootResources.
+		got := &ddov1alpha1.DualDeploymentOperator{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), got)).To(Succeed())
+		got.Status.ShootResources = []ddov1alpha1.ResourceStatus{
+			{Kind: "ConfigMap", APIVersion: "v1", Namespace: cr.Spec.ShootNamespace, Name: "orphan-cm", Health: ddov1alpha1.HealthHealthy},
+		}
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+
+		// Reconcile: shoot render is degraded (demos.demo.cc.sap CRD) AND orphan-cm left
+		// the render. The bug: reconcile returns before prune, persists a status
+		// without orphan-cm, and never deletes it. The fix: prune runs first.
+		_, _ = r.Reconcile(ctx, req)
+
+		// Assert the orphan was actually deleted from the cluster this cycle.
+		live := &unstructured.Unstructured{}
+		live.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"})
+		Eventually(func() bool {
+			err := k8sClient.Get(ctx, client.ObjectKey{Namespace: cr.Spec.ShootNamespace, Name: "orphan-cm"}, live)
+			return apierrors.IsNotFound(err)
+		}, 5*time.Second, 200*time.Millisecond).Should(BeTrue(), "orphan-cm must be pruned the same cycle despite degraded shoot render")
+	})
+
 	// -------------------------------------------------------------------------
 	// Task 10: finalizer-driven deletion with ShootUnreachable safety
 	//
