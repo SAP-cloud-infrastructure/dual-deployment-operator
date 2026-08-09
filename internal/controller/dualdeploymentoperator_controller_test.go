@@ -707,5 +707,31 @@ func (a *recordingApplier) Delete(_ context.Context, _ manifest.Manifest, _ stri
 }
 
 func (a *recordingApplier) Get(_ context.Context, _ manifest.Manifest) (*unstructured.Unstructured, error) {
-	return nil, apierrors.NewNotFound(schema.GroupResource{}, "")
+    return nil, apierrors.NewNotFound(schema.GroupResource{}, "")
+}
+
+// degradingApplier delegates to an inner Applier but forces Health=Degraded
+// for the resource whose name matches degradeName. Used to exercise the
+// ShootFirst degraded early-return path while keeping real Get/Delete behavior
+// (so prune can actually delete orphans on the envtest cluster).
+type degradingApplier struct {
+    inner       deliver.Applier
+    degradeName string
+}
+
+func (a *degradingApplier) Apply(ctx context.Context, m manifest.Manifest, ownedBy string) (ddov1alpha1.ResourceStatus, error) {
+    st, err := a.inner.Apply(ctx, m, ownedBy)
+    if m.Unstructured.GetName() == a.degradeName {
+        st.Health = ddov1alpha1.HealthDegraded
+        st.Message = "forced degraded by test"
+    }
+    return st, err
+}
+
+func (a *degradingApplier) Delete(ctx context.Context, m manifest.Manifest, ownedBy string) error {
+    return a.inner.Delete(ctx, m, ownedBy)
+}
+
+func (a *degradingApplier) Get(ctx context.Context, m manifest.Manifest) (*unstructured.Unstructured, error) {
+    return a.inner.Get(ctx, m)
 }
