@@ -1,6 +1,6 @@
 # Fix Prune Inventory Orphaning — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Trailing `- [ ]` checkboxes mark task-group completion — check them off AFTER all steps complete.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking. Trailing `- [x]` checkboxes mark task-group completion — check them off AFTER all steps complete.
 
 **Goal:** Make orphan pruning run before every status write on every terminating reconcile path, and preserve prior inventory verbatim for any render not applied this cycle, so a resource that leaves the render is deleted the same cycle instead of being permanently dropped from the status inventory.
 
@@ -17,7 +17,7 @@
 
 The existing `recordingApplier` (L695-711) always returns Healthy. The orphaning bug only triggers when `anyFailed(shootStatuses)` is true on the shoot render, so the RED tests need a fake applier that (a) applies to the real envtest cluster for most resources so prune's `Get`/`Delete` work, and (b) forces `Health=Degraded` for one named resource to trip the degraded early-return. Wrapping a real `SSAApplier` keeps `Get`/`Delete` behavior intact for prune.
 
-- [ ] **Step 1: Add the `degradingApplier` fake wrapping a real SSAApplier**
+- [x] **Step 1: Add the `degradingApplier` fake wrapping a real SSAApplier**
 
 Append to `internal/controller/dualdeploymentoperator_controller_test.go`:
 
@@ -49,19 +49,19 @@ func (a *degradingApplier) Get(ctx context.Context, m manifest.Manifest) (*unstr
 }
 ```
 
-- [ ] **Step 2: Verify it compiles (no test run yet)**
+- [x] **Step 2: Verify it compiles (no test run yet)**
 
 Run: `go build ./internal/controller/...`
 Expected: PASS (compiles; `degradingApplier` unused warning is fine — Go allows unused types).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add internal/controller/dualdeploymentoperator_controller_test.go
 git commit -m "test(controller): add degradingApplier fake for degraded-shoot path"
 ```
 
-- [ ] Task 1 complete
+- [x] Task 1 complete
 
 ---
 
@@ -74,7 +74,7 @@ This test reproduces the bug: on a ShootFirst reconcile where the shoot render b
 
 The demo chart renders a fixed set; the "removed" resource is one we inject into prior status that the chart does NOT render, so it is an orphan by construction. Its identity must be a kind the shoot applier can `Get`/`Delete` on the envtest cluster (use a `ConfigMap` in the shoot namespace, created directly so prune finds it live and owned).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add inside the ready-phase `Context` (after the ShootFirst success test at ~L363):
 
@@ -144,19 +144,19 @@ It("prunes a removed shoot resource the same cycle even when the shoot render is
 })
 ```
 
-- [ ] **Step 2: Run the test to verify it FAILS**
+- [x] **Step 2: Run the test to verify it FAILS**
 
 Run: `KUBEBUILDER_ASSETS=$(setup-envtest use 1.36 -p path) go test ./internal/controller/... -run TestControllers -v 2>&1 | grep -A5 "same cycle even when"`
 Expected: FAIL — `orphan-cm` is still present (NotFound never true) because the degraded early-return at L235 persists status and returns before `pruneShoot()` runs.
 
-- [ ] **Step 3: Commit the failing test**
+- [x] **Step 3: Commit the failing test**
 
 ```bash
 git add internal/controller/dualdeploymentoperator_controller_test.go
 git commit -m "test(controller): RED — ShootFirst degraded render orphans removed resource"
 ```
 
-- [ ] Task 2 complete
+- [x] Task 2 complete
 
 ---
 
@@ -167,7 +167,7 @@ git commit -m "test(controller): RED — ShootFirst degraded render orphans remo
 
 The `pruneShoot` closure is currently defined AFTER this block (L249). Move the prune closures (`pruneSeed` already exists at L189; add `pruneShoot`) so they are defined before the ready-phase branches, then call `pruneShoot()` before `finishNotReady` on the degraded path. Aggregate the prune error into the returned error but keep the degraded condition.
 
-- [ ] **Step 1: Define `pruneShoot` before the shootPhase switch**
+- [x] **Step 1: Define `pruneShoot` before the shootPhase switch**
 
 Move the `pruneShoot` closure definition up. Locate its current definition (L249-254) and relocate it to just after `pruneSeed` (after L194), so both prune closures exist before any branch uses them. The relocated closure (identical body):
 
@@ -182,7 +182,7 @@ Move the `pruneShoot` closure definition up. Locate its current definition (L249
 
 Then delete the duplicate definition at the old location (L249-254), leaving the `pruneErrs` accumulation block (L255-262) referencing the now-hoisted closures.
 
-- [ ] **Step 2: Prune before the degraded early-return**
+- [x] **Step 2: Prune before the degraded early-return**
 
 Replace the degraded-return block (currently L227-236):
 
@@ -224,17 +224,17 @@ with (prune the applied shoot render before persisting its trimmed inventory; se
 
 Note: `seedStatuses` is nil here (seed never applied), so pass `prevSeedResources` to preserve the prior seed inventory instead of emptying it. This is the seed-preservation fix folded into the same block.
 
-- [ ] **Step 3: Run the Task 2 test to verify it now PASSES**
+- [x] **Step 3: Run the Task 2 test to verify it now PASSES**
 
 Run: `KUBEBUILDER_ASSETS=$(setup-envtest use 1.36 -p path) go test ./internal/controller/... -run TestControllers -v 2>&1 | grep -A5 "same cycle even when"`
 Expected: PASS — `orphan-cm` is deleted this cycle.
 
-- [ ] **Step 4: Run the full controller suite to check for regressions**
+- [x] **Step 4: Run the full controller suite to check for regressions**
 
 Run: `KUBEBUILDER_ASSETS=$(setup-envtest use 1.36 -p path) go test ./internal/controller/... -run TestControllers`
 Expected: PASS (all existing tests still green; the hoisted closure changes nothing for the happy path).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/controller/dualdeploymentoperator_controller.go
@@ -247,7 +247,7 @@ pruned (unbounded orphaning). Hoist pruneShoot and call it before
 finishNotReady; preserve prevSeedResources (seed not applied on this path)."
 ```
 
-- [ ] Task 3 complete
+- [x] Task 3 complete
 
 ---
 
@@ -258,7 +258,7 @@ finishNotReady; preserve prevSeedResources (seed not applied on this path)."
 
 On `credsNotReady`/`clientFailed` with `shootFirst`, the `if !shootFirst` guard (L198, L209) skips `applySeed()`, leaving `seedStatuses` nil, and `finishNotReady` persists an empty `SeedResources`, dropping the entire seed inventory. This test seeds a prior `SeedResources` and asserts it survives a credsNotReady reconcile.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add near the credsNotReady tests (the existing suite already has a credsNotReady reconciler pattern — reuse a reconciler whose `shootApplierFor` returns `errShootCredentialsNotReady`):
 
@@ -302,19 +302,19 @@ It("preserves prior seed inventory on ShootFirst credsNotReady (does not empty i
 })
 ```
 
-- [ ] **Step 2: Run the test to verify it FAILS**
+- [x] **Step 2: Run the test to verify it FAILS**
 
 Run: `KUBEBUILDER_ASSETS=$(setup-envtest use 1.36 -p path) go test ./internal/controller/... -run TestControllers -v 2>&1 | grep -A5 "preserves prior seed inventory"`
 Expected: FAIL — `SeedResources` is empty (len 0), because `finishNotReady` at L206 was passed nil `seedStatuses`.
 
-- [ ] **Step 3: Commit the failing test**
+- [x] **Step 3: Commit the failing test**
 
 ```bash
 git add internal/controller/dualdeploymentoperator_controller_test.go
 git commit -m "test(controller): RED — ShootFirst credsNotReady drops seed inventory"
 ```
 
-- [ ] Task 4 complete
+- [x] Task 4 complete
 
 ---
 
@@ -325,7 +325,7 @@ git commit -m "test(controller): RED — ShootFirst credsNotReady drops seed inv
 
 On both paths, when `shootFirst` (seed not applied), pass `prevSeedResources` to `finishNotReady` instead of the nil `seedStatuses`. When `!shootFirst`, seed WAS applied and pruned, so `seedStatuses` is correct — keep it. The simplest correct form: compute the seed argument per branch.
 
-- [ ] **Step 1: Fix the credsNotReady case**
+- [x] **Step 1: Fix the credsNotReady case**
 
 Replace (currently L197-206):
 
@@ -359,7 +359,7 @@ with:
 		return r.finishNotReady(ctx, cr, seedOut, shootStatuses, 30*time.Second)
 ```
 
-- [ ] **Step 2: Fix the clientFailed case**
+- [x] **Step 2: Fix the clientFailed case**
 
 Replace (currently L208-217):
 
@@ -393,17 +393,17 @@ with:
 		return r.finishNotReady(ctx, cr, seedOut, shootStatuses, 0)
 ```
 
-- [ ] **Step 3: Run the Task 4 test to verify it now PASSES**
+- [x] **Step 3: Run the Task 4 test to verify it now PASSES**
 
 Run: `KUBEBUILDER_ASSETS=$(setup-envtest use 1.36 -p path) go test ./internal/controller/... -run TestControllers -v 2>&1 | grep -A5 "preserves prior seed inventory"`
 Expected: PASS — `SeedResources` retains `prior-sa`.
 
-- [ ] **Step 4: Run the full controller suite**
+- [x] **Step 4: Run the full controller suite**
 
 Run: `KUBEBUILDER_ASSETS=$(setup-envtest use 1.36 -p path) go test ./internal/controller/...`
 Expected: PASS (all tests green, including the Task 2 degraded-prune test and existing credsNotReady/clientFailed tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/controller/dualdeploymentoperator_controller.go
@@ -416,7 +416,7 @@ prevSeedResources when seed was not applied this cycle; keep the applied
 seedStatuses on SeedFirst."
 ```
 
-- [ ] Task 5 complete
+- [x] Task 5 complete
 
 ---
 
@@ -424,32 +424,32 @@ seedStatuses on SeedFirst."
 
 **Files:** none (verification only)
 
-- [ ] **Step 1: Run the full test suite (all packages)**
+- [x] **Step 1: Run the full test suite (all packages)**
 
 Run: `KUBEBUILDER_ASSETS=$(setup-envtest use 1.36 -p path) go test ./...`
 Expected: PASS across all packages. Note any pre-existing failures unrelated to this change.
 
-- [ ] **Step 2: Run the linter**
+- [x] **Step 2: Run the linter**
 
 Run: `make run-golangci-lint`
 Expected: no new violations in `dualdeploymentoperator_controller.go` or the test file. Re-verify any "pre-existing" claim against `git diff main -- internal/controller/`.
 
-- [ ] **Step 3: Build**
+- [x] **Step 3: Build**
 
 Run: `go build ./...`
 Expected: exit 0.
 
-- [ ] **Step 4: Re-validate the OpenSpec change (base spec may have shifted after rebase)**
+- [x] **Step 4: Re-validate the OpenSpec change (base spec may have shifted after rebase)**
 
 Run: `openspec validate fix-prune-inventory-orphaning`
 Expected: `Change 'fix-prune-inventory-orphaning' is valid`. If the MODIFIED delta headers no longer match the base `openspec/specs/reconcile-loop/spec.md` (e.g. reworded by a merged change), re-sync the delta headers to exact matches.
 
-- [ ] **Step 5: Confirm no unrelated files changed**
+- [x] **Step 5: Confirm no unrelated files changed**
 
 Run: `git diff --stat main -- . ':!openspec'`
 Expected: only `internal/controller/dualdeploymentoperator_controller.go` and `internal/controller/dualdeploymentoperator_controller_test.go` in the code diff.
 
-- [ ] Task 6 complete
+- [x] Task 6 complete
 
 ---
 
@@ -458,15 +458,15 @@ Expected: only `internal/controller/dualdeploymentoperator_controller.go` and `i
 **Files:**
 - This file (`plan.md`) — trailing checkboxes already tracked per task.
 
-- [ ] **Step 1: Confirm all task-group checkboxes above are checked**
+- [x] **Step 1: Confirm all task-group checkboxes above are checked**
 
-Verify every `- [ ] Task N complete` is now `- [x]`.
+Verify every `- [x] Task N complete` is now `- [x]`.
 
-- [ ] **Step 2: Commit any remaining plan/progress updates**
+- [x] **Step 2: Commit any remaining plan/progress updates**
 
 ```bash
 git add openspec/changes/fix-prune-inventory-orphaning/plan.md
 git commit -m "docs(openspec): mark fix-prune-inventory-orphaning plan tasks complete"
 ```
 
-- [ ] Task 7 complete
+- [x] Task 7 complete
