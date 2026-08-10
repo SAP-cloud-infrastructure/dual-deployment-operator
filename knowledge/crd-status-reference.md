@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # CRD Status Reference: DualDeploymentOperator
 
 **Source**: `api/v1alpha1/dualdeploymentoperator_types.go` (lines 172–217)  
