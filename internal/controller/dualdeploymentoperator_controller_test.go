@@ -802,10 +802,161 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 				Expect(order[0]).To(Equal(wantFirst),
 					"deletion must process renders in the reverse of applyOrder=%s", applyOrder)
 			}
-
 			assertOrder("SeedFirst", "shoot")
 			assertOrder("ShootFirst", "seed")
 		})
+
+		It("sets Ready=False/Reason=Deleting on the success path (no shoot resources)", func() {
+			cr := newDeleteCR("test-del-deleting-success")
+			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
+
+			capClient := &statusCapturingClient{Client: k8sClient}
+			r := &DualDeploymentOperatorReconciler{
+				Client:   capClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(10),
+				SeedApplier: &deliver.SSAApplier{
+					Client: k8sClient, FieldManager: FieldManagerName, Cluster: "seed",
+				},
+				shootApplierFor: func(_ context.Context, _ *ddov1alpha1.DualDeploymentOperator) (deliver.Applier, error) {
+					return &deliver.SSAApplier{Client: k8sClient, FieldManager: FieldManagerName, Cluster: "shoot"}, nil
+				},
+			}
+
+			Expect(k8sClient.Delete(ctx, cr)).To(Succeed())
+			_, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: cr.Name, Namespace: cr.Namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			cond := meta.FindStatusCondition(capClient.lastStatusConditions, "Ready")
+			Expect(cond).ToNot(BeNil(), "Ready condition must have been written to status")
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal(ReasonDeleting))
+		})
+
+		It("sets Ready=False/Reason=Deleting on the blocked path (shoot reachable, delete fails)", func() {
+			cr := newDeleteCR("test-del-deleting-blocked")
+			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
+			got := &ddov1alpha1.DualDeploymentOperator{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), got)).To(Succeed())
+			got.Status.ShootResources = []ddov1alpha1.ResourceStatus{
+				{Kind: "ConfigMap", APIVersion: "v1", Namespace: "kube-system", Name: "shoot-cm", Health: ddov1alpha1.HealthHealthy},
+			}
+			Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+
+			r := &DualDeploymentOperatorReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(10),
+				SeedApplier: &deliver.SSAApplier{
+					Client: k8sClient, FieldManager: FieldManagerName, Cluster: "seed",
+				},
+				shootApplierFor: func(_ context.Context, _ *ddov1alpha1.DualDeploymentOperator) (deliver.Applier, error) {
+					return &alwaysFailDeleteApplier{}, nil
+				},
+			}
+
+			Expect(k8sClient.Delete(ctx, cr)).To(Succeed())
+			result, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: cr.Name, Namespace: cr.Namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(30 * time.Second))
+
+			after := &ddov1alpha1.DualDeploymentOperator{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), after)).To(Succeed())
+			cond := meta.FindStatusCondition(after.Status.Conditions, "Ready")
+			Expect(cond).ToNot(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal(ReasonDeleting))
+		})
+
+		It("sets Ready=False/Reason=Deleting on the force-delete path", func() {
+			cr := newDeleteCR("test-del-deleting-force")
+			cr.Annotations = map[string]string{ForceDeleteAnnotation: "true"}
+			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
+			got := &ddov1alpha1.DualDeploymentOperator{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), got)).To(Succeed())
+			got.Status.ShootResources = []ddov1alpha1.ResourceStatus{
+				{Kind: "ConfigMap", APIVersion: "v1", Namespace: "kube-system", Name: "shoot-cm", Health: ddov1alpha1.HealthHealthy},
+			}
+			Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+
+			capClient := &statusCapturingClient{Client: k8sClient}
+			r := &DualDeploymentOperatorReconciler{
+				Client:   capClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(10),
+				SeedApplier: &deliver.SSAApplier{
+					Client: k8sClient, FieldManager: FieldManagerName, Cluster: "seed",
+				},
+				shootApplierFor: func(_ context.Context, _ *ddov1alpha1.DualDeploymentOperator) (deliver.Applier, error) {
+					return &alwaysFailDeleteApplier{}, nil
+				},
+			}
+
+			Expect(k8sClient.Delete(ctx, cr)).To(Succeed())
+			_, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: cr.Name, Namespace: cr.Namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			cond := meta.FindStatusCondition(capClient.lastStatusConditions, "Ready")
+			Expect(cond).ToNot(BeNil(), "Ready condition must have been written to status")
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal(ReasonDeleting))
+		})
+	})
+
+	It("preserves LastTransitionTime across reconciles when resource health is unchanged", func() {
+		cr := newCR("test-ltt-stable")
+		cr.Spec.ApplyOrder = "SeedFirst"
+		r := readyReconciler()
+		reconcileTwice(r, cr)
+
+		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: cr.Name, Namespace: cr.Namespace}}
+
+		var firstLTT metav1.Time
+		Eventually(func(g Gomega) {
+			_, err := r.Reconcile(ctx, req)
+			g.Expect(err).NotTo(HaveOccurred())
+			got := &ddov1alpha1.DualDeploymentOperator{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), got)).To(Succeed())
+			cond := meta.FindStatusCondition(got.Status.Conditions, "Ready")
+			g.Expect(cond).ToNot(BeNil())
+			g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			firstLTT = cond.LastTransitionTime
+		}, 10*time.Second, 200*time.Millisecond).Should(Succeed())
+
+		_, err := r.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+
+		got := &ddov1alpha1.DualDeploymentOperator{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), got)).To(Succeed())
+		cond := meta.FindStatusCondition(got.Status.Conditions, "Ready")
+		Expect(cond).ToNot(BeNil())
+		Expect(cond.LastTransitionTime).To(Equal(firstLTT),
+			"LastTransitionTime must not change when health is unchanged")
+	})
+
+	It("stamps ObservedGeneration on the Ready condition", func() {
+		cr := newCR("test-observed-gen")
+		cr.Spec.ApplyOrder = "SeedFirst"
+		r := readyReconciler()
+		reconcileTwice(r, cr)
+
+		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: cr.Name, Namespace: cr.Namespace}}
+		Eventually(func(g Gomega) {
+			_, err := r.Reconcile(ctx, req)
+			g.Expect(err).NotTo(HaveOccurred())
+			got := &ddov1alpha1.DualDeploymentOperator{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), got)).To(Succeed())
+			cond := meta.FindStatusCondition(got.Status.Conditions, "Ready")
+			g.Expect(cond).ToNot(BeNil())
+			g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			g.Expect(cond.ObservedGeneration).To(Equal(got.Generation))
+		}, 10*time.Second, 200*time.Millisecond).Should(Succeed())
 	})
 })
 
@@ -852,4 +1003,51 @@ func (a *degradingApplier) Delete(ctx context.Context, m manifest.Manifest, owne
 
 func (a *degradingApplier) Get(ctx context.Context, m manifest.Manifest) (*unstructured.Unstructured, error) {
 	return a.inner.Get(ctx, m)
+}
+
+type alwaysFailDeleteApplier struct{}
+
+func (a *alwaysFailDeleteApplier) Apply(_ context.Context, m manifest.Manifest, _ string) (ddov1alpha1.ResourceStatus, error) {
+	return ddov1alpha1.ResourceStatus{Kind: m.Unstructured.GetKind(), Name: m.Unstructured.GetName()}, nil
+}
+
+func (a *alwaysFailDeleteApplier) Delete(_ context.Context, _ manifest.Manifest, _ string) error {
+	return errors.New("simulated delete failure")
+}
+
+func (a *alwaysFailDeleteApplier) Get(_ context.Context, _ manifest.Manifest) (*unstructured.Unstructured, error) {
+	return nil, apierrors.NewNotFound(schema.GroupResource{}, "")
+}
+
+type statusCapturingClient struct {
+	client.Client
+	lastStatusConditions []metav1.Condition
+}
+
+func (c *statusCapturingClient) Status() client.SubResourceWriter {
+	return &statusCapturingWriter{inner: c.Client.Status(), cap: c}
+}
+
+type statusCapturingWriter struct {
+	inner client.SubResourceWriter
+	cap   *statusCapturingClient
+}
+
+func (w *statusCapturingWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	if ddo, ok := obj.(*ddov1alpha1.DualDeploymentOperator); ok {
+		w.cap.lastStatusConditions = ddo.Status.Conditions
+	}
+	return w.inner.Update(ctx, obj, opts...)
+}
+
+func (w *statusCapturingWriter) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+	return w.inner.Patch(ctx, obj, patch, opts...)
+}
+
+func (w *statusCapturingWriter) Create(ctx context.Context, obj, subResource client.Object, opts ...client.SubResourceCreateOption) error {
+	return w.inner.Create(ctx, obj, subResource, opts...)
+}
+
+func (w *statusCapturingWriter) Apply(ctx context.Context, obj runtime.ApplyConfiguration, opts ...client.SubResourceApplyOption) error {
+	return w.inner.Apply(ctx, obj, opts...)
 }

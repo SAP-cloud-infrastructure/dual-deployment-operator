@@ -168,11 +168,13 @@ func TestComputeConditions(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			conds := computeConditions(tc.seed, tc.shoot)
-			if len(conds) != 1 {
-				t.Fatalf("computeConditions returned %d conditions, want 1", len(conds))
+			var conditions []metav1.Condition
+			cond := computeConditions(tc.seed, tc.shoot)
+			meta.SetStatusCondition(&conditions, cond)
+			if len(conditions) != 1 {
+				t.Fatalf("expected 1 condition, got %d", len(conditions))
 			}
-			c := conds[0]
+			c := conditions[0]
 			if c.Type != "Ready" {
 				t.Errorf("condition type = %q, want Ready", c.Type)
 			}

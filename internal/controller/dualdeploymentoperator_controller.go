@@ -47,6 +47,9 @@ const (
 	// an explicit, auditable operator consent to orphaning remaining shoot resources.
 	// It is the supported alternative to a raw `kubectl patch ... finalizers:[]`.
 	ForceDeleteAnnotation = "dual-deployment-operator.cc.sap/force-delete"
+
+	// ReasonDeleting is the Ready condition reason set while a CR is being deleted.
+	ReasonDeleting = "Deleting"
 )
 
 // DualDeploymentOperatorReconciler reconciles a DualDeploymentOperator object.
@@ -211,7 +214,7 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 			seedOut = seedStatuses
 		}
 		r.setCondition(cr, "WaitingForShootCredentials",
-			"shoot token/CA not yet populated by Gardener; shoot render deferred")
+			"shoot token/CA not yet populated by Gardener; shoot render deferred", cr.Generation)
 		return r.finishNotReady(ctx, cr, seedOut, shootStatuses, 30*time.Second)
 
 	case "clientFailed":
@@ -224,7 +227,7 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 			seedOut = seedStatuses
 		}
 		r.setCondition(cr, "ShootApplyFailed",
-			fmt.Sprintf("shoot render could not be applied: %v", shootErr))
+			fmt.Sprintf("shoot render could not be applied: %v", shootErr), cr.Generation)
 		return r.finishNotReady(ctx, cr, seedOut, shootStatuses, 0)
 	}
 
@@ -250,7 +253,7 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 			if shootPruneErr != nil {
 				logger.Error(shootPruneErr, "Failed to prune shoot orphans on degraded path")
 			}
-			r.setCondition(cr, reason, msg)
+			r.setCondition(cr, reason, msg, cr.Generation)
 			// finishNotReady (backoff==0) returns a requeue error; fold in the prune
 			// error so it is surfaced without overwriting the degraded condition.
 			res, ferr := r.finishNotReady(ctx, cr, prevSeedResources, shootStatuses, 0)
@@ -280,7 +283,9 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 	// 9. Write status.
 	cr.Status.SeedResources = seedStatuses
 	cr.Status.ShootResources = shootStatuses
-	cr.Status.Conditions = computeConditions(seedStatuses, shootStatuses)
+	readyCond := computeConditions(seedStatuses, shootStatuses)
+	readyCond.ObservedGeneration = cr.Generation
+	meta.SetStatusCondition(&cr.Status.Conditions, readyCond)
 	cr.Status.LastReconcile = &metav1.Time{Time: time.Now()}
 	if err := r.Status().Update(ctx, cr); err != nil {
 		return ctrl.Result{}, err
@@ -300,6 +305,19 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, cr *ddov1alpha1.DualDeploymentOperator) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	ownedBy := manifest.OwnedByValue(cr.Namespace, cr.Name)
+
+	meta.SetStatusCondition(&cr.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		Reason:             ReasonDeleting,
+		Message:            "CR deletion in progress",
+		ObservedGeneration: cr.Generation,
+	})
+	if uErr := r.Status().Update(ctx, cr); uErr != nil && !apierrors.IsNotFound(uErr) {
+		// A Conflict means our resourceVersion is stale; return so controller-runtime
+		// requeues with a fresh object and the Deleting condition is written on retry.
+		return ctrl.Result{}, uErr
+	}
 
 	deletable := func(statuses []ddov1alpha1.ResourceStatus) int {
 		n := 0
@@ -384,7 +402,7 @@ func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, 
 	default:
 		r.recordShootCleanupBlocked(cr, kerrors.NewAggregate(shootErrs))
 		if uErr := r.Status().Update(ctx, cr); uErr != nil {
-			logger.Error(uErr, "Failed to update status while blocked on shoot cleanup")
+			return ctrl.Result{}, uErr
 		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
@@ -454,13 +472,13 @@ func (r *DualDeploymentOperatorReconciler) applyAll(ctx context.Context, cluster
 
 // setCondition sets the Ready condition on cr (does not write to the API server;
 // the caller's status update persists it).
-func (r *DualDeploymentOperatorReconciler) setCondition(cr *ddov1alpha1.DualDeploymentOperator, reason, message string) {
+func (r *DualDeploymentOperatorReconciler) setCondition(cr *ddov1alpha1.DualDeploymentOperator, reason, message string, generation int64) {
 	meta.SetStatusCondition(&cr.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
 		Status:             metav1.ConditionFalse,
 		Reason:             reason,
 		Message:            message,
-		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: generation,
 	})
 }
 
@@ -472,10 +490,11 @@ func (r *DualDeploymentOperatorReconciler) recordShootUnreachable(cr *ddov1alpha
 			"RetainFinalizer", "%s", "Shoot API server unreachable during deletion; proceeding with seed cleanup and retaining finalizer")
 	}
 	meta.SetStatusCondition(&cr.Status.Conditions, metav1.Condition{
-		Type:    "Ready",
-		Status:  metav1.ConditionFalse,
-		Reason:  "ShootUnreachable",
-		Message: fmt.Sprintf("shoot unreachable during deletion: %v", err),
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		Reason:             "ShootUnreachable",
+		Message:            fmt.Sprintf("shoot unreachable during deletion: %v", err),
+		ObservedGeneration: cr.Generation,
 	})
 }
 
@@ -516,7 +535,7 @@ func (r *DualDeploymentOperatorReconciler) recordShootCleanupForceDeleted(cr *dd
 // errStatus sets a Ready=False condition with the given reason and returns a
 // requeue-with-backoff result (controller-runtime exponential backoff via returned error).
 func (r *DualDeploymentOperatorReconciler) errStatus(ctx context.Context, cr *ddov1alpha1.DualDeploymentOperator, reason string, err error) (ctrl.Result, error) {
-	r.setCondition(cr, reason, err.Error())
+	r.setCondition(cr, reason, err.Error(), cr.Generation)
 	cr.Status.LastReconcile = &metav1.Time{Time: time.Now()}
 	if uErr := r.Status().Update(ctx, cr); uErr != nil {
 		log.FromContext(ctx).Error(uErr, "Failed to update status", "reason", reason)
@@ -569,32 +588,29 @@ func allFailed(statuses []ddov1alpha1.ResourceStatus) bool {
 
 // computeConditions derives the Ready condition from the aggregated seed and shoot
 // resource statuses. Ready=True only when no resource is Degraded.
-func computeConditions(seed, shoot []ddov1alpha1.ResourceStatus) []metav1.Condition {
+func computeConditions(seed, shoot []ddov1alpha1.ResourceStatus) metav1.Condition {
 	if anyFailed(seed) || anyFailed(shoot) {
-		return []metav1.Condition{{
-			Type:               "Ready",
-			Status:             metav1.ConditionFalse,
-			Reason:             "ResourcesDegraded",
-			Message:            "one or more managed resources are in a Degraded state",
-			LastTransitionTime: metav1.Now(),
-		}}
+		return metav1.Condition{
+			Type:    "Ready",
+			Status:  metav1.ConditionFalse,
+			Reason:  "ResourcesDegraded",
+			Message: "one or more managed resources are in a Degraded state",
+		}
 	}
 	if anyProgressing(seed) || anyProgressing(shoot) {
-		return []metav1.Condition{{
-			Type:               "Ready",
-			Status:             metav1.ConditionFalse,
-			Reason:             "Progressing",
-			Message:            "one or more managed resources are still Progressing or Unknown",
-			LastTransitionTime: metav1.Now(),
-		}}
+		return metav1.Condition{
+			Type:    "Ready",
+			Status:  metav1.ConditionFalse,
+			Reason:  "Progressing",
+			Message: "one or more managed resources are still Progressing or Unknown",
+		}
 	}
-	return []metav1.Condition{{
-		Type:               "Ready",
-		Status:             metav1.ConditionTrue,
-		Reason:             "ReconcileSuccess",
-		Message:            "all managed resources applied successfully",
-		LastTransitionTime: metav1.Now(),
-	}}
+	return metav1.Condition{
+		Type:    "Ready",
+		Status:  metav1.ConditionTrue,
+		Reason:  "ReconcileSuccess",
+		Message: "all managed resources applied successfully",
+	}
 }
 
 func anyProgressing(statuses []ddov1alpha1.ResourceStatus) bool {
