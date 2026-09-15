@@ -39,6 +39,14 @@ githubWorkflow:
       - ubuntu-latest
     ignorePaths:
       - "**.md"
+  pushContainerToGhcr:
+    enabled: true
+    platforms: "linux/amd64"
+    tagStrategy:
+      - edge
+      - latest
+      - semver
+      - sha
   license:
     enabled: true
 
