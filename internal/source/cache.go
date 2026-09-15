@@ -1,146 +1,277 @@
-// SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company
-// Copyright 2026.
-//
-// SPDX-License-Identifier: Apache-2.0
-
 package source
 
 import (
 	"context"
-	"errors"
-
-	"sigs.k8s.io/controller-runtime/pkg/log"
-
-	v1alpha1 "github.com/SAP-cloud-infrastructure/dual-deployment-operator/api/v1alpha1"
-	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/internal/manifest"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+	"sync"
+	"time"
 )
 
-// resolveFunc resolves a source (for a mode) to its immutable id + repoScope.
-// It returns errUnkeyable to signal "skip caching, render fresh".
-type resolveFunc func(ctx context.Context, mode Mode) (id, scope string, err error)
+const (
+	// DefaultCacheSize is the default maximum cache size (500 MiB).
+	DefaultCacheSize = 500 * 1024 * 1024
+)
 
-// cachingSource decorates an inner Source with a render-result cache, keyed by
-// the resolved immutable content id (resolve-then-key). The cache is a pure
-// optimization: any resolve failure falls through to a direct inner render.
-type cachingSource struct {
-	inner      Source
-	cache      *renderCache
-	sourceKind string      // "helm" | "kustomize"
-	resolve    resolveFunc // closes over the loader's ResolveID + repoScope + url
-	inputHash  string      // precomputed static portion (values / paths); mode+namespace enter the key separately
+// SourceCache is the core caching abstraction for rendered sources.
+type SourceCache interface {
+	// Get retrieves a cached source by key.
+	// Returns the path to the cached content (may be a directory or file).
+	// If cache miss, returns ("", nil) (no error on miss).
+	Get(ctx context.Context, key string) (string, error)
+
+	// Put stores a source at the given key.
+	// Overwrites existing entry for that key.
+	Put(ctx context.Context, key string, srcPath string) error
+
+	// Keys returns all cached keys (for debugging, eviction decisions).
+	Keys(ctx context.Context) ([]string, error)
+
+	// Evict removes a key from the cache.
+	// Safe to call on non-existent key (idempotent).
+	Evict(ctx context.Context, key string) error
+
+	// Close releases resources (e.g., cleanup temp dirs).
+	Close() error
 }
 
-func (c *cachingSource) Render(ctx context.Context, mode Mode, namespace string) ([]manifest.Manifest, error) {
-	l := log.FromContext(ctx)
+// cacheEntry holds metadata for a cached source.
+type cacheEntry struct {
+	path       string
+	size       int64
+	lastAccess time.Time
+}
 
-	id, scope, err := c.resolve(ctx, mode)
-	switch {
-	case errors.Is(err, errUnkeyable):
-		l.V(1).Info("Source is unkeyable; rendering without cache", "kind", c.sourceKind)
-		return c.inner.Render(ctx, mode, namespace)
-	case err != nil:
-		l.V(1).Info("Resolve failed; rendering without cache", "kind", c.sourceKind, "err", err.Error())
-		return c.inner.Render(ctx, mode, namespace)
+// LRUCache is a thread-safe LRU cache implementation bounded by total size.
+type LRUCache struct {
+	mu        sync.RWMutex
+	entries   map[string]*cacheEntry
+	totalSize int64
+	maxSize   int64
+	basePath  string
+}
+
+// NewLRUCache creates a new LRU cache.
+// basePath: directory to store cached entries. If empty, uses os.TempDir().
+// maxSize: maximum total cache size in bytes. If <= 0, uses DefaultCacheSize.
+func NewLRUCache(basePath string, maxSize int64) (*LRUCache, error) {
+	if basePath == "" {
+		basePath = os.TempDir()
+	}
+	if maxSize <= 0 {
+		maxSize = DefaultCacheSize
 	}
 
-	l.Info("Resolved source", "kind", c.sourceKind, "id", id) // E1 audit line
-
-	key := keyParts{
-		sourceKind: c.sourceKind,
-		repoScope:  scope,
-		resolvedID: id,
-		mode:       string(mode),
-		inputHash:  c.inputHash,
-		namespace:  namespace,
-	}.String()
-
-	if m, ok := c.cache.get(key); ok {
-		l.V(1).Info("Render cache hit", "kind", c.sourceKind, "mode", string(mode), "resolvedID", id, "cache", "hit")
-		return m, nil
+	// Ensure basePath exists
+	if err := os.MkdirAll(basePath, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create cache directory %q: %w", basePath, err)
 	}
-	m, err := c.inner.Render(ctx, mode, namespace)
+
+	return &LRUCache{
+		entries:   make(map[string]*cacheEntry),
+		totalSize: 0,
+		maxSize:   maxSize,
+		basePath:  basePath,
+	}, nil
+}
+
+// Get retrieves a cached source by key.
+// Updates lastAccess time on hit.
+// Returns ("", nil) on miss.
+func (c *LRUCache) Get(ctx context.Context, key string) (string, error) {
+	// Check context cancellation
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	default:
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entry, ok := c.entries[key]
+	if !ok {
+		return "", nil // cache miss
+	}
+
+	// Update lastAccess (LRU tracking)
+	entry.lastAccess = time.Now()
+	return entry.path, nil
+}
+
+// Put stores a source at the given key.
+// Calculates entry size, evicts LRU entries if totalSize > maxSize.
+func (c *LRUCache) Put(ctx context.Context, key string, srcPath string) error {
+	// Check context cancellation
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Calculate size of srcPath
+	size, err := c.dirSize(srcPath)
 	if err != nil {
-		return nil, err // never cache failures
+		return fmt.Errorf("failed to calculate size of %q: %w", srcPath, err)
 	}
-	c.cache.put(key, m)
-	l.V(1).Info("Render cache miss stored", "kind", c.sourceKind, "mode", string(mode), "resolvedID", id, "cache", "miss")
-	return m, nil
+
+	// If key already exists, subtract its size first
+	if existing, ok := c.entries[key]; ok {
+		c.totalSize -= existing.size
+		// Remove old path from disk
+		if err := os.RemoveAll(existing.path); err != nil {
+			// Log but don't fail
+			fmt.Printf("warning: failed to remove old cache entry %q: %v\n", existing.path, err)
+		}
+	}
+
+	// Create new entry
+	newEntry := &cacheEntry{
+		path:       srcPath,
+		size:       size,
+		lastAccess: time.Now(),
+	}
+	c.entries[key] = newEntry
+	c.totalSize += size
+
+	// Evict LRU entries if over limit
+	for c.totalSize > c.maxSize && len(c.entries) > 0 {
+		c.evictLRU()
+	}
+
+	return nil
 }
 
-// wrapHelm returns a cachingSource wrapping a helm inner Source, or the inner
-// unwrapped when cache is nil or the loader isn't the production *helmLoader
-// (fakes/tests get the uncached path automatically).
-func wrapHelm(inner Source, loader ChartLoader, spec *v1alpha1.HelmSource, cache *renderCache) Source {
-	hl, ok := loader.(*helmLoader)
-	if !ok || cache == nil {
-		return inner
+// Keys returns all cached keys in sorted order.
+func (c *LRUCache) Keys(ctx context.Context) ([]string, error) {
+	// Check context cancellation
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
 	}
-	// inputHash covers static (name, version) + BOTH mode-specific merged values.
-	// mode is a key dimension separately, but its 4-byte value ("seed"/"shoot")
-	// cannot carry actual values content, so mode-specific values MUST also enter
-	// inputHash — otherwise a CR that changes seedValues (all other dimensions
-	// stable) would key identically and serve a stale render. Folding both modes
-	// in at wrap time is intentional: a change to shootValues bumps the seed key
-	// too (one wasted re-render on next seed reconcile), a harmless correctness
-	// margin over per-mode hashing.
-	base := map[string]any{"name": spec.Name, "version": spec.Version}
-	if seed, err := mergeValues(spec.Values, spec.SeedValues); err == nil {
-		base["seedValues"] = seed
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	keys := make([]string, 0, len(c.entries))
+	for k := range c.entries {
+		keys = append(keys, k)
 	}
-	if shoot, err := mergeValues(spec.Values, spec.ShootValues); err == nil {
-		base["shootValues"] = shoot
+	sort.Strings(keys)
+	return keys, nil
+}
+
+// Evict removes a key from the cache.
+// Idempotent: safe to call on non-existent key.
+func (c *LRUCache) Evict(ctx context.Context, key string) error {
+	// Check context cancellation
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
 	}
-	return &cachingSource{
-		inner:      inner,
-		cache:      cache,
-		sourceKind: "helm",
-		inputHash:  hashValues(base),
-		resolve: func(ctx context.Context, _ Mode) (string, string, error) {
-			scope, err := hl.repoScope(spec.Repo)
-			if err != nil {
-				return "", "", err
-			}
-			id, err := hl.ResolveID(ctx, spec.Repo, spec.Name, spec.Version)
-			if err != nil {
-				return "", "", err
-			}
-			return id, scope, nil
-		},
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entry, ok := c.entries[key]
+	if !ok {
+		return nil // idempotent: no error on non-existent key
+	}
+
+	// Remove from map
+	delete(c.entries, key)
+
+	// Decrement totalSize
+	c.totalSize -= entry.size
+
+	// Remove directory/file from disk
+	if err := os.RemoveAll(entry.path); err != nil {
+		return fmt.Errorf("failed to remove cache entry %q: %w", entry.path, err)
+	}
+
+	return nil
+}
+
+// Close releases all cache resources.
+// Walks basePath and removes all entries from disk.
+func (c *LRUCache) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Remove all entries from disk
+	for key, entry := range c.entries {
+		if err := os.RemoveAll(entry.path); err != nil {
+			fmt.Printf("warning: failed to remove cache entry %q during Close: %v\n", entry.path, err)
+		}
+		delete(c.entries, key)
+	}
+
+	c.totalSize = 0
+	return nil
+}
+
+// evictLRU removes the least-recently-used entry (must hold lock).
+func (c *LRUCache) evictLRU() {
+	var lruKey string
+	var lruTime time.Time
+
+	// Find entry with earliest lastAccess
+	for k, entry := range c.entries {
+		if lruTime.IsZero() || entry.lastAccess.Before(lruTime) {
+			lruKey = k
+			lruTime = entry.lastAccess
+		}
+	}
+
+	if lruKey != "" {
+		entry := c.entries[lruKey]
+		delete(c.entries, lruKey)
+		c.totalSize -= entry.size
+
+		// Remove from disk
+		if err := os.RemoveAll(entry.path); err != nil {
+			fmt.Printf("warning: failed to remove LRU evicted entry %q: %v\n", entry.path, err)
+		}
 	}
 }
 
-// wrapKustomize returns a cachingSource wrapping a kustomize inner Source, or
-// the inner unwrapped when cache is nil or the resolver isn't the production
-// *gitResolver.
-func wrapKustomize(inner Source, resolver RootResolver, spec *v1alpha1.KustomizeSource, cache *renderCache) Source {
-	gr, ok := resolver.(*gitResolver)
-	if !ok || cache == nil {
-		return inner
+// dirSize recursively calculates the size of a directory or file.
+func (c *LRUCache) dirSize(path string) (int64, error) {
+	// Check if path is a file first (faster path)
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, fmt.Errorf("failed to stat %q: %w", path, err)
 	}
-	// Include the URL //root subpath alongside the mode paths. splitRef may fail
-	// (bad URL); the resolve func surfaces that as a real error later, so at wrap
-	// time we fall back to an empty rootSubPath rather than panicking. Two CRs
-	// whose ONLY difference is the //root would otherwise share a key even though
-	// they render different content.
-	var rootSubPath string
-	if _, sub, _, err := splitRef(spec.URL); err == nil {
-		rootSubPath = sub
+
+	if !info.IsDir() {
+		return info.Size(), nil
 	}
-	return &cachingSource{
-		inner:      inner,
-		cache:      cache,
-		sourceKind: "kustomize",
-		inputHash:  hashValues(map[string]any{"rootSubPath": rootSubPath, "seedPath": spec.SeedPath, "shootPath": spec.ShootPath}),
-		resolve: func(ctx context.Context, _ Mode) (string, string, error) {
-			scope, err := gr.repoScope(spec.URL)
+
+	// Walk directory tree
+	var totalSize int64
+	err = filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !d.IsDir() {
+			info, err := d.Info()
 			if err != nil {
-				return "", "", err
+				return err
 			}
-			id, err := gr.ResolveID(ctx, spec.URL, ModeSeed) // mode irrelevant for git id
-			if err != nil {
-				return "", "", err
-			}
-			return id, scope, nil
-		},
-	}
+			totalSize += info.Size()
+		}
+
+		return nil
+	})
+
+	return totalSize, err
 }
