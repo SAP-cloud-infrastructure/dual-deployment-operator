@@ -10,10 +10,11 @@
 # workflow produced on the last push to main.
 #
 # Usage:
-#   scripts/mirror-image-to-keppel.sh [TAG ...]
+#   scripts/mirror-image-to-keppel.sh [--all | TAG ...]
 #
 # With no arguments it mirrors the default GHCR tag set: latest, edge, and the
 # long git-sha tag for the current HEAD (sha-<full-sha>) if it exists.
+# With --all it lists and mirrors every tag in the GHCR repository.
 # Otherwise it mirrors exactly the tags you pass, e.g.:
 #   scripts/mirror-image-to-keppel.sh v0.1.0 latest
 #
@@ -80,7 +81,14 @@ fi
 
 # --- Determine which tags to mirror ------------------------------------------
 tags=()
-if [[ $# -gt 0 ]]; then
+if [[ "${1:-}" == "--all" ]]; then
+  [[ "${COPY_BACKEND}" == "crane" ]] || die "--all requires the crane backend (docker cannot list registry tags)"
+  log "Listing all tags in ${SRC_IMAGE}"
+  while IFS= read -r t; do
+    [[ -n "${t}" ]] && tags+=("${t}")
+  done < <(crane ls "${SRC_IMAGE}")
+  [[ "${#tags[@]}" -gt 0 ]] || die "no tags found in ${SRC_IMAGE} (check GHCR auth)"
+elif [[ $# -gt 0 ]]; then
   tags=("$@")
 else
   log "No tags given; using default GHCR tag set"
