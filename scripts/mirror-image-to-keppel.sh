@@ -104,12 +104,13 @@ log "Tags to mirror: ${tags[*]}"
 # problem (private GHCR package + missing read:packages), NOT a missing tag —
 # those must fail loudly rather than be silently skipped.
 src_probe() {
-  local ref="$1" out
-  case "${COPY_BACKEND}" in
-    crane)  out="$(crane manifest "${ref}" 2>&1 >/dev/null)" ;;
-    docker) out="$(docker manifest inspect "${ref}" 2>&1 >/dev/null)" ;;
-  esac
-  if [[ $? -eq 0 ]]; then
+  local ref="$1" out rc
+  if [[ "${COPY_BACKEND}" == "crane" ]]; then
+    out="$(crane manifest "${ref}" 2>&1 >/dev/null)"; rc=$?
+  else
+    out="$(docker manifest inspect "${ref}" 2>&1 >/dev/null)"; rc=$?
+  fi
+  if [[ "${rc}" -eq 0 ]]; then
     echo present; return
   fi
   if grep -qiE 'denied|unauthorized|forbidden|authentication' <<<"${out}"; then
