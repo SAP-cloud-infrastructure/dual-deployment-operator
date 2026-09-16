@@ -32,4 +32,12 @@ WORKDIR /
 COPY --from=builder /workspace/manager .
 USER 65532:65532
 
+# Keppel's account validation policy requires a `source_repository` manifest
+# label (or an in-toto attestation layer) to accept a push. This is a custom
+# Keppel label key, distinct from org.opencontainers.image.source. The
+# org.opencontainers.image.{created,revision,version} labels are injected at
+# build time by docker/metadata-action in CI, so they are not set here.
+LABEL source_repository="https://github.com/SAP-cloud-infrastructure/dual-deployment-operator" \
+  org.opencontainers.image.url="https://github.com/SAP-cloud-infrastructure/dual-deployment-operator"
+
 ENTRYPOINT ["/manager"]
