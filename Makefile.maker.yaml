@@ -47,6 +47,16 @@ githubWorkflow:
       - latest
       - semver
       - sha
+  pushHelmChartToGhcr:
+    # Packages chart/ and pushes it as an OCI artifact to
+    # oci://ghcr.io/SAP-cloud-infrastructure/charts. Chart version + appVersion are
+    # auto-derived from the pushContainerToGhcr semver/sha strategy above, so the chart
+    # stays in lockstep with the image it deploys (manager.yaml already resolves the image
+    # tag via `.Chart.AppVersion`).
+    path: chart
+    # dependencyUpdate: the kubebuilder-generated chart has no subchart dependencies; disable
+    # so `helm dependency update` does not run against an empty dependencies list.
+    dependencyUpdate: false
   license:
     enabled: true
 

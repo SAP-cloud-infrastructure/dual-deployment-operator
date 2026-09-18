@@ -60,6 +60,7 @@
         ".github/workflows/checks.yaml",
         ".github/workflows/ci.yaml",
         ".github/workflows/codeql.yaml",
+        ".github/workflows/helm-oci-package-ghcr.yaml",
         ".github/workflows/container-registry-ghcr.yaml"
       ],
       "enabled": false
