@@ -70,4 +70,12 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
       - name: Push Helm Chart to ghcr.io
-        run: helm push ./chart/*.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
+        # MANUAL PATCH (re-apply after any go-makefile-maker regeneration):
+        # OCI/GHCR repository references must be lowercase, but github.repository_owner
+        # ("SAP-cloud-infrastructure") is mixed-case, so the upstream maker template's
+        # `oci://ghcr.io/${{ github.repository_owner }}/charts` is rejected by `helm push`
+        # (invalid reference). Lowercase the owner with tr before the push.
+        # Upstream bug: sapcc/go-makefile-maker internal/ghworkflow/workflow_helm.go.
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          helm push ./chart/*.tgz "oci://ghcr.io/${OWNER}/charts"
