@@ -1888,3 +1888,11 @@ These changes happen in `sapcc/helm-charts`, not in this operator repo, but they
 - Verify webhook-injector uses distinct SSA field manager (small injector code change if not)
 
 Do the operator work first (Phases 0-8, plus chart 1 in this repo at Phase 9); chart 2 and the source restructures in `sapcc/helm-charts` follow once the operator is validated against today's chart output in equivalence tests.
+
+## Phase 11: Chart-Side Publish Constraints & Workflow Considerations
+
+**Finding (go-makefile-maker `1975bb0dd4cf`):** The `PushHelmChartToGhcr` task in go-makefile-maker lacks a path-filter field (e.g., `ignorePaths`). Chart republish is triggered **solely by versioning strategy** (`semver` vs `sha`). A semver version constraint prevents overwrite on non-version-bump pushes; `sha` versioning republishes the chart on every main push regardless of chart-only changes.
+
+**Implication:** If this operator uses semver versioning (Recommended), chart-only main pushes skip republish by design—no action required. If using `sha` versioning and manual publish filtering is desired, a workflow-level gate (e.g., `push.paths` in `.github/workflows/publish-chart.yaml`) must be hand-authored; the go-makefile-maker toolchain cannot provide this.
+
+**Recommendation:** Verify `Makefile.maker.yaml` versioning strategy (likely `semver`, which is safe). If `sha` versioning is chosen and chart-only filtering is critical for cost/frequency, document the manual workflow patch requirement in the chart distribution runbook.
