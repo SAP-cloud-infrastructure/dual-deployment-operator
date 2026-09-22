@@ -16,7 +16,7 @@ manager:
   replicas: 1
 
   image:
-    repository: ghcr.io/SAP-cloud-infrastructure/dual-deployment-operator
+    repository: ghcr.io/sap-cloud-infrastructure/dual-deployment-operator
     ## Image tag (defaults to Chart.appVersion if not set)
     ##
     # tag: ""
@@ -168,7 +168,7 @@ rbac:
 ## applies its shoot render as that SA, which cannot grant itself RBAC.
 ## Off by default; the wrapper chart enables it and supplies the SA values.
 shootRbac:
-  enabled: false
+  enabled: true
   ## Token-requestor ServiceAccount the operator applies the shoot render AS — the
   ## operator's OWN applier identity. MUST be dedicated to the operator, NOT a
   ## ServiceAccount that any workload render also creates/deletes: the operator
