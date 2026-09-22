@@ -37,7 +37,7 @@ USER 65532:65532
 # Keppel label key, distinct from org.opencontainers.image.source. The
 # org.opencontainers.image.{created,revision,version} labels are injected at
 # build time by docker/metadata-action in CI, so they are not set here.
-LABEL source_repository="https://github.com/SAP-cloud-infrastructure/dual-deployment-operator" \
-  org.opencontainers.image.url="https://github.com/SAP-cloud-infrastructure/dual-deployment-operator"
+LABEL source_repository="https://github.com/sap-cloud-infrastructure/dual-deployment-operator" \
+  org.opencontainers.image.url="https://github.com/sap-cloud-infrastructure/dual-deployment-operator"
 
 ENTRYPOINT ["/manager"]
