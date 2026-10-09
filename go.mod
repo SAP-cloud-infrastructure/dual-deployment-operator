@@ -8,7 +8,7 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.5
 	github.com/onsi/ginkgo/v2 v2.28.1
 	github.com/onsi/gomega v1.39.1
-	helm.sh/helm/v3 v3.21.3
+	helm.sh/helm/v4 v4.3.0
 	k8s.io/api v0.36.2
 	k8s.io/apiextensions-apiserver v0.36.2
 	k8s.io/apimachinery v0.36.2
