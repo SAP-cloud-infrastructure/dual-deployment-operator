@@ -91,6 +91,13 @@ func (r *DualDeploymentOperatorReconciler) buildShootApplierOrDefault(ctx contex
 // +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations;mutatingwebhookconfigurations,verbs=get;list;watch;create;update;patch;delete
 
+// Observability objects a seed render can carry (Prometheus-operator CRDs).
+// Operand charts commonly ship PrometheusRule/ServiceMonitor; the operator applies
+// them to the seed with its own SA, so it must be able to manage them. servicemonitors
+// and podmonitors are included alongside prometheusrules so enabling prometheus.enable
+// on any future operand does not reopen the same gap.
+// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=prometheusrules;servicemonitors;podmonitors,verbs=get;list;watch;create;update;patch;delete
+
 func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -661,7 +668,12 @@ func (r *DualDeploymentOperatorReconciler) prune(
 		m := deliver.ManifestFromStatus(rs)
 		live, err := applier.Get(ctx, m)
 		if err != nil {
-			if apierrors.IsNotFound(err) {
+			// NotFound: the object is already gone. NoMatch (meta.IsNoMatchError): the
+			// orphan's kind has no REST mapping on the target (no CRD / CRD removed), so
+			// the object cannot exist there — e.g. a PrometheusRule orphan on a shoot with
+			// no Prometheus-operator CRDs. In both cases there is nothing to delete, so drop
+			// the orphan from status instead of retaining it as a degraded error forever.
+			if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
 				continue
 			}
 			errs = append(errs, err)
