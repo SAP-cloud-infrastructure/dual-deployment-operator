@@ -154,6 +154,36 @@ Lands as a **new phase after Phase 10** in `docs/implementation.md`. Per the
 not-started-phase scoping rule, it does not edit any completed or ongoing phase;
 cross-references to Phase 9 (egress labels) are additive notes only.
 
+### D9 — All prefetch scratch I/O roots under `--source-scratch-dir` (chart emptyDir)
+
+The prefetch engine writes a lot of scratch: per-base fetched checkouts plus the
+materialized staging tree. The pod runs with `securityContext.readOnlyRootFilesystem:
+true` and mounts exactly one writable volume — the `source-scratch` emptyDir at
+`/var/run/ddo-source`, passed as `--source-scratch-dir` (chart `values.yaml`). The
+Helm loader already roots its temp dirs there (`helmLoader.newScratchDir()` →
+`os.MkdirTemp(scratchDir, …)`). **The kustomize `gitResolver` does NOT**: it calls
+`os.MkdirTemp("", "ddo-kustomize-")`, which resolves to `os.TempDir()` (`/tmp`) — a
+path that is **not** mounted writable, so the production kustomize path fails closed on
+a read-only rootfs. This is a pre-existing latent gap that the prefetch work would
+inherit and worsen.
+
+Decision: thread `--source-scratch-dir` into the kustomize resolver exactly as the
+Helm loader does — `NewGitResolver(scratchDir)` stores the base and every
+`os.MkdirTemp` (root checkout, per-base checkouts, staging tree) uses it; empty string
+preserves the `os.TempDir()` default for tests/local runs. The chart's existing
+`source-scratch` emptyDir is **reused** (shared by Helm and kustomize); its
+`sizeLimit` (currently `256Mi`) and the mount comment are revisited because the
+staging tree + transitive base checkouts raise the kustomize-path footprint. **No new
+volume** is introduced. **Alternative rejected**: a second dedicated kustomize scratch
+volume — unnecessary duplication; one writable scratch mount is the established
+pattern. **Alternative rejected**: mounting an emptyDir at `/tmp` — broader surface and
+diverges from the explicit `--source-scratch-dir` contract the Helm loader already
+honors.
+
+Cleanup discipline is unchanged: each `Resolve`/prefetch returns a `cleanup` that
+`RemoveAll`s its scratch subtree, so the bounded emptyDir does not accumulate across
+reconciles.
+
 ## Risks / Trade-offs
 
 - **Kustomize-internal API churn across versions** → Pin to the stable boundary
@@ -178,6 +208,11 @@ cross-references to Phase 9 (egress labels) are additive notes only.
 - **BREAKING for authors who relied on an unpinned remote base building today** →
   intended: such a build was never reproducible. Surface a clear CEL/resolver error
   naming the missing pin.
+- **Read-only rootfs scratch exhaustion / write failure** → All prefetch scratch roots
+  under the single writable `source-scratch` emptyDir (D9); the pre-existing
+  `gitResolver` `os.TempDir()` write (which fails on the read-only rootfs) is fixed in
+  the same change. The emptyDir `sizeLimit` is revisited for the larger kustomize
+  footprint, and per-reconcile `cleanup` bounds accumulation.
 
 ## Migration Plan
 
@@ -185,8 +220,12 @@ cross-references to Phase 9 (egress labels) are additive notes only.
    kustomize path — operands with **no** remote bases are byte-unaffected (the tree
    has nothing to rewrite; render is identical).
 2. Add the CEL pin-enforcement marker; `make manifests` regenerates CRDs.
-3. Document the authoring guidance + divergence gate in the `source.kustomize` docs.
-4. No data migration; no live-object churn for existing operands (same render → same
+3. Thread `--source-scratch-dir` into `NewGitResolver`; revisit the chart
+   `source-scratch` emptyDir `sizeLimit` for the kustomize footprint (reuse the
+   existing volume — no new mount). This also fixes the pre-existing read-only-rootfs
+   write failure on the kustomize path.
+4. Document the authoring guidance + divergence gate in the `source.kustomize` docs.
+5. No data migration; no live-object churn for existing operands (same render → same
    SSA → same UIDs). Rollback = revert the change; vendored operands keep working
    throughout since they carry no remote bases.
 

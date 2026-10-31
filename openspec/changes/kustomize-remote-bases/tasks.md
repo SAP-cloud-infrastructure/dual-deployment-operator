@@ -41,22 +41,29 @@ SPDX-License-Identifier: Apache-2.0
 - [ ] 5.3 Write failing tests wiring the kustomize renderer to run prefetch→stage→preflight before `krusty` only when remote bases are present, build the staging tree with plugins disabled, and otherwise build the resolved root directly; assert no network egress on a localized tree and byte-identical output when no remote bases
 - [ ] 5.4 Implement renderer wiring in `internal/source/kustomize.go` per source-rendering MODIFIED spec; make 5.3 green; confirm plugins stay disabled (no alpha/exec plugins)
 
-## 6. CEL + CRD regeneration
+## 6. Scratch directory + chart (read-only rootfs)
 
-- [ ] 6.1 Confirm (with a test/CR fixture) the existing root-URL `?ref=` CEL rule still gates the root; document that transitive-base pinning is a render-time (resolver) gate per the cel-admission-validation MODIFIED spec
-- [ ] 6.2 If any marker changed, run `make manifests generate` and verify only generated CRD/RBAC files changed as expected
+- [ ] 6.1 Write a failing test that `NewGitResolver(scratchDir)` roots the root checkout under `scratchDir` (and falls back to `os.TempDir()` when empty), mirroring `helmLoader.newScratchDir()`
+- [ ] 6.2 Add a `scratchDir` field to `gitResolver`, change `NewGitResolver()` → `NewGitResolver(scratchDir string)`, base every `os.MkdirTemp` on it, and wire `sourceScratchDir` at the `cmd/main.go` construction site (line ~206); update all `NewGitResolver()` callers/tests; make 6.1 green
+- [ ] 6.3 Write failing tests that per-base checkouts and the staging tree are created under the configured scratch dir (not `os.TempDir()`) and are removed by `cleanup`; make green via the prefetch engine from groups 2 & 4
+- [ ] 6.4 Reuse the existing `source-scratch` emptyDir for the kustomize path (no new volume); re-evaluate its `sizeLimit` (currently `256Mi`) for the transitive-base + staging-tree footprint and update the chart `values.yaml` mount comment to cover the kustomize loader; verify `make manifests`/chart regen leaves no unexpected diff
 
-## 7. Equivalence / integration coverage
+## 7. CEL + CRD regeneration
 
-- [ ] 7.1 Add an integration test using the `ipam-capi-remote` worked example (remote base pinned to a SHA) that renders fully offline through prefetch→stage→preflight→krusty and matches the expected manifest set
-- [ ] 7.2 Verify the shared-base and moved-tag cache scenarios end-to-end against the render path
+- [ ] 7.1 Confirm (with a test/CR fixture) the existing root-URL `?ref=` CEL rule still gates the root; document that transitive-base pinning is a render-time (resolver) gate per the cel-admission-validation MODIFIED spec
+- [ ] 7.2 If any marker changed, run `make manifests generate` and verify only generated CRD/RBAC files changed as expected
 
-## 8. Docs + phase wiring
+## 8. Equivalence / integration coverage
 
-- [ ] 8.1 Document `source.kustomize` remote-base authoring guidance, including the BREAKING requirement that remote bases carry an immutable pinned `?ref=`, and the live-vs-upstream divergence authoring gate (only point at upstream when upstream == deployed shape; reference the `ipam-capi-remote` example)
-- [ ] 8.2 Add a NEW phase AFTER Phase 10 in `docs/implementation.md` capturing this change (do NOT edit completed/ongoing phases); add additive cross-reference notes to Phase 9 egress labels without editing Phase 9
+- [ ] 8.1 Add an integration test using the `ipam-capi-remote` worked example (remote base pinned to a SHA) that renders fully offline through prefetch→stage→preflight→krusty and matches the expected manifest set
+- [ ] 8.2 Verify the shared-base and moved-tag cache scenarios end-to-end against the render path
 
-## 9. Full gate
+## 9. Docs + phase wiring
 
-- [ ] 9.1 Run `go build ./...`, `KUBEBUILDER_ASSETS=$(setup-envtest use 1.36 -p path) go test ./...`, and `make run-golangci-lint`; fix new-code findings (re-verify any "pre-existing" claim against this change's own diff)
-- [ ] 9.2 Run `openspec validate kustomize-remote-bases --strict` and resolve any issues
+- [ ] 9.1 Document `source.kustomize` remote-base authoring guidance, including the BREAKING requirement that remote bases carry an immutable pinned `?ref=`, and the live-vs-upstream divergence authoring gate (only point at upstream when upstream == deployed shape; reference the `ipam-capi-remote` example)
+- [ ] 9.2 Add a NEW phase AFTER Phase 10 in `docs/implementation.md` capturing this change (do NOT edit completed/ongoing phases); add additive cross-reference notes to Phase 9 (egress labels AND the shared `source-scratch` emptyDir sizing) without editing Phase 9
+
+## 10. Full gate
+
+- [ ] 10.1 Run `go build ./...`, `KUBEBUILDER_ASSETS=$(setup-envtest use 1.36 -p path) go test ./...`, and `make run-golangci-lint`; fix new-code findings (re-verify any "pre-existing" claim against this change's own diff)
+- [ ] 10.2 Run `openspec validate kustomize-remote-bases --strict` and resolve any issues

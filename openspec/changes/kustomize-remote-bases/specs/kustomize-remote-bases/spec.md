@@ -136,3 +136,32 @@ preflight MUST guarantee the subsequent `krusty` build performs no network egres
 - **WHEN** the staged tree contains only local references and passes preflight
 - **THEN** krusty builds the tree with no network egress
 - **AND** plugins remain disabled throughout
+
+### Requirement: Prefetch scratch I/O is rooted under the configured scratch directory
+
+All writable scratch the prefetch engine produces — per-base git checkouts and the
+materialized staging tree — MUST be created under the operator's configured source
+scratch directory (`--source-scratch-dir`), the same single writable volume the Helm
+loader uses, so the kustomize render path works under
+`securityContext.readOnlyRootFilesystem: true`. When the scratch directory is empty
+(unset), the operator MUST fall back to the OS temp directory (`os.TempDir()`) for
+local runs and tests. Every scratch subtree MUST be removed by a `cleanup` after the
+render so the bounded volume does not accumulate across reconciles. The operator MUST
+NOT write prefetch scratch to any path outside the configured scratch directory when
+one is set.
+
+#### Scenario: staging tree and base checkouts honor the scratch directory
+
+- **WHEN** `--source-scratch-dir` is set to the writable `source-scratch` mount and a kustomize operand with remote bases is rendered
+- **THEN** every per-base checkout and the staging tree are created under that directory
+- **AND** no prefetch scratch is written to `os.TempDir()` or any read-only path
+
+#### Scenario: empty scratch directory falls back to the OS temp dir
+
+- **WHEN** `--source-scratch-dir` is empty
+- **THEN** prefetch scratch is created under `os.TempDir()` (local/test behavior)
+
+#### Scenario: scratch is cleaned up after the render
+
+- **WHEN** a render that materialized a staging tree completes (success or failure)
+- **THEN** the `cleanup` removes the staging tree and all per-base checkouts it created
