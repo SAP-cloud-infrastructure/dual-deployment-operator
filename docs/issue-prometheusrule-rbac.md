@@ -87,6 +87,15 @@ CR went `Ready=True`. With this fix it would self-heal.
   so a phantom entry self-heals instead of pinning the CR `Degraded` forever. Covered by
   unit tests in `internal/controller/prune_nomatch_test.go`.
 
+### Gap 3 correction (PR #59)
+
+The PR #57 shortcut above is superseded: a missing REST mapping can mean only the
+stored API version is no longer served, while the resource still exists through
+another version. `prune()` therefore retains inventory and reports `NoMatch`
+errors; only `IsNotFound` establishes absence. This avoids silently orphaning
+resources, at the cost of leaving genuinely removed kinds pending until their
+absence is independently established.
+
 ---
 
 # Gap 2 — resolution decision (2026-10-29, oracle-reviewed)
