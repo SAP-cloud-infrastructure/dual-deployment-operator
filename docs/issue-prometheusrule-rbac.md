@@ -86,3 +86,53 @@ CR went `Ready=True`. With this fix it would self-heal.
   same as `apierrors.IsNotFound(err)` (nothing to delete → drop the orphan from status),
   so a phantom entry self-heals instead of pinning the CR `Degraded` forever. Covered by
   unit tests in `internal/controller/prune_nomatch_test.go`.
+
+---
+
+# Gap 2 — resolution decision (2026-10-29, oracle-reviewed)
+
+**Decision: fix in the DDO install chart's shoot-rbac bootstrap via an explicit static
+`shootApplier.extraRules` hook. NOT operand-render-carried RBAC, NOT dynamic derivation.**
+
+## Mechanism
+- Extend the GRM-managed `dual-deployment-operator-shoot-applier` ClusterRole bootstrap
+  with a values hook, e.g. `shootRbac.shootApplier.extraRules: []`, appended to the
+  fixed base rules.
+- For shoots running argora, supply the reviewed rule (deployment config, per enabled
+  operand — not fleet-wide union):
+  ```yaml
+  shootRbac:
+    shootApplier:
+      extraRules:
+        - apiGroups: ["argora.cloud.sap"]
+          resources: ["clusterimports", "ippoolimports", "updates"]
+          verbs: ["get","list","watch","create","update","patch","delete"]
+  ```
+  Only the plurals actually delivered; only verbs apply/health/prune need; no wildcards,
+  no `/status` unless required.
+
+## Why B (not A = operand render emitting its own ClusterRole/Binding for the applier)
+The component that provisions the applier identity should own its authorization. A makes
+an operand render authorize its own execution and normalizes exercising the applier's
+existing `bind;escalate` from chart content — conflating "the chart contains this CRD"
+with "the admin authorizes managing its instances." B keeps applier permissions
+explicit, in one operator-owned, independently-reviewable place.
+(Note: A's privilege-escalation concern is about normalization — the applier ALREADY has
+unrestricted ClusterRole/Binding writes + bind + escalate, so the fixed allowlist is not
+a real security ceiling today. Hardening that is a separate consideration.)
+
+## Correctness gates (MUST handle)
+1. **Bootstrap-first ordering:** apply the updated shoot-applier ClusterRole, then VERIFY
+   effective authorization using the shoot-applier identity (SelfSubjectAccessReview or a
+   probe), retrying for propagation, BEFORE applying the operand's CR instances. Render
+   order / object existence alone is insufficient (RBAC caches propagate async).
+2. **Teardown/permission-reduction ordering:** retain the grant until the dependent CR
+   instances are deleted (or explicitly retained) and prune/finalization completes.
+   Revoking first makes cleanup permanently `forbidden`.
+3. **Shared identity:** all operands on a shoot share one applier SA → it inherits the
+   UNION of grants. B improves ownership/auditability, not per-operand isolation.
+4. **Test a CLEAN bootstrap** (no manual patch): the live manual shoot-applier patch on
+   a-qa-de-200 (argora.cloud.sap verbs) currently masks the missing durable grant — a
+   from-scratch install must grant it via the hook, not rely on the patch.
+
+Ref: Kubernetes RBAC good practices (explicit least-privilege; bind/escalate risks).
