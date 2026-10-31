@@ -212,7 +212,7 @@ func TestWithGitCredsBindsFreshResolver(t *testing.T) {
 	ref := &v1alpha1.SecretReference{Name: "s"}
 
 	gr := &gitResolver{} // original: resolve is nil
-	got := withGitCreds(gr, cr, ref)
+	got := withGitCreds(gr, cr, ref, "https://example.com/root?ref=v1")
 
 	// Must return a DIFFERENT pointer (fresh copy, not mutation of shared instance).
 	gotGR, ok := got.(*gitResolver)
@@ -230,7 +230,7 @@ func TestWithGitCredsBindsFreshResolver(t *testing.T) {
 
 	// Calling resolve must return the correct credentials from the Secret.
 	ctx := context.Background()
-	c, err := gotGR.resolve(ctx, "")
+	c, err := gotGR.resolve(ctx, gitOrigin{scheme: "https", hostname: "example.com", port: "443"})
 	if err != nil {
 		t.Fatalf("resolve: unexpected error: %v", err)
 	}
@@ -258,7 +258,7 @@ func TestWithGitCredsNoOpBranches(t *testing.T) {
 
 	// cr == nil => returns same instance unchanged.
 	t.Run("nil cr returns same instance", func(t *testing.T) {
-		got := withGitCreds(gr, nil, ref)
+		got := withGitCreds(gr, nil, ref, "https://example.com/root?ref=v1")
 		if got != gr {
 			t.Fatal("withGitCreds(gr, nil, ref): expected same instance, got different")
 		}
@@ -267,7 +267,7 @@ func TestWithGitCredsNoOpBranches(t *testing.T) {
 	// non-*gitResolver RootResolver => returns the fake unchanged.
 	t.Run("non-gitResolver returns same instance", func(t *testing.T) {
 		fakeRR := fakeRootResolver{baseDir: "/tmp"}
-		got := withGitCreds(fakeRR, cr, ref)
+		got := withGitCreds(fakeRR, cr, ref, "https://example.com/root?ref=v1")
 		if got != fakeRR {
 			t.Fatal("withGitCreds(fakeRootResolver, cr, ref): expected same fake instance returned")
 		}

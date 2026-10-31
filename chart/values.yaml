@@ -107,6 +107,11 @@ manager:
   ## Writable scratch volume for the Helm/kustomize source loader. REQUIRED because
   ## securityContext.readOnlyRootFilesystem is true: the loader's os.MkdirTemp under
   ## --source-scratch-dir would otherwise fail on the read-only root filesystem.
+  ## Size for peak concurrent Helm work plus full-depth Git root/base clones
+  ## (including history) and staging copies of their working trees. The 256Mi
+  ## default is not a bound on repository size; increase extraVolumes' sizeLimit
+  ## for larger histories, transitive base graphs, or reconcile concurrency, with
+  ## headroom for temporary fetch data and available node ephemeral storage.
   extraVolumeMounts:
     - name: source-scratch
       mountPath: /var/run/ddo-source
@@ -239,4 +244,3 @@ prometheus:
 ##
 networkPolicy:
   enabled: false
-

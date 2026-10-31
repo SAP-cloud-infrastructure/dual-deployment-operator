@@ -203,7 +203,7 @@ func main() {
 		},
 		SourceDeps: source.Deps{
 			ChartLoader:  source.NewHelmLoader(sourceScratchDir),
-			RootResolver: source.NewGitResolver(),
+			RootResolver: source.NewGitResolver(sourceScratchDir),
 			RenderCache:  source.NewRenderCache(),
 		},
 	}).SetupWithManager(mgr); err != nil {

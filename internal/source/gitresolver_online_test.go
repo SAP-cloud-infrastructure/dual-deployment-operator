@@ -24,7 +24,7 @@ func TestGitResolverOnlineKustomizeRender(t *testing.T) {
 		SeedPath:  "examples/helloWorld",
 		ShootPath: "examples/helloWorld",
 	}}
-	src, err := From(spec, Deps{RootResolver: NewGitResolver()})
+	src, err := From(spec, Deps{RootResolver: NewGitResolver(t.TempDir())})
 	if err != nil {
 		t.Fatalf("From: %v", err)
 	}

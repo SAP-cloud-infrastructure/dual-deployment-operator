@@ -39,7 +39,8 @@ type ChartLoader interface {
 
 // RootResolver resolves a kustomize root (base URL + mode subpath) to a local
 // filesystem path plus a cleanup func. Production fetches the pinned remote URL;
-// tests resolve to a local overlay directory.
+// tests resolve to a local overlay directory. For injected resolvers, the returned
+// directory is the complete available boundary: local references cannot escape it.
 type RootResolver interface {
 	Resolve(ctx context.Context, url, subPath string) (fsPath string, cleanup func(), err error)
 }
@@ -55,9 +56,8 @@ type Deps struct {
 	ChartLoader        ChartLoader
 	RootResolver       RootResolver
 	CredentialResolver *CredentialResolver // optional; nil => anonymous
-	// RenderCache, when non-nil, enables the render-result cache. When nil the
-	// source is returned unwrapped (uncached behavior preserved, matching
-	// pre-Phase-7.5 semantics).
+	// RenderCache, when non-nil, enables render-result reuse. Kustomize preparation
+	// and preflight still run with a nil cache and before every cache lookup.
 	RenderCache *renderCache
 }
 
@@ -72,7 +72,11 @@ func NewHelmLoader(scratchDir string) ChartLoader {
 }
 
 // NewGitResolver returns a production git RootResolver.
-func NewGitResolver() RootResolver { return &gitResolver{} }
+// scratchDir bases the resolver's per-Resolve temp dir; pass "" for os.TempDir(),
+// or a writable mounted path when the container root filesystem is read-only.
+func NewGitResolver(scratchDir string) RootResolver {
+	return &gitResolver{scratchDir: scratchDir, bases: newGitBaseCache(defaultGitBaseCacheBytes)}
+}
 
 // withHelmCreds returns a ChartLoader that resolves credentials for this source's
 // authSecretRef. If cl is a production *helmLoader and a resolver is configured, it
@@ -89,13 +93,22 @@ func withHelmCreds(cl ChartLoader, cr *CredentialResolver, ref *v1alpha1.SecretR
 	return &cp
 }
 
-func withGitCreds(rr RootResolver, cr *CredentialResolver, ref *v1alpha1.SecretReference) RootResolver {
+func withGitCreds(rr RootResolver, cr *CredentialResolver, ref *v1alpha1.SecretReference, rootURL string) RootResolver {
 	gr, ok := rr.(*gitResolver)
 	if !ok || cr == nil {
 		return rr
 	}
 	cp := *gr
-	cp.resolve = func(ctx context.Context, _ string) (creds, error) { return cr.Resolve(ctx, ref) }
+	root, err := gitOriginOf(rootURL)
+	validRoot := err == nil && root.scheme == "https"
+	cp.resolve = func(ctx context.Context, target gitOrigin) (creds, error) {
+		// Invalid authoring is rejected by root validation; it never authorizes
+		// credential forwarding, just like a different target origin.
+		if !validRoot || root != target {
+			return creds{}, nil
+		}
+		return cr.Resolve(ctx, ref)
+	}
 	return &cp
 }
 
@@ -114,9 +127,15 @@ func From(spec v1alpha1.Source, deps Deps) (Source, error) {
 		if deps.RootResolver == nil {
 			return nil, errors.New("source: kustomize source requires a RootResolver (none configured)")
 		}
-		resolver := withGitCreds(deps.RootResolver, deps.CredentialResolver, spec.Kustomize.AuthSecretRef)
+		rootURL := spec.Kustomize.URL
+		// Bind shorthand authoring to the same normalized HTTPS origin that the
+		// acquisition adapter uses. Invalid authoring still fails at render time.
+		if ref, remote, err := classifyGitBase(rootURL); err == nil && remote {
+			rootURL = ref.Repository
+		}
+		resolver := withGitCreds(deps.RootResolver, deps.CredentialResolver, spec.Kustomize.AuthSecretRef, rootURL)
 		inner := &kustomizeSource{spec: spec.Kustomize, resolver: resolver}
-		return wrapKustomize(inner, resolver, spec.Kustomize, deps.RenderCache), nil
+		return wrapKustomize(inner, deps.RenderCache), nil
 	default:
 		return nil, errors.New("source: exactly one of source.helm or source.kustomize must be set")
 	}

@@ -7,6 +7,9 @@ package source
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	v1alpha1 "github.com/SAP-cloud-infrastructure/dual-deployment-operator/api/v1alpha1"
@@ -17,7 +20,16 @@ func newKustomize(t *testing.T) Source {
 	t.Helper()
 	s, err := From(v1alpha1.Source{Kustomize: &v1alpha1.KustomizeSource{
 		URL: "ignored?ref=x", SeedPath: "seed", ShootPath: "shoot",
-	}}, Deps{RootResolver: fakeRootResolver{baseDir: "testdata/kustomize"}})
+	}}, Deps{RootResolver: integrationRoot(func(_ context.Context, _, subPath string) (string, func(), error) {
+		// A public injected resolver exposes only its returned directory boundary.
+		// Keep this fixture self-contained instead of granting access to its parents.
+		root := t.TempDir()
+		if err := os.CopyFS(filepath.Join(root, "repo"), os.DirFS("testdata/kustomize")); err != nil {
+			return "", nil, err
+		}
+		integrationFiles(t, root, map[string]string{"kustomization.yaml": fmt.Sprintf("resources: [repo/%s]\n", subPath)})
+		return root, func() {}, nil
+	})})
 	if err != nil {
 		t.Fatalf("From: %v", err)
 	}

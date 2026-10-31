@@ -1805,6 +1805,46 @@ Failure mode if v1 CR contains invalid patch content: reconcile fails, CR status
 
 ---
 
+## Phase 11: Kustomize remote-base preparation
+
+**Change**: `openspec/changes/kustomize-remote-bases` (implemented and verified; awaiting archive).
+This is follow-up scope; Phases 0–10 remain unchanged.
+
+- Discover transitive Git bases through all recognized kustomization filenames.
+  Require a nonempty ref, resolve tags/branches to a full SHA before acquisition,
+  and fail closed if resolution or full-depth fetching fails. Recommend full SHAs
+  when authors require stability across reconciles.
+- Stage repository content without mutating checkouts; rewrite remote entries to
+  relative local paths selecting the requested subdirectory. Reject cycles and
+  repository-boundary escapes.
+- Bind the source Secret to its root HTTPS origin; other origins are anonymous.
+  Bound cached snapshots by repository, SHA and current authorization context;
+  prepare before render-cache lookup so moved refs and rotated credentials cannot
+  reuse stale or differently authorized content.
+- Preflight all supported loading paths, including HTTP file inputs and supplemental
+  builtin configurations, before invoking krusty with external plugins and Helm
+  execution disabled. This is checked behavior for the pinned dependency, not an
+  OS-enforced network sandbox. Revisit path coverage on Kustomize upgrades.
+- Keep CEL root-only: admission cannot inspect fetched repository content.
+  Transitive ref validation belongs to rendering.
+- Cover nested bases, local-only output compatibility, historical SHAs, credentials,
+  cache invalidation, scratch cleanup and rejected network loads with local fixtures.
+  The ipam-capi-shaped fixture is not a claim of live upstream/deployed equivalence;
+  that comparison remains an operand-authoring gate.
+
+**Additive Phase 9 cross-reference**: retain the existing Gardener DNS/public/private
+egress labels for DDO-controlled acquisition; this phase does not change NetworkPolicy.
+Reuse the existing `source-scratch` emptyDir and `--source-scratch-dir` for root/base
+checkouts and staging. Size it for concurrent full-depth clones plus staging copies,
+not just rendered manifests; do not add a separate Kustomize volume. Cleanup applies
+on successful renders, errors and cancellation.
+
+**Success criterion**: supported transitive inputs render from a localized tree,
+rejected URL loads make no requests, cache identity respects content and authorization,
+and focused integration tests plus the build/envtest/lint/OpenSpec gates pass.
+
+---
+
 ## Concrete v1 dependencies
 
 `go.mod` (illustrative):

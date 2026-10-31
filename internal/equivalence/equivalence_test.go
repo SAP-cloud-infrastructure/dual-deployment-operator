@@ -74,7 +74,7 @@ func TestEquivalence(t *testing.T) {
 			// Operator side: drive the real render+transform pipeline.
 			deps := source.Deps{
 				ChartLoader:  source.NewHelmLoader(""),
-				RootResolver: source.NewGitResolver(),
+				RootResolver: source.NewGitResolver(t.TempDir()),
 			}
 			opSeed, opShoot, err := CaptureOperator(context.Background(), f.CR, deps)
 			if err != nil {

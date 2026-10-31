@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -23,12 +22,14 @@ import (
 	"github.com/go-git/go-git/v5/storage/memory"
 )
 
-var shaRe = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
+var shaRe = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 // gitResolver is the production RootResolver. It fetches a ?ref=-pinned remote git
 // root into a temp dir (fail-closed) and returns <tmp>/<subPath> + cleanup.
 type gitResolver struct {
-	resolve func(ctx context.Context, host string) (creds, error) // nil => anonymous
+	scratchDir string                                                     // empty => os.TempDir()
+	resolve    func(ctx context.Context, origin gitOrigin) (creds, error) // nil => anonymous
+	bases      *gitBaseCache                                              // shared by credential-bound copies; nil disables snapshots
 }
 
 func (r *gitResolver) Resolve(ctx context.Context, rawURL, subPath string) (fsPath string, cleanup func(), err error) {
@@ -37,31 +38,24 @@ func (r *gitResolver) Resolve(ctx context.Context, rawURL, subPath string) (fsPa
 	if err != nil {
 		return "", noop, err
 	}
-	dir, err := os.MkdirTemp("", "ddo-kustomize-")
+	checkout, err := r.acquire(ctx, base, ref)
 	if err != nil {
 		return "", noop, err
 	}
-	cleanup = func() { _ = os.RemoveAll(dir) }
-
-	auth, err := r.authFor(ctx, base)
-	if err != nil {
-		cleanup()
-		return "", noop, fmt.Errorf("source: resolve credentials: %w", err)
-	}
-	if err := fetchPinned(ctx, dir, base, ref, auth); err != nil {
-		cleanup()
-		return "", noop, err
-	}
-	return filepath.Join(dir, rootSubPath, subPath), cleanup, nil
+	return filepath.Join(checkout.Root, rootSubPath, subPath), checkout.Cleanup, nil
 }
 
 func (r *gitResolver) authFor(ctx context.Context, base string) (transport.AuthMethod, error) {
 	if r.resolve == nil {
 		return nil, nil // no resolver => anonymous
 	}
-	c, err := r.resolve(ctx, hostOf(base))
+	origin, err := gitOriginOf(base)
 	if err != nil {
 		return nil, err
+	}
+	c, err := r.resolve(ctx, origin)
+	if err != nil {
+		return nil, errors.New("source: resolve credentials failed")
 	}
 	if !c.ok {
 		return nil, nil // recognized-keys-absent / nil ref => anonymous
@@ -82,7 +76,7 @@ func (r *gitResolver) authFor(ctx context.Context, base string) (transport.AuthM
 func splitRef(rawURL string) (cloneURL, rootSubPath, ref string, err error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return "", "", "", fmt.Errorf("source: parse kustomize url: %w", err)
+		return "", "", "", errors.New("source: parse kustomize url: invalid URL")
 	}
 	if u.User != nil {
 		return "", "", "", errors.New("source: kustomize url must not embed credentials in the URL; use authSecretRef")
@@ -100,24 +94,6 @@ func splitRef(rawURL string) (cloneURL, rootSubPath, ref string, err error) {
 	}
 
 	return u.String(), rootSubPath, ref, nil
-}
-
-// fetchPinned fetches ref (tag/branch OR sha) at Depth 1, fail-closed.
-func fetchPinned(ctx context.Context, dir, base, ref string, auth transport.AuthMethod) error {
-	if shaRe.MatchString(ref) {
-		return fetchSHA(ctx, dir, base, ref, auth)
-	}
-	for _, rn := range []plumbing.ReferenceName{
-		plumbing.NewTagReferenceName(ref), plumbing.NewBranchReferenceName(ref),
-	} {
-		_, err := git.PlainCloneContext(ctx, dir, false, &git.CloneOptions{
-			URL: base, Auth: auth, ReferenceName: rn, SingleBranch: true, Depth: 1,
-		})
-		if err == nil {
-			return nil
-		}
-	}
-	return fmt.Errorf("source: could not resolve ref %q on %s (fail-closed)", ref, base)
 }
 
 func fetchSHA(ctx context.Context, dir, base, sha string, auth transport.AuthMethod) error {
@@ -171,17 +147,25 @@ func (r *gitResolver) ResolveID(ctx context.Context, rawURL string, _ Mode) (str
 	if err != nil {
 		return "", err
 	}
-	if shaRe.MatchString(ref) {
-		return ref, nil
-	}
 	auth, err := r.authFor(ctx, base)
 	if err != nil {
-		return "", fmt.Errorf("source: resolve credentials: %w", err)
+		return "", err
+	}
+	return resolveGitID(ctx, base, ref, auth)
+}
+
+// resolveGitID shares ref precedence with acquisitions without reading credentials twice.
+func resolveGitID(ctx context.Context, base, ref string, auth transport.AuthMethod) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if shaRe.MatchString(ref) {
+		return ref, nil
 	}
 	rem := git.NewRemote(memory.NewStorage(), &config.RemoteConfig{Name: "origin", URLs: []string{base}})
 	refs, err := rem.ListContext(ctx, &git.ListOptions{Auth: auth, PeelingOption: git.AppendPeeled})
 	if err != nil {
-		return "", fmt.Errorf("source: ls-remote %s: %w", base, err)
+		return "", gitAcquisitionError(ctx, "ls-remote", base, err)
 	}
 	byName := make(map[string]*plumbing.Reference, len(refs))
 	for _, rr := range refs {

@@ -10,11 +10,14 @@ SPDX-License-Identifier: Apache-2.0
 ### Requirement: Transitive discovery of kustomize remote bases
 
 The operator MUST discover every **remote** reference reachable from the resolved
-kustomize root by parsing each `kustomization.yaml` with the typed
+kustomize root by parsing each recognized kustomization filename with the typed
 `sigs.k8s.io/kustomize/api/types.Kustomization` and inspecting its `resources`,
 `components`, and (deprecated) `bases` list fields. Each entry MUST be classified as
-local-vs-remote using Kustomize's own git-URL grammar (a conservative remote-target
-parse), NOT a naive `"://"` substring test. Discovery MUST be **transitive and
+local-vs-remote using a documented conservative subset of Kustomize Git URL syntax
+(HTTPS repository URLs and GitHub shorthand), NOT a naive `"://"` substring test.
+Unsupported remote forms MUST fail closed without importing internal Kustomize APIs.
+Discovery MUST recognize `kustomization.yaml`, `kustomization.yml`, and `Kustomization`,
+and MUST reject cycles. Discovery MUST be **transitive and
 depth-first**: after a remote base is fetched, its own `kustomization.yaml` MUST be
 parsed and its remote references discovered and processed the same way, to arbitrary
 depth. Local directories that themselves contain a `kustomization.yaml` MUST be
@@ -47,7 +50,9 @@ A `?ref=` that is already a 40-character commit SHA MUST be used as-is. Resoluti
 fetch MUST fail closed: an unresolvable or unreachable remote base MUST fail the render,
 and the operator MUST NOT fall back to a default branch or to krusty's own unpinned
 fetch. Per-host credentials MUST be applied to each remote base's fetch using the same
-`authSecretRef` resolution and anonymous-fallback behavior as the root.
+`authSecretRef`, restricted to the root HTTPS origin (scheme, hostname, effective
+port); other origins MUST be anonymous. Tags and branches are accepted refs and
+resolved anew for each preparation; full SHAs provide cross-reconcile stability.
 
 #### Scenario: remote base tag is resolved to a commit SHA before fetch
 
@@ -68,18 +73,23 @@ fetch. Per-host credentials MUST be applied to each remote base's fetch using th
 
 #### Scenario: authenticated remote base fetch uses per-host credentials
 
-- **WHEN** a remote base points at a host for which credentials resolve from the CR's `authSecretRef`
+- **WHEN** a remote base points at the root HTTPS origin and credentials resolve from the CR's `authSecretRef`
 - **THEN** the operator applies those credentials to that base's fetch
-- **AND** a remote base on a host with no resolved credentials is fetched anonymously
+- **AND** a remote base on another origin is fetched anonymously, without forwarding the root credentials
 
 ### Requirement: Fetched remote bases are cached keyed on their resolved SHA
 
-The operator MUST cache each fetched remote base keyed on its resolved commit SHA
-together with its transport-and-host scope (`git:<host>`), so a base shared by two
-operands, or re-seen across reconciles, is fetched at most once per distinct SHA. This
+The operator MUST cache each fetched remote base keyed on its full resolved commit SHA,
+canonical repository identity and authorization context. Entries MUST be bounded,
+concurrency-safe immutable snapshots independent of per-render scratch. Public bases
+may share entries across operands; private entries MUST NOT cross authorization
+contexts. Credentials MUST be re-resolved before cache use and credential rotation
+MUST invalidate access to old private entries. Within a resident matching entry, a
+shared base is fetched once; eviction may require a subsequent refetch. This
 base-level cache MUST compose with — and MUST NOT replace — the existing render cache
 that keys the whole render on the root content id. A cache miss MUST fetch; a cache hit
-MUST avoid network egress for that base.
+MUST avoid content-fetch egress for that base (mutable-ref resolution can still use
+the network). The kustomize render cache MUST enforce the same authorization boundary.
 
 #### Scenario: a base shared by two operands is fetched once
 
@@ -115,15 +125,28 @@ bases MUST produce a byte-identical render to today (nothing to rewrite).
 - **WHEN** a kustomize operand references only local paths
 - **THEN** the staging step produces an equivalent tree and the render output is byte-identical to the pre-change behavior
 
-### Requirement: Offline render guaranteed by a preflight rejector with plugins disabled
+### Requirement: Accepted inputs render offline under the pinned Kustomize version
 
-Before invoking `krusty`, the operator MUST run a **preflight** that recursively parses
-every staged `kustomization.yaml` and MUST return an error if any `resources`,
-`components`, or `bases` value still parses as a remote git target. The render MUST run
-with plugins disabled (krusty's default; the operator MUST NOT enable alpha/exec
-plugins for fetched content). Because `filesys.MakeFsOnDisk()` performs no git fetching
-itself and a fully-localized tree always takes krusty's local-path branch, a passing
-preflight MUST guarantee the subsequent `krusty` build performs no network egress.
+Before invoking `krusty`, even if no Git bases were found, the operator MUST run a
+preflight over all reachable recognized kustomizations and supported loading paths.
+It MUST reject residual remote Git targets and unsupported URL loads in resources,
+components, bases, patches, OpenAPI, configurations, CRDs, generator file/env inputs,
+and generator/transformer/validator configuration files. Unsupported loading constructs
+MUST fail closed; unknown fields MUST NOT silently disappear through typed rewriting.
+External plugins and Helm execution MUST stay disabled. Accepted inputs MUST render
+without network access under the pinned Kustomize version, established by regression
+tests with observable endpoints. This preflight is NOT an OS-enforced or future-proof
+network sandbox; dependency upgrades require reviewing its coverage.
+
+#### Scenario: HTTP file inputs are rejected without a request
+
+- **WHEN** a reachable resource, patch, OpenAPI, configuration or generator input names an unsupported HTTP URL
+- **THEN** preflight fails before rendering and no request reaches that URL
+
+#### Scenario: alternate filenames and supplemental configurations are checked
+
+- **WHEN** nested `kustomization.yml`, `Kustomization`, or a local built-in generator configuration contains a remote loading path
+- **THEN** preflight rejects it rather than allowing an unvalidated load
 
 #### Scenario: residual remote reference fails preflight
 

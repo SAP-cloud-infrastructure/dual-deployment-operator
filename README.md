@@ -225,6 +225,7 @@ make lint-fix     # auto-fix code style
 | [`docs/design.md`](docs/design.md) | Full architecture, CRD reference, transformation DSL, delivery model, migration plan |
 | [`docs/implementation.md`](docs/implementation.md) | Phase-by-phase implementation guide |
 | [`docs/context.md`](docs/context.md) | Design-decision rationale |
+| [`docs/kustomize-remote-bases.md`](docs/kustomize-remote-bases.md) | Kustomize remote-base authoring, credentials, caches and preflight limits |
 | [`chart/README.md`](chart/README.md) | Controller Helm chart: values, RBAC, egress labels, install contract |
 
 ## Status

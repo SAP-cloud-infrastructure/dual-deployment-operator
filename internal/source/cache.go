@@ -7,6 +7,9 @@ package source
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -25,7 +28,7 @@ type resolveFunc func(ctx context.Context, mode Mode) (id, scope string, err err
 type cachingSource struct {
 	inner      Source
 	cache      *renderCache
-	sourceKind string      // "helm" | "kustomize"
+	sourceKind string      // "helm"; Kustomize caches inside its preparation lifecycle
 	resolve    resolveFunc // closes over the loader's ResolveID + repoScope + url
 	inputHash  string      // precomputed static portion (values / paths); mode+namespace enter the key separately
 }
@@ -109,38 +112,41 @@ func wrapHelm(inner Source, loader ChartLoader, spec *v1alpha1.HelmSource, cache
 	}
 }
 
-// wrapKustomize returns a cachingSource wrapping a kustomize inner Source, or
-// the inner unwrapped when cache is nil or the resolver isn't the production
-// *gitResolver.
-func wrapKustomize(inner Source, resolver RootResolver, spec *v1alpha1.KustomizeSource, cache *renderCache) Source {
-	gr, ok := resolver.(*gitResolver)
+// wrapKustomize enables caching inside the preparation/render lifecycle, never
+// the root-only resolve-then-refetch decorator used by Helm. Injected resolvers
+// cannot supply immutable/auth-bound identities and remain uncached.
+func wrapKustomize(inner *kustomizeSource, cache *renderCache) Source {
+	_, ok := inner.resolver.(*gitResolver)
 	if !ok || cache == nil {
 		return inner
 	}
-	// Include the URL //root subpath alongside the mode paths. splitRef may fail
-	// (bad URL); the resolve func surfaces that as a real error later, so at wrap
-	// time we fall back to an empty rootSubPath rather than panicking. Two CRs
-	// whose ONLY difference is the //root would otherwise share a key even though
-	// they render different content.
-	var rootSubPath string
-	if _, sub, _, err := splitRef(spec.URL); err == nil {
-		rootSubPath = sub
+	cp := *inner
+	cp.cache = cache
+	return &cp
+}
+
+func kustomizeCacheKey(spec *v1alpha1.KustomizeSource, rootIdentity string, bases []preparedBaseIdentity, mode Mode, namespace string) (string, error) {
+	ref, remote, err := classifyGitBase(spec.URL)
+	if err != nil {
+		return "", err
 	}
-	return &cachingSource{
-		inner:      inner,
-		cache:      cache,
-		sourceKind: "kustomize",
-		inputHash:  hashValues(map[string]any{"rootSubPath": rootSubPath, "seedPath": spec.SeedPath, "shootPath": spec.ShootPath}),
-		resolve: func(ctx context.Context, _ Mode) (string, string, error) {
-			scope, err := gr.repoScope(spec.URL)
-			if err != nil {
-				return "", "", err
-			}
-			id, err := gr.ResolveID(ctx, spec.URL, ModeSeed) // mode irrelevant for git id
-			if err != nil {
-				return "", "", err
-			}
-			return id, scope, nil
-		},
+	if !remote {
+		return "", errors.New("kustomize cache key requires an HTTPS Git reference")
 	}
+	// Each opaque identity already binds repository, full SHA and current auth.
+	// Keep reference/identity associations in traversal order, including repeats;
+	// sorting a bare SHA set would miss swaps between two repositories.
+	inputs := struct {
+		URL, SeedPath, ShootPath string
+		Bases                    []preparedBaseIdentity
+	}{spec.URL, spec.SeedPath, spec.ShootPath, bases}
+	b, err := json.Marshal(inputs)
+	if err != nil {
+		return "", err // never fall back to an unprepared or unauthorised render
+	}
+	sum := sha256.Sum256(b)
+	return keyParts{
+		sourceKind: "kustomize", repoScope: "git:" + hostOf(ref.Repository), resolvedID: rootIdentity,
+		mode: string(mode), namespace: namespace, inputHash: hex.EncodeToString(sum[:]),
+	}.String(), nil
 }

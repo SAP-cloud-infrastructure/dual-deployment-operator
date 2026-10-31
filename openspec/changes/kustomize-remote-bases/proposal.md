@@ -21,12 +21,13 @@ remote bases **first-class and safe** so operands can reference pinned upstream
 instead of vendoring — on par with how the Helm `-ddo` charts consume a pinned
 `*-crds` subchart.
 
-The only safe way to do this (verified: krusty exposes **no** network/pin/cache
+The selected approach (krusty exposes **no** network/pin/cache
 knob — `LoadRestrictionsNone` governs local path traversal only, never remote
 fetching) is to move acquisition **out** of krusty: DDO discovers every remote
 reference, resolves each pinned `?ref=` to an immutable commit **SHA**, fetches it
-fail-closed, caches it keyed on the SHA, rewrites the tree to local paths, then runs
-krusty **fully offline**. This is issue #58 Option B / "Option A hardened for real";
+fail-closed, caches it by repository/SHA/authorization context, rewrites the tree to
+local paths, then runs krusty after version-specific offline preflight. This is
+issue #58 Option B / "Option A hardened for real";
 the cheaper render-time-fetch-with-guardrails variant was explicitly rejected
 because it delivers no reproducibility.
 
@@ -34,27 +35,25 @@ because it delivers no reproducibility.
 
 - **New prefetch engine** in `internal/source/` that, before krusty runs, walks the
   resolved kustomize root **transitively**, discovers every remote reference in
-  `resources:` / `components:` / `bases:` (classified with Kustomize's own git-URL
-  grammar, not a naive `://` check), and materializes a self-contained local tree.
+  `resources:` / `components:` / `bases:` (a documented conservative Git-URL
+  subset, not a naive `://` check), and materializes a self-contained local tree.
 - **Per-base pin-to-SHA + fail-closed fetch**, reusing the in-tree `gitResolver`
   (`ResolveID` → immutable commit SHA via `ls-remote`; `fetchSHA` → full-depth
-  fail-closed clone; `authFor` → per-host credentials with anonymous fallback;
+  fail-closed clone; `authFor` → root-origin-scoped credentials with anonymous fallback;
   `splitRef` → `repo//subdir?ref=` parsing). Each remote base is pinned by DDO, not
   by krusty.
-- **SHA-keyed caching of fetched bases** so egress is **once per SHA**, not once per
-  reconcile, reusing the existing SHA-keyed cache machinery (`render-cache`).
+- **Bounded caching of fetched bases** by canonical repository, full SHA and current
+  authorization context. Resident hits avoid content fetch; mutable refs still resolve.
 - **Rewrite to local relative paths** into a staging tree (remote URL string →
   local path for the exact selected subdir, relative to the rewritten
   kustomization's own directory), leaving a fully-vendored-looking tree.
-- **Offline render + hard offline guarantee**: krusty builds the localized tree with
-  plugins disabled (the default — exec plugins are never enabled for fetched
-  content), and a **preflight rejects** any `resources:`/`components:`/`bases:` entry
-  anywhere in the staged tree that still parses as a remote git target, so
-  `krusty.Run` provably makes no network call.
-- **BREAKING (admission)**: every remote-base reference MUST carry a pinned
-  `?ref=<immutable>` — enforced fail-closed in the resolver and surfaced as a CEL
-  admission rejection for the operand author (mutable/missing refs rejected). A bare
-  branch name or missing ref on a remote base is rejected rather than silently built.
+- **Version-tested offline rendering**: krusty builds with plugins disabled after
+  preflight rejects residual remote targets across all supported loading fields and
+  recognized kustomization filenames. This is not an enforced network sandbox.
+- **BREAKING (render time)**: every remote-base reference MUST carry a non-empty
+  `?ref=`. Tags and branches resolve to immutable SHAs before fetch; missing or
+  unresolvable refs fail closed. CEL checks only the root URL. Unsupported URL loads
+  are rejected across all supported loading fields, not only Git-base lists.
 - **Docs**: document in the `source.kustomize` operand-authoring guide when to
   reference a remote base vs. vendor, and make the **"only when upstream == the
   deployed shape"** divergence gate explicit (the one risk neither pinning nor
@@ -80,12 +79,12 @@ because it delivers no reproducibility.
   staging tree (no remaining remote references) rather than handing krusty a root
   that may fetch during `Run`; the `Source`/`RootResolver` seam and krusty invocation
   otherwise stay as specified.
-- `render-cache`: Cache keys extend to per-remote-base resolved SHAs so each base is
-  fetched at most once per SHA across reconciles.
-- `cel-admission-validation`: Add a rule requiring any remote-base git reference to
-  carry an immutable pinned `?ref=` (reject mutable/missing refs at admission).
-- `source-credentials`: Per-host credential resolution (`authFor`) is applied to
-  each remote-base host reached during transitive prefetch, not only the root host.
+- `render-cache`: Keys include associated remote identities/SHAs and current
+  authorization context; bounded resident base snapshots avoid repeated content fetch.
+- `cel-admission-validation`: Retain root-only ref validation and document the
+  separate render-time transitive gate; CEL cannot inspect fetched repository content.
+- `source-credentials`: Bind root credentials to the root HTTPS origin; other origins
+  remain anonymous. Private caches are isolated by current authorization context.
 
 ## Impact
 
@@ -94,13 +93,13 @@ because it delivers no reproducibility.
   depth-first fetch-and-recurse, staging-tree copy, URL→local-path rewrite, offline
   preflight rejector); `kustomize.go` renders the staged tree; wiring of the SHA
   cache through per-base fetches; `gitResolver` reused for each base.
-- **CRD / admission**: new CEL `XValidation` on the kustomize source for remote-base
-  pin enforcement; `make manifests` regenerates `config/crd/bases/*`.
+- **CRD / admission**: no new marker; verify the existing root ref gate remains intact.
 - **Dependencies**: none new — `kustomize/api` + `kyaml` (v0.21.x), `go-git`, and the
   SHA cache are all already in-tree; the blocker was invocation/policy, not a missing
   capability.
-- **Deployment (cross-ref, not edited here)**: the offline guarantee is enforced in
-  code; the seed NetworkPolicy/egress posture for the operator Pod remains a Phase 9
+- **Deployment (cross-ref, not edited here)**: accepted inputs are checked in code
+  against the pinned Kustomize version, not sandboxed; the seed NetworkPolicy/egress
+  posture for the operator Pod remains a Phase 9
   chart concern and is unchanged by this change.
 - **Out of scope**: live-vs-upstream divergence stays an **operand-authoring gate**
   (only point a remote base at upstream when upstream == deployed) — documented, not

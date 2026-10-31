@@ -122,7 +122,7 @@ func TestGitResolverHTTPSBasicAuth(t *testing.T) {
 	defer srv.Close()
 
 	authedResolver := &gitResolver{
-		resolve: func(_ context.Context, _ string) (creds, error) {
+		resolve: func(_ context.Context, _ gitOrigin) (creds, error) {
 			return creds{user: wantUser, pass: wantPass, ok: true}, nil
 		},
 	}
@@ -217,7 +217,7 @@ func TestGitResolverAuthedCloneSucceeds(t *testing.T) {
 
 	// --- correct credentials: clone must succeed ---
 	goodResolver := &gitResolver{
-		resolve: func(_ context.Context, _ string) (creds, error) {
+		resolve: func(_ context.Context, _ gitOrigin) (creds, error) {
 			return creds{user: testUser, pass: testPass, ok: true}, nil
 		},
 	}
@@ -233,7 +233,7 @@ func TestGitResolverAuthedCloneSucceeds(t *testing.T) {
 
 	// --- wrong credentials: must return an error ---
 	badResolver := &gitResolver{
-		resolve: func(_ context.Context, _ string) (creds, error) {
+		resolve: func(_ context.Context, _ gitOrigin) (creds, error) {
 			return creds{user: testUser, pass: "wrong-password", ok: true}, nil
 		},
 	}
@@ -243,6 +243,9 @@ func TestGitResolverAuthedCloneSucceeds(t *testing.T) {
 	}
 	if errBad == nil {
 		t.Fatal("wrong-cred clone: expected an error (401), got nil")
+	}
+	if !strings.Contains(errBad.Error(), "authentication") {
+		t.Fatalf("wrong-cred clone should identify authentication failure: %v", errBad)
 	}
 	if strings.Contains(errBad.Error(), testPass) {
 		t.Fatal("credential leak: password appeared in wrong-cred error string")

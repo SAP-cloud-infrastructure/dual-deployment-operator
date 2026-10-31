@@ -73,7 +73,7 @@ func TestHelmLoaderAnonymousOnNilResolver(t *testing.T) {
 func TestGitResolverSurfacesCredentialError(t *testing.T) {
 	ctx := context.Background()
 	r := &gitResolver{
-		resolve: func(_ context.Context, _ string) (creds, error) {
+		resolve: func(_ context.Context, _ gitOrigin) (creds, error) {
 			return creds{}, errors.New("boom")
 		},
 	}

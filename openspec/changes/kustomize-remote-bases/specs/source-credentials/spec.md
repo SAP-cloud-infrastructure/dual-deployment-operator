@@ -9,7 +9,7 @@ SPDX-License-Identifier: Apache-2.0
 
 ### Requirement: git HTTPS auth via basic credentials; SSH deferred
 
-The kustomize `RootResolver` MUST apply resolved credentials as git HTTPS basic auth (`http.BasicAuth`), using `token` as the password (with username `"git"` when only a token is provided) or `username`/`password` when both are set. The same per-host credential resolution and anonymous-fallback behavior MUST also be applied when fetching transitively discovered **remote bases** (see the kustomize-remote-bases capability): each remote base's fetch uses the credentials resolved for that base's host from the CR's `authSecretRef`, falling back to anonymous when none resolve. SSH authentication MUST NOT be implemented in this change.
+The kustomize `RootResolver` MUST apply resolved credentials as git HTTPS basic auth (`http.BasicAuth`), using `token` as the password (with username `"git"` when only a token is provided) or `username`/`password` when both are set. The CR's `authSecretRef` MUST be bound to the root HTTPS origin (scheme, hostname and effective port). Transitively discovered remote bases on that origin use those credentials; other origins MUST be anonymous. Missing credentials also mean anonymous access. SSH authentication MUST NOT be implemented. Error paths MUST NOT expose credential values. Credential resolution and authorization-context isolation MUST precede private base-cache and kustomize render-cache hits, including after credential rotation.
 
 #### Scenario: authenticated HTTPS clone uses basic auth
 
@@ -30,6 +30,6 @@ The kustomize `RootResolver` MUST apply resolved credentials as git HTTPS basic 
 
 #### Scenario: a remote base fetch applies per-host basic auth
 
-- **WHEN** a transitively discovered remote base points at a host for which credentials resolve
+- **WHEN** a transitively discovered remote base points at the root HTTPS origin and credentials resolve
 - **THEN** that base's fetch uses an `http.BasicAuth` method built from those credentials
-- **AND** a remote base whose host has no resolved credentials is fetched anonymously
+- **AND** a remote base on another origin is fetched anonymously without forwarding those credentials

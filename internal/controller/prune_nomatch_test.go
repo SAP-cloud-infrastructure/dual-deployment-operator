@@ -6,8 +6,11 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -16,11 +19,7 @@ import (
 	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/internal/manifest"
 )
 
-// noMatchApplier is a stub deliver.Applier whose Get always returns a REST no-match
-// error (the target cluster has no REST mapping for the orphan's kind — e.g. a
-// PrometheusRule orphan on a shoot with no Prometheus-operator CRDs). It records any
-// Delete call so the test can assert Delete is never attempted for a kind that cannot
-// exist on the target.
+// noMatchApplier records deletion attempts after a failed inventory lookup.
 type noMatchApplier struct {
 	getErr      error
 	deleteCalls int
@@ -39,11 +38,8 @@ func (a *noMatchApplier) Get(context.Context, manifest.Manifest) (*unstructured.
 	return nil, a.getErr
 }
 
-// TestPruneDropsOrphanWhenKindHasNoRESTMapping reproduces Gap 3: an orphan whose kind
-// no longer exists on the target (no CRD / no REST mapping) must be dropped from status,
-// not retained as a degraded error forever. Get returns a *meta.NoKindMatchError, which
-// is NOT apierrors.IsNotFound; prune must treat it like NotFound.
-func TestPruneDropsOrphanWhenKindHasNoRESTMapping(t *testing.T) {
+// NoMatch is not authoritative absence; preserve inventory for a later retry.
+func TestPruneRetainsOrphanWhenKindHasNoRESTMapping(t *testing.T) {
 	noMatch := &meta.NoKindMatchError{
 		GroupKind:        schema.GroupKind{Group: "monitoring.coreos.com", Kind: "PrometheusRule"},
 		SearchedVersions: []string{"v1"},
@@ -62,14 +58,45 @@ func TestPruneDropsOrphanWhenKindHasNoRESTMapping(t *testing.T) {
 
 	retained, err := r.prune(context.Background(), applier, prev, nil, cr, "owner")
 
-	if err != nil {
-		t.Fatalf("prune returned error for a no-REST-mapping orphan, want nil: %v", err)
+	if !errors.Is(err, noMatch) {
+		t.Fatalf("prune lost no-match error: %v", err)
 	}
-	if len(retained) != 0 {
-		t.Fatalf("orphan with no REST mapping was retained in status %+v, want it dropped", retained)
+	if !reflect.DeepEqual(retained, prev) {
+		t.Fatalf("ambiguous absence changed inventory: got %+v, want %+v", retained, prev)
 	}
 	if applier.deleteCalls != 0 {
 		t.Fatalf("prune called Delete %d times for a kind with no REST mapping, want 0", applier.deleteCalls)
+	}
+}
+
+func TestPruneRetainsOrphanForUnservedVersion(t *testing.T) {
+	gv := schema.GroupVersion{Group: "example.com", Version: "v1"}
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{gv})
+	mapper.Add(gv.WithKind("Widget"), meta.RESTScopeNamespace)
+	gk := schema.GroupKind{Group: gv.Group, Kind: "Widget"}
+	_, lookupErr := mapper.RESTMapping(gk, "v1beta1")
+	if !meta.IsNoMatchError(lookupErr) {
+		t.Fatalf("expected version-specific NoMatch: %v", lookupErr)
+	}
+	if mapping, err := mapper.RESTMapping(gk); err != nil || mapping.GroupVersionKind != gv.WithKind("Widget") {
+		t.Fatalf("GroupKind must still serve v1: %v, %v", mapping, err)
+	}
+	a := &noMatchApplier{getErr: lookupErr}
+	r := &DualDeploymentOperatorReconciler{}
+	prior := []ddov1alpha1.ResourceStatus{{APIVersion: "example.com/v1beta1", Kind: "Widget", Name: "still-stored", Namespace: "ns"}}
+	retained, err := r.prune(context.Background(), a, prior, nil, &ddov1alpha1.DualDeploymentOperator{}, "owner")
+	if !errors.Is(err, lookupErr) || !reflect.DeepEqual(retained, prior) || a.deleteCalls != 0 {
+		t.Fatalf("must retain exact inventory and lookup error without deleting: retained=%+v, err=%v, deletes=%d", retained, err, a.deleteCalls)
+	}
+}
+
+func TestPruneDropsAuthoritativelyNotFoundOrphan(t *testing.T) {
+	a := &noMatchApplier{getErr: apierrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, "gone")}
+	r := &DualDeploymentOperatorReconciler{}
+	prior := []ddov1alpha1.ResourceStatus{{APIVersion: "v1", Kind: "ConfigMap", Name: "gone", Namespace: "ns"}}
+	retained, err := r.prune(context.Background(), a, prior, nil, &ddov1alpha1.DualDeploymentOperator{}, "owner")
+	if err != nil || len(retained) != 0 || a.deleteCalls != 0 {
+		t.Fatalf("NotFound must remain successful absence: retained=%+v, err=%v, deletes=%d", retained, err, a.deleteCalls)
 	}
 }
 

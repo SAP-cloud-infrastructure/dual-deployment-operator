@@ -39,3 +39,14 @@ The cache key MUST be composed of `sourceKind | repoScope | resolvedID | mode | 
 - **WHEN** the kustomize root `resolvedID` is unchanged but a transitively referenced remote base now resolves to a different commit SHA
 - **THEN** the `inputHash` differs because the remote-base SHA set changed
 - **AND** the render is recomputed rather than served from the stale entry
+
+For kustomize, cache identity MUST additionally include canonical repository and
+authorization context, and preserve the association of each transitive remote identity
+with its resolved SHA (not just an unordered SHA set). Preparation MUST run before
+lookup to resolve mutable remote refs and current credentials. These additions MUST
+NOT change Helm caching behavior.
+
+#### Scenario: private cached content does not cross authorization contexts
+
+- **WHEN** another operand requests the same private repository and SHA using different or rotated credentials
+- **THEN** neither the base cache nor the kustomize render cache serves the previous authorization context's content

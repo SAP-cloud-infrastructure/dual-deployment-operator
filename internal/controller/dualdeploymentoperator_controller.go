@@ -668,12 +668,10 @@ func (r *DualDeploymentOperatorReconciler) prune(
 		m := deliver.ManifestFromStatus(rs)
 		live, err := applier.Get(ctx, m)
 		if err != nil {
-			// NotFound: the object is already gone. NoMatch (meta.IsNoMatchError): the
-			// orphan's kind has no REST mapping on the target (no CRD / CRD removed), so
-			// the object cannot exist there — e.g. a PrometheusRule orphan on a shoot with
-			// no Prometheus-operator CRDs. In both cases there is nothing to delete, so drop
-			// the orphan from status instead of retaining it as a degraded error forever.
-			if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
+			// Only NotFound establishes absence. NoMatch can mean the stored API
+			// version is unserved while the object still exists under another version;
+			// retain inventory and the error rather than silently orphaning it.
+			if apierrors.IsNotFound(err) {
 				continue
 			}
 			errs = append(errs, err)

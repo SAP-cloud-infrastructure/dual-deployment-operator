@@ -7,6 +7,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,6 +61,109 @@ func TestGitResolverTagAndSHA(t *testing.T) {
 			t.Fatalf("ref %s: expected seed/kustomization.yaml at %s: %v", ref, path, err)
 		}
 		cleanup()
+	}
+}
+
+func TestGitResolverScratchAllocation(t *testing.T) {
+	base, sha := makeLocalRepo(t)
+	for _, configured := range []bool{true, false} {
+		name := "configured"
+		if !configured {
+			name = "os-temp-fallback"
+		}
+		t.Run(name, func(t *testing.T) {
+			// Isolate the fallback too, so leaked checkouts are observable.
+			fallback := t.TempDir()
+			t.Setenv("TMPDIR", fallback)
+			t.Setenv("TMP", fallback)
+			t.Setenv("TEMP", fallback)
+			scratch, parent := "", os.TempDir() //nolint:usetesting // Verify the actual resolver fallback after isolating OS temp environment variables.
+			if configured {
+				scratch = t.TempDir()
+				parent = scratch
+			}
+			for _, ref := range []string{"v1", sha} {
+				t.Run(ref, func(t *testing.T) {
+					res := NewGitResolver(scratch)
+					path, cleanup, err := res.Resolve(context.Background(), base+"?ref="+ref, "seed")
+					if cleanup == nil {
+						t.Fatal("Resolve must return a non-nil cleanup")
+					}
+					t.Cleanup(cleanup)
+					if err != nil {
+						t.Fatal(err)
+					}
+					checkout := filepath.Dir(path)
+					if filepath.Dir(checkout) != parent {
+						t.Fatalf("checkout parent = %q, want %q", filepath.Dir(checkout), parent)
+					}
+					if _, err := os.Stat(filepath.Join(path, "kustomization.yaml")); err != nil {
+						t.Fatalf("expected root fixture in checkout: %v", err)
+					}
+					cleanup()
+					if _, err := os.Stat(checkout); !os.IsNotExist(err) {
+						t.Fatalf("checkout still exists after cleanup: %v", err)
+					}
+					assertScratchEmpty(t, parent)
+					assertScratchEmpty(t, fallback)
+				})
+			}
+		})
+	}
+}
+
+func TestGitResolverScratchCleanupOnError(t *testing.T) {
+	base, sha := makeLocalRepo(t)
+	for _, failure := range []string{"bad-ref", "credentials", "cancellation", "missing-scratch"} {
+		t.Run(failure, func(t *testing.T) {
+			scratch := t.TempDir()
+			parent := scratch
+			if failure == "missing-scratch" {
+				scratch = filepath.Join(scratch, "missing")
+			}
+			res := NewGitResolver(scratch).(*gitResolver)
+			ctx := context.Background()
+			ref := sha
+			switch failure {
+			case "bad-ref":
+				ref = "does-not-exist"
+			case "credentials":
+				res.resolve = func(context.Context, gitOrigin) (creds, error) {
+					entries, err := os.ReadDir(scratch)
+					if err != nil || len(entries) != 0 {
+						t.Errorf("expected credentials before checkout allocation: entries=%v err=%v", entries, err)
+					}
+					return creds{}, errors.New("credentials unavailable")
+				}
+			case "cancellation":
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			path, cleanup, err := res.Resolve(ctx, base+"?ref="+ref, "seed")
+			if cleanup == nil {
+				t.Fatal("Resolve must return a non-nil cleanup on error")
+			}
+			t.Cleanup(cleanup)
+			if err == nil || path != "" {
+				t.Fatalf("expected error and empty path, got path=%q err=%v", path, err)
+			}
+			// Errors must remove allocations even before the caller invokes cleanup.
+			assertScratchEmpty(t, parent)
+			cleanup()
+			assertScratchEmpty(t, parent)
+		})
+	}
+}
+
+func assertScratchEmpty(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("scratch directory %q contains leaked entries: %v", dir, entries)
 	}
 }
 
