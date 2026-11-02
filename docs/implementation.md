@@ -1805,6 +1805,62 @@ Failure mode if v1 CR contains invalid patch content: reconcile fails, CR status
 
 ---
 
+## Phase 11: Argo/Flux-aligned Kustomize remote bases
+
+Kustomize `resources`, `components`, and `bases` may refer to remote content. The
+operator deliberately delegates fetching those transitive references to krusty,
+matching the live-fetch model used by Argo CD and Flux; it does not prefetch them
+into a hermetic render pipeline.
+
+### Preflight policy and SHA pinning
+
+Before krusty renders the exact seed or shoot overlay, the operator walks the
+reachable kustomization tree and classifies remote references. Unsupported forms
+(including SSH, embedded user information, URL fragments, and ambiguous
+repository paths) are rejected with sanitized errors. With strict pin enforcement
+enabled, references without a 40-character lowercase hexadecimal commit SHA are
+rejected before any remote fetch.
+
+The operator-level flag is:
+
+```text
+--kustomize-require-sha-pinned-remote-bases
+```
+
+It defaults to `false`, so tags and branches remain permitted unless an operator
+explicitly enables strict SHA enforcement. This flag applies to transitive remote
+bases; it does not change the existing source-root URL validation.
+
+### Runtime and deployment requirements
+
+- krusty fetches remote bases live during each `Render()`; seed and shoot are
+  rendered separately. There is no hermetic offline render or SHA-keyed cache for
+  this path. A fetch failure fails the render closed, and the surfaced error is
+  sanitized.
+- The operator image must include `git` on `PATH`: krusty's remote git cloner
+  invokes the Git executable.
+- Remote-base credentials are ambient/process-global Git configuration only;
+  there is no per-source `authSecretRef` wiring for Kustomize remote bases. Prefer
+  public bases or vendor content when credential isolation is needed.
+- Network egress is controlled operationally, not by an in-process host
+  allowlist. If deployments need to constrain which hosts can be fetched, their
+  NetworkPolicy must restrict operator Pod egress. The Gardener egress-label
+  prerequisite for connectivity is described in
+  [Phase 9](#phase-9-deployment-charts) under “Gardener egress labels on the
+  operator Pod”; see also the [remote-bases authoring guide](kustomize-remote-bases.md).
+
+SHA pinning is recommended for reproducibility, even when strict enforcement is
+off. Argo CD's [Best Practices](https://argo-cd.readthedocs.io/en/stable/user-guide/best_practices/)
+warn that an unpinned remote base can change meaning without a change to the
+application repository. The same caveat applies to this live-fetch model.
+
+**Success criterion**: supported remote references render through krusty after
+preflight; strict mode rejects unpinned remote refs before network access; the
+operator image supplies `git`; deployment NetworkPolicy provides any required
+egress restrictions.
+
+---
+
 ## Concrete v1 dependencies
 
 `go.mod` (illustrative):
