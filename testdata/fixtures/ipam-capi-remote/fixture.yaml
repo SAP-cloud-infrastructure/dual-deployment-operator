@@ -1,0 +1,10 @@
+operator: ipam-capi-remote
+chartFullname: ipam-capi-remote
+repoURL: https://github.com/sapcc/helm-charts.git
+sha: 97d52c25ae067c00fd5f5b3e7a66771fdcbc10db
+chartPath: system/ipam-capi-remote
+overlayValues: overlay-values.yaml
+cr: cr.yaml
+# Reviewed candidate in cr.yaml: 463740c01f7466f360847ae6507ff06570903aac.
+# Candidate source is served unchanged; vendored core CRD bytes are verified.
+# All kinds and all object fields are compared. No silent exclusions.

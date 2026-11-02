@@ -1,0 +1,80 @@
+apiVersion: dual-deployment-operator.cc.sap/v1alpha1
+kind: DualDeploymentOperator
+metadata:
+  name: ipam-capi-remote
+  namespace: shoot--cp--m-qa-de-200
+spec:
+  shootNamespace: kube-system
+  applyOrder: SeedFirst
+  shootAccess:
+    secretName: ipam-capi-remote-kubeconfig
+    server: https://api.equivalence.invalid
+  source:
+    kustomize:
+      url: https://github.com/sapcc/helm-charts//system/kustomize/ipam-capi-remote-ddo?ref=463740c01f7466f360847ae6507ff06570903aac
+      seedPath: seed
+      shootPath: shoot
+  transformations:
+    # Required instance patch: source subject is intentionally namespace-free.
+    - patch:
+        target:
+          kind: ClusterRoleBinding
+          name: ipam-capi-remote-webhook-injector
+          origin: additions
+        jsonPatch:
+          - op: add
+            path: /subjects/0/namespace
+            value: shoot--cp--m-qa-de-200
+    - patch:
+        target:
+          kind: MutatingWebhookConfiguration
+          name: ipam-capi-remote-mutating-webhook-configuration
+        strategicMerge:
+          metadata:
+            labels:
+              dual-deployment-operator.cc.sap/webhook-injector: ipam-capi-remote
+    - patch:
+        target:
+          kind: ValidatingWebhookConfiguration
+          name: ipam-capi-remote-validating-webhook-configuration
+        strategicMerge:
+          metadata:
+            labels:
+              dual-deployment-operator.cc.sap/webhook-injector: ipam-capi-remote
+    - patch:
+        target:
+          kind: Deployment
+          name: ipam-capi-controller-manager
+        strategicMerge:
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: manager
+                    env:
+                      - name: KUBERNETES_SERVICE_HOST
+                        value: api.equivalence.invalid
+    - patch:
+        target:
+          kind: ConfigMap
+          name: ipam-capi-remote-kubeconfig
+        strategicMerge:
+          data:
+            kubeconfig: |
+              apiVersion: v1
+              kind: Config
+              clusters:
+              - cluster:
+                  certificate-authority: /var/run/secrets/kubernetes.io/remote-serviceaccount/ca.crt
+                  server: https://api.equivalence.invalid
+                name: remote
+              contexts:
+              - context:
+                  cluster: remote
+                  user: sa
+                name: remote
+              current-context: remote
+              users:
+              - name: sa
+                user:
+                  tokenFile: /var/run/secrets/kubernetes.io/remote-serviceaccount/token

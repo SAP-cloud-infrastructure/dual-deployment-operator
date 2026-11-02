@@ -1,0 +1,19 @@
+controllerManager:
+  manager:
+    env:
+      kubernetesServiceHost: api.equivalence.invalid
+    image:
+      repository: keppel.global.cloud.sap/ccloud-gcr-mirror/k8s-staging-capi-ipam-ic/cluster-api-ipam-in-cluster-controller
+      tag: v1.1.1
+    podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 65532
+      runAsGroup: 65532
+      seccompProfile:
+        type: RuntimeDefault
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: [ALL]
+webhookInjector:
+  repository: keppel.global.cloud.sap/i-cant-believe-its-not-cloud-infrastructure-dev/webhook-injector
+  tag: sha-f85df8e3d55165e3b6e1117f6b120624268d0976

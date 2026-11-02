@@ -27,11 +27,12 @@ import (
 // GoldenRenderReq describes an option-A golden render: clone the wrapper chart
 // from git at a pinned SHA, build its dependencies, then helm-template it.
 type GoldenRenderReq struct {
-	RepoURL    string   // e.g. https://github.com/sapcc/helm-charts.git
-	SHA        string   // pinned commit SHA (immutable)
-	ChartPath  string   // subpath within the repo, e.g. system/metal-operator-remote
-	ValuesYAML [][]byte // overlay values layered over chart defaults (may be empty)
-	Namespace  string   // release namespace for templating
+	RepoURL     string   // e.g. https://github.com/sapcc/helm-charts.git
+	SHA         string   // pinned commit SHA (immutable)
+	ChartPath   string   // subpath within the repo, e.g. system/metal-operator-remote
+	ValuesYAML  [][]byte // overlay values layered over chart defaults (may be empty)
+	Namespace   string   // release namespace for templating
+	APIVersions []string // explicit offline capabilities (e.g. ServiceMonitor); no discovery
 }
 
 // RenderGolden clones the repo at the pinned SHA, runs `helm dependency build`
@@ -105,6 +106,7 @@ func RenderGolden(ctx context.Context, req GoldenRenderReq) ([]*unstructured.Uns
 	inst.IncludeCRDs = true
 	inst.ReleaseName = ch.Name()
 	inst.Namespace = req.Namespace
+	inst.APIVersions = req.APIVersions
 	rel, err := inst.Run(ch, vals)
 	if err != nil {
 		return nil, fmt.Errorf("golden: template %s: %w", req.ChartPath, err)

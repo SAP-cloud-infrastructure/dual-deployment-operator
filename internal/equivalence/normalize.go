@@ -5,12 +5,17 @@
 
 package equivalence
 
-import "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+import (
+	"math"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+)
 
 // Normalize canonicalizes an object in place so incidental differences
 // (empty maps, nil values) do not cause false mismatches. Map key ordering is
-// already normalized by Go map semantics + reflect.DeepEqual, so only empties
-// and nils are pruned here.
+// already normalized by Go map semantics + reflect.DeepEqual. Integral JSON
+// float64 values are reconciled with YAML's int64 representation without rounding
+// fractions or converting large integers to lossy floating-point values.
 func Normalize(u *unstructured.Unstructured) {
 	u.Object = pruneEmpties(u.Object).(map[string]any)
 }
@@ -30,6 +35,11 @@ func pruneEmpties(v any) any {
 	case []any:
 		for i := range t {
 			t[i] = pruneEmpties(t[i])
+		}
+		return t
+	case float64:
+		if t >= -0x1p63 && t < 0x1p63 && math.Trunc(t) == t {
+			return int64(t)
 		}
 		return t
 	default:

@@ -82,3 +82,8 @@ Implementers own focused RED/GREEN checks; orchestrator owns the full final gate
 
 - [x] 10.1 Run `go build ./...`, `KUBEBUILDER_ASSETS=$(setup-envtest use 1.36 -p path) go test ./...`, and `make run-golangci-lint`; fix new-code findings (re-verify any "pre-existing" claim against this change's own diff)
 - [x] 10.2 Run `openspec validate kustomize-remote-bases --strict` and resolve any issues
+
+## 11. PR follow-up — actual ipam equivalence (user requested)
+
+- [x] 11.1 Add a provenance-pinned `ipam-capi-remote` equivalence case comparing the existing vendored operand delivery with DDO's remote-base render/transform output for both seed and shoot, including CRD schemas, conversion webhook configuration and RBAC; keep expected divergences explicit and narrow
+- [x] 11.2 Run the new case (not merely its skipped gate), demonstrate detection of a meaningful mismatch, complete scoped review and repository validation, and push the follow-up to PR #59

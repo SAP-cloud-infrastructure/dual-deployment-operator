@@ -1,0 +1,43 @@
+# Required exact inventory on BOTH sides. No missing-object exemptions.
+seed:
+  - apps/v1/Deployment/shoot--cp--m-qa-de-200/ipam-capi-controller-manager
+  - monitoring.coreos.com/v1/ServiceMonitor/shoot--cp--m-qa-de-200/ipam-capi-webhook-injector
+  - networking.k8s.io/v1/NetworkPolicy/shoot--cp--m-qa-de-200/ipam-capi-ingress-from-kube-apiserver
+  - networking.k8s.io/v1/NetworkPolicy/shoot--cp--m-qa-de-200/ipam-capi-ingress-from-kube-monitoring
+  - networking.k8s.io/v1/NetworkPolicy/shoot--cp--m-qa-de-200/kube-apiserver-egress-to-ipam-capi
+  - rbac.authorization.k8s.io/v1/ClusterRole//ipam-capi-remote-webhook-injector
+  - rbac.authorization.k8s.io/v1/ClusterRoleBinding//ipam-capi-remote-webhook-injector
+  - rbac.authorization.k8s.io/v1/Role/shoot--cp--m-qa-de-200/ipam-capi-remote-webhook-injector
+  - rbac.authorization.k8s.io/v1/RoleBinding/shoot--cp--m-qa-de-200/ipam-capi-remote-webhook-injector
+  - v1/ConfigMap/shoot--cp--m-qa-de-200/ipam-capi-manager-config
+  - v1/ConfigMap/shoot--cp--m-qa-de-200/ipam-capi-remote-kubeconfig
+  - v1/Secret/shoot--cp--m-qa-de-200/ipam-capi-remote-kubeconfig
+  - v1/Service/shoot--cp--m-qa-de-200/ipam-capi-remote-webhook-service
+  - v1/Service/shoot--cp--m-qa-de-200/ipam-capi-webhook-injector-metrics
+  - v1/ServiceAccount/shoot--cp--m-qa-de-200/ipam-capi-remote-webhook-injector
+shoot:
+  - admissionregistration.k8s.io/v1/MutatingWebhookConfiguration//ipam-capi-remote-mutating-webhook-configuration
+  - admissionregistration.k8s.io/v1/ValidatingWebhookConfiguration//ipam-capi-remote-validating-webhook-configuration
+  - apiextensions.k8s.io/v1/CustomResourceDefinition//clusters.cluster.x-k8s.io
+  - apiextensions.k8s.io/v1/CustomResourceDefinition//globalinclusterippools.ipam.cluster.x-k8s.io
+  - apiextensions.k8s.io/v1/CustomResourceDefinition//globalinclusterprefixpools.ipam.cluster.x-k8s.io
+  - apiextensions.k8s.io/v1/CustomResourceDefinition//inclusterippools.ipam.cluster.x-k8s.io
+  - apiextensions.k8s.io/v1/CustomResourceDefinition//inclusterprefixpools.ipam.cluster.x-k8s.io
+  - apiextensions.k8s.io/v1/CustomResourceDefinition//ipaddressclaims.ipam.cluster.x-k8s.io
+  - apiextensions.k8s.io/v1/CustomResourceDefinition//ipaddresses.ipam.cluster.x-k8s.io
+  - rbac.authorization.k8s.io/v1/ClusterRole//ipam-capi-leader-election-role
+  - rbac.authorization.k8s.io/v1/ClusterRole//ipam-capi-manager-admin-role
+  - rbac.authorization.k8s.io/v1/ClusterRole//ipam-capi-manager-role
+  - rbac.authorization.k8s.io/v1/ClusterRole//ipam-capi-metrics-reader
+  - rbac.authorization.k8s.io/v1/ClusterRole//ipam-capi-proxy-role
+  - rbac.authorization.k8s.io/v1/ClusterRole//ipam-capi-remote-leader-election-role
+  - rbac.authorization.k8s.io/v1/ClusterRole//ipam-capi-remote-webhook-injector
+  - rbac.authorization.k8s.io/v1/ClusterRoleBinding//ipam-capi-leader-election-rolebinding
+  - rbac.authorization.k8s.io/v1/ClusterRoleBinding//ipam-capi-manager-rolebinding
+  - rbac.authorization.k8s.io/v1/ClusterRoleBinding//ipam-capi-metal-admin-rolebinding
+  - rbac.authorization.k8s.io/v1/ClusterRoleBinding//ipam-capi-metal-rolebinding
+  - rbac.authorization.k8s.io/v1/ClusterRoleBinding//ipam-capi-proxy-rolebinding
+  - rbac.authorization.k8s.io/v1/ClusterRoleBinding//ipam-capi-remote-leader-election-rolebinding
+  - rbac.authorization.k8s.io/v1/ClusterRoleBinding//ipam-capi-remote-webhook-injector-rolebinding
+  - v1/Service/kube-system/ipam-capi-controller-manager-metrics-service
+  - v1/ServiceAccount/kube-system/ipam-capi-controller-manager
