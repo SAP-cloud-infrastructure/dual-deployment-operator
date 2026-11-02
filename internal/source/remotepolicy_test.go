@@ -1558,3 +1558,115 @@ func TestPreflightSHAGate_CredentialBearingRefNoLeak(t *testing.T) {
 		t.Errorf("URL leaked in preflightSHAGate error: %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// P1-3 residual regression: SCP-colon bypass via @ appearing later in path
+// ---------------------------------------------------------------------------
+
+// TestClassifyKustomizeReference_RejectsSCPColonWithLaterAt is the exact
+// reproduction case from the P1-3 residual finding. The reference
+// "github.com:org/repo//base@variant?ref=main" has a colon before the first
+// slash (making it SCP-like) but also has an '@' later in the path/query.
+// The OLD code rejected based on whether '@' appeared ANYWHERE in the string,
+// so this form was incorrectly classified as 'local' (bypassing all checks).
+// The FIXED code checks only whether '@' appears BEFORE the colon.
+func TestClassifyKustomizeReference_RejectsSCPColonWithLaterAt(t *testing.T) {
+	cases := []string{
+		// Exact reproduction from the finding: colon before first slash, @ after
+		"github.com:org/repo//base@variant?ref=main",
+		// Variation: @ in query string only
+		"github.com:org/repo?ref=main@abc",
+		// Variation: multiple @ after the colon
+		"host.example.com:org/repo//path@tag@extra",
+	}
+	for _, raw := range cases {
+		t.Run(raw, func(t *testing.T) {
+			_, _, err := classifyKustomizeReference(raw)
+			if err == nil {
+				t.Errorf("classifyKustomizeReference(%q): expected rejection for SCP-colon form (@ appears after colon), got nil — SHA enforcement bypass is open", raw)
+			}
+			// Error must not echo raw URL content
+			if strings.Contains(err.Error(), raw) {
+				t.Errorf("raw URL leaked in error for %q: %v", raw, err)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P1-5 residual regression: OS read errors in readKustomizationBounded must
+// not embed credential-bearing path text
+// ---------------------------------------------------------------------------
+
+// TestReadKustomizationBounded_NoCredentialLeakOnIsADirectory is the exact
+// reproduction case from the P1-5 residual finding. A directory named with a
+// credential-bearing component (e.g. "user:SUPERSECRET@host") that contains a
+// subdirectory named "kustomization.yaml" triggers an "is a directory" OS error
+// in os.ReadFile. The OLD code wrapped this with %w, causing the full path
+// (including the credential) to appear in the error string. The FIXED code
+// discards the raw OS error and returns a sanitized fixed-text message.
+func TestReadKustomizationBounded_NoCredentialLeakOnIsADirectory(t *testing.T) {
+	root := t.TempDir()
+
+	// Create a directory named with a fake credential (test fixture only).
+	// Inside it, create a directory also named "kustomization.yaml" — this
+	// triggers an "is a directory" error from os.ReadFile, which embeds the
+	// full path in its error string.
+	credDir := filepath.Join(root, "user:SUPERSECRET@host")
+	kustAsDir := filepath.Join(credDir, "kustomization.yaml")
+	if err := os.MkdirAll(kustAsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Call readKustomizationBounded on the credential-bearing directory.
+	_, err := readKustomizationBounded(root, credDir)
+
+	// It must return an error (the "kustomization.yaml" entry is a directory,
+	// not a readable file).
+	if err == nil {
+		t.Fatal("readKustomizationBounded: expected error for kustomization.yaml-as-directory, got nil")
+	}
+	// The credential substring must NOT appear anywhere in the error message.
+	if strings.Contains(err.Error(), "SUPERSECRET") {
+		t.Errorf("credential leaked via 'is a directory' OS error in readKustomizationBounded: %v", err)
+	}
+	// The raw path must not appear either.
+	if strings.Contains(err.Error(), "user:SUPERSECRET") {
+		t.Errorf("path with credential leaked in readKustomizationBounded error: %v", err)
+	}
+}
+
+// TestReadKustomizationBounded_NoCredentialLeakOnEvalSymlinksError verifies
+// that when filepath.EvalSymlinks fails on the kustomization.yaml path
+// (e.g. because a dangling symlink embeds a credential-bearing target path),
+// the credential does NOT appear in the returned error.
+func TestReadKustomizationBounded_NoCredentialLeakOnEvalSymlinksError(t *testing.T) {
+	root := t.TempDir()
+
+	// Create a directory named with a fake credential (test fixture only).
+	credDir := filepath.Join(root, "user:SUPERSECRET@host")
+	if err := os.MkdirAll(credDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a dangling symlink named "kustomization.yaml" pointing to a
+	// non-existent path that itself has a credential-bearing name. This causes
+	// EvalSymlinks to return an lstat error containing the target path.
+	kustSymlink := filepath.Join(credDir, "kustomization.yaml")
+	danglingTarget := filepath.Join(root, "user:ANOTHER_SECRET@evil")
+	if err := os.Symlink(danglingTarget, kustSymlink); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := readKustomizationBounded(root, credDir)
+
+	// A dangling symlink (non-existent target) is treated as "not found" by
+	// os.IsNotExist — so the file is simply skipped, returning (nil, nil).
+	// If the error is non-nil however, the credential must not leak.
+	if err != nil && strings.Contains(err.Error(), "SUPERSECRET") {
+		t.Errorf("credential leaked via EvalSymlinks error in readKustomizationBounded: %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "ANOTHER_SECRET") {
+		t.Errorf("symlink target credential leaked in readKustomizationBounded error: %v", err)
+	}
+}

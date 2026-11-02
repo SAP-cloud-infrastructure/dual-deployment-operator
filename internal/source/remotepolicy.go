@@ -174,22 +174,38 @@ func isSCPStyle(raw string) bool {
 
 // isSCPWithoutAt detects SCP-like host:path references without a user@ prefix.
 // These look like "hostname:org/repo" or "github.com:org/repo" — no scheme,
-// no @, but a colon appears before the first slash (host:path separator).
-// Such forms are unrecognized by DDO's classifier and must be explicitly rejected
-// rather than silently falling through to "local" (they are not local paths).
+// but a colon appears before the first slash (the git SCP host:path separator).
+//
+// Critically, a '@' character may legitimately appear LATER in the path/query
+// portion (e.g. "github.com:org/repo//base@variant?ref=main") without making
+// the reference a git@ SCP-style URL. The structural test is: does a colon
+// appear before the first '/', and is there no '@' BEFORE that colon (which
+// would identify the git@host:path form handled by isSCPStyle)?
+//
+// This prevents the P1-3 bypass where "github.com:org/repo//base@variant?ref=main"
+// was incorrectly classified as local because '@' appeared anywhere in the string.
 func isSCPWithoutAt(raw string) bool {
 	// Must not have a scheme (those are handled separately)
 	if strings.Contains(raw, "://") {
 		return false
 	}
-	// Must not have @ (git@host:path is caught by isSCPStyle above)
-	if strings.Contains(raw, "@") {
+	// Find the first colon; must exist and not be at position 0
+	colonIdx := strings.Index(raw, ":")
+	if colonIdx <= 0 {
 		return false
 	}
-	// A colon must appear before the first slash
-	colonIdx := strings.Index(raw, ":")
+	// Colon must appear before the first slash (host:path separator)
 	slashIdx := strings.Index(raw, "/")
-	return colonIdx > 0 && (slashIdx < 0 || colonIdx < slashIdx)
+	if slashIdx >= 0 && colonIdx >= slashIdx {
+		return false
+	}
+	// If a '@' appears BEFORE the colon, this is git@host:path — handled by
+	// isSCPStyle, not our responsibility.
+	atIdx := strings.Index(raw, "@")
+	if atIdx >= 0 && atIdx < colonIdx {
+		return false
+	}
+	return true
 }
 
 func startsWithIgnoreCase(s, prefix string) bool {
@@ -605,7 +621,12 @@ func readKustomizationBounded(absRoot, dir string) (*kustomizationYAML, error) {
 			if os.IsNotExist(err) {
 				continue
 			}
-			return nil, fmt.Errorf("tree walk: resolve kustomization file: %w", err)
+			// P1-5: do NOT include err.Error() or the path — the path may contain
+			// credential-bearing text (e.g. a resource entry like
+			// "user:TOKEN@host/path" that becomes a directory name). Discard the
+			// raw OS error and return a fixed-text sanitized message.
+			_ = err // discarded intentionally to prevent credential leakage
+			return nil, errors.New("tree walk: resolve kustomization file: could not resolve filesystem path (fail-closed)")
 		}
 		absFile = filepath.Clean(absFile)
 		if !isUnderRoot(absRoot, absFile) {
@@ -614,8 +635,12 @@ func readKustomizationBounded(absRoot, dir string) (*kustomizationYAML, error) {
 
 		data, err := os.ReadFile(absFile)
 		if err != nil {
-			// Finding 1: do not include the path in the error (may contain FS details).
-			return nil, fmt.Errorf("tree walk: read kustomization file: %w", err)
+			// P1-5: do NOT include err.Error() or the absFile path — the OS error
+			// embeds the full path, which can contain a credential-bearing directory
+			// name (e.g. ".../user:SUPERSECRET@host/kustomization.yaml: is a
+			// directory"). Discard the raw OS error and return a sanitized message.
+			_ = err // discarded intentionally to prevent credential leakage
+			return nil, errors.New("tree walk: read kustomization file: could not read file (fail-closed)")
 		}
 		var k kustomizationYAML
 		if err := yaml.Unmarshal(data, &k); err != nil {
