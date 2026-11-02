@@ -70,11 +70,11 @@ SPDX-License-Identifier: Apache-2.0
 
 ## 9. Final gate
 
-- [ ] 9.1 `go build ./...`
-- [ ] 9.2 `KUBEBUILDER_ASSETS=$(setup-envtest use 1.36 -p path) go test ./...`
-- [ ] 9.3 `make run-golangci-lint`
-- [ ] 9.4 `openspec validate kustomize-remote-bases-argo --strict`
-- [ ] 9.5 `git diff --check`
-- [ ] 9.6 `code-reviewer` subagent review (model `openai/gpt-6-astra`), address findings.
+- [x] 9.1 `go build ./...`
+- [x] 9.2 `KUBEBUILDER_ASSETS=$(setup-envtest use 1.36 -p path) go test ./...`
+- [x] 9.3 `make run-golangci-lint`
+- [x] 9.4 `openspec validate kustomize-remote-bases-argo --strict`
+- [x] 9.5 `git diff --check`
+- [x] 9.6 `code-reviewer` subagent review (model `openai/gpt-6-astra`), address findings.
 
-- [ ] Task 9 complete
+- [x] Task 9 complete

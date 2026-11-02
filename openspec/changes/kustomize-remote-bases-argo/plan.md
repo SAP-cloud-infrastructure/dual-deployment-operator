@@ -235,4 +235,4 @@ binding authority. `proposal.md` has the why/what-changes summary.
 - 9.5 `git diff --check`
 - 9.6 `code-reviewer` subagent review (model `openai/gpt-6-astra`), address findings.
 
-- [ ] Task 9 complete
+- [x] Task 9 complete
