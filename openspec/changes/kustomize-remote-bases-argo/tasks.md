@@ -24,9 +24,9 @@ SPDX-License-Identifier: Apache-2.0
 
 ## 4. Render wiring (TDD)
 
-- [ ] 4.1 RED: `kustomize_test.go` cases — Render runs classification + preflight before `kust.Run`; a disallowed reference (strict mode, unpinned) fails before krusty; an allowed tree renders via krusty live-fetch (injected/local fixture resolver).
-- [ ] 4.2 GREEN: add `requireSHAPinnedRemoteBases` to `kustomizeSource`; call tree-walk → preflight → wrapped `kust.Run` in `Render`; preserve existing `LoadRestrictionsNone` + `manifest.Parse(OriginUpstream)` + `ApplyNamespace` behavior.
-- [ ] 4.3 REFACTOR: deduplicate classification grammar shared with existing resolver URL parsing where safe; keep public seams unchanged.
+- [x] 4.1 RED: `kustomize_test.go` cases — Render runs classification + preflight before `kust.Run`; a disallowed reference (strict mode, unpinned) fails before krusty; an allowed tree renders via krusty live-fetch (injected/local fixture resolver).
+- [x] 4.2 GREEN: add `requireSHAPinnedRemoteBases` to `kustomizeSource`; call tree-walk → preflight → wrapped `kust.Run` in `Render`; preserve existing `LoadRestrictionsNone` + `manifest.Parse(OriginUpstream)` + `ApplyNamespace` behavior.
+- [x] 4.3 REFACTOR: deduplicate classification grammar shared with existing resolver URL parsing where safe; keep public seams unchanged.
 
 ## 5. Operator flag + manager wiring
 

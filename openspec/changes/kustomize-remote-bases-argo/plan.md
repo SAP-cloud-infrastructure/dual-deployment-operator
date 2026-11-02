@@ -141,7 +141,7 @@ binding authority. `proposal.md` has the why/what-changes summary.
   package tests — expect PASS.
 - Commit: `feat(source): wire remote-base policy preflight into Render`
 
-- [ ] Task 4 complete
+- [x] Task 4 complete
 
 ---
 
