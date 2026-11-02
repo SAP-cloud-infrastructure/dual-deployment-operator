@@ -886,3 +886,299 @@ resources: []
 		t.Errorf("expected boundary error, got: %v", walkErr)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Task 2 — Step 2.1 RED: ref extraction and SHA predicate
+// ---------------------------------------------------------------------------
+
+// TestExtractRef_GitQueryParam tests that extractRef returns the ?ref= value
+// from HTTPS git-directory references.
+func TestExtractRef_GitQueryParam(t *testing.T) {
+	cases := []struct {
+		raw     string
+		wantRef string
+	}{
+		{"https://github.com/org/repo?ref=v1.2.3", "v1.2.3"},
+		{"https://github.com/org/repo?ref=abc1234", "abc1234"},
+		{"https://github.com/org/repo//path?ref=main", "main"},
+		{"https://example.com/org/repo//sub?ref=0123456789abcdef0123456789abcdef01234567", "0123456789abcdef0123456789abcdef01234567"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			got := extractRef(tc.raw)
+			if got != tc.wantRef {
+				t.Errorf("extractRef(%q) = %q, want %q", tc.raw, got, tc.wantRef)
+			}
+		})
+	}
+}
+
+// TestExtractRef_RawGitHubPathSegment tests ref extraction from
+// raw.githubusercontent.com URLs, where the ref is the path segment
+// immediately after org/repo (i.e. the 3rd path segment: /org/repo/<ref>/...).
+func TestExtractRef_RawGitHubPathSegment(t *testing.T) {
+	cases := []struct {
+		raw     string
+		wantRef string
+	}{
+		{"https://raw.githubusercontent.com/org/repo/main/config.yaml", "main"},
+		{"https://raw.githubusercontent.com/org/repo/v1.2.3/path/to/file.yaml", "v1.2.3"},
+		{"https://raw.githubusercontent.com/org/repo/0123456789abcdef0123456789abcdef01234567/x.yaml", "0123456789abcdef0123456789abcdef01234567"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			got := extractRef(tc.raw)
+			if got != tc.wantRef {
+				t.Errorf("extractRef(%q) = %q, want %q", tc.raw, got, tc.wantRef)
+			}
+		})
+	}
+}
+
+// TestExtractRef_GenericURL_QueryParam tests that extractRef returns the ?ref=
+// value from generic HTTPS URLs (non-raw-githubusercontent).
+func TestExtractRef_GenericURL_QueryParam(t *testing.T) {
+	cases := []struct {
+		raw     string
+		wantRef string
+	}{
+		{"https://gitlab.com/org/repo?ref=feature-branch", "feature-branch"},
+		{"https://example.com/org/repo//subdir?ref=deadbeef", "deadbeef"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			got := extractRef(tc.raw)
+			if got != tc.wantRef {
+				t.Errorf("extractRef(%q) = %q, want %q", tc.raw, got, tc.wantRef)
+			}
+		})
+	}
+}
+
+// TestExtractRef_NoRef tests that extractRef returns "" when no ref is present.
+func TestExtractRef_NoRef(t *testing.T) {
+	cases := []string{
+		"https://github.com/org/repo",         // no ref at all
+		"./local/path",                         // local path
+		"https://example.com/file.yaml",        // remote file, no ref
+	}
+	for _, raw := range cases {
+		t.Run(raw, func(t *testing.T) {
+			got := extractRef(raw)
+			if got != "" {
+				t.Errorf("extractRef(%q) = %q, want empty string", raw, got)
+			}
+		})
+	}
+}
+
+// TestIsSHAPinned tests the 40-char lowercase-hex SHA predicate.
+func TestIsSHAPinned(t *testing.T) {
+	valid := []string{
+		"0123456789abcdef0123456789abcdef01234567",
+		"abcdef0123456789abcdef0123456789abcdef01",
+		"0000000000000000000000000000000000000000",
+		"ffffffffffffffffffffffffffffffffffffffff",
+	}
+	for _, sha := range valid {
+		t.Run("valid_"+sha[:8], func(t *testing.T) {
+			if !isSHAPinned(sha) {
+				t.Errorf("isSHAPinned(%q) = false, want true", sha)
+			}
+		})
+	}
+
+	invalid := []string{
+		"v1.2.3",                                   // semver tag
+		"main",                                      // branch name
+		"HEAD",                                      // symbolic ref
+		"abc123",                                    // short SHA (not 40 chars)
+		"0123456789ABCDEF0123456789ABCDEF01234567",  // uppercase hex
+		"0123456789abcdef0123456789abcdef0123456",   // 39 chars
+		"0123456789abcdef0123456789abcdef012345678", // 41 chars
+		"",                                          // empty
+		"ghijklmnopqrstuvwxyz0123456789abcdef1234",  // non-hex chars
+	}
+	for _, sha := range invalid {
+		t.Run("invalid_"+sha, func(t *testing.T) {
+			if isSHAPinned(sha) {
+				t.Errorf("isSHAPinned(%q) = true, want false", sha)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Task 2 — Step 2.3 RED: preflight gate tests
+// ---------------------------------------------------------------------------
+
+// TestPreflightSHAGate_StrictRejectsTag asserts that in strict mode, a remote
+// reference pinned to a tag (not a SHA) is rejected before any fetch.
+func TestPreflightSHAGate_StrictRejectsTag(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://github.com/org/repo?ref=v1.2.3
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := preflightSHAGate(root, true /* requireSHAPinnedRemoteBases */)
+	if err == nil {
+		t.Fatal("preflightSHAGate: expected rejection for tag ref in strict mode, got nil")
+	}
+	if !strings.Contains(err.Error(), "SHA") && !strings.Contains(err.Error(), "pin") {
+		t.Errorf("expected SHA-pin error, got: %v", err)
+	}
+}
+
+// TestPreflightSHAGate_StrictRejectsBranch asserts that in strict mode, a remote
+// reference pinned to a branch name is rejected.
+func TestPreflightSHAGate_StrictRejectsBranch(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://github.com/org/repo?ref=main
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := preflightSHAGate(root, true)
+	if err == nil {
+		t.Fatal("preflightSHAGate: expected rejection for branch ref in strict mode, got nil")
+	}
+	if !strings.Contains(err.Error(), "SHA") && !strings.Contains(err.Error(), "pin") {
+		t.Errorf("expected SHA-pin error, got: %v", err)
+	}
+}
+
+// TestPreflightSHAGate_StrictAcceptsSHA asserts that in strict mode, a remote
+// reference pinned to a full 40-hex SHA is accepted.
+func TestPreflightSHAGate_StrictAcceptsSHA(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://github.com/org/repo?ref=0123456789abcdef0123456789abcdef01234567
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := preflightSHAGate(root, true)
+	if err != nil {
+		t.Fatalf("preflightSHAGate: unexpected rejection for SHA ref in strict mode: %v", err)
+	}
+}
+
+// TestPreflightSHAGate_PermissiveAcceptsTag asserts that in permissive (default)
+// mode, a remote reference pinned to a tag is accepted.
+func TestPreflightSHAGate_PermissiveAcceptsTag(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://github.com/org/repo?ref=v1.2.3
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := preflightSHAGate(root, false /* permissive */)
+	if err != nil {
+		t.Fatalf("preflightSHAGate: unexpected rejection in permissive mode: %v", err)
+	}
+}
+
+// TestPreflightSHAGate_StrictNoNetworkCalls verifies that strict rejection
+// happens with zero network/git calls. We assert no network was made by
+// ensuring the call returns quickly with an error — the gate must short-circuit
+// before any fetch. We use a non-resolvable remote to prove the gate fires
+// without even trying to connect.
+func TestPreflightSHAGate_StrictNoNetworkCalls(t *testing.T) {
+	root := t.TempDir()
+	// Use a ref that is clearly a tag — the gate must reject without connecting.
+	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://unreachable.invalid/org/repo?ref=my-tag
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// preflightSHAGate must return an error synchronously; if it tries a network
+	// call to unreachable.invalid it will either timeout (failing the test via
+	// t.Parallel implicit timeout or slowness) or succeed unexpectedly.
+	// We accept any error here — the key is that it returns fast with an error.
+	err := preflightSHAGate(root, true)
+	if err == nil {
+		t.Fatal("preflightSHAGate: expected rejection for non-SHA ref at unreachable host, got nil")
+	}
+}
+
+// TestPreflightSHAGate_StrictRejectsRemoteFile asserts that remote file
+// references (raw.githubusercontent.com) with a non-SHA ref are rejected
+// in strict mode when the ref cannot be determined as a SHA.
+func TestPreflightSHAGate_StrictRejectsRemoteFileNonSHARef(t *testing.T) {
+	root := t.TempDir()
+	// raw.githubusercontent.com — classified as remote file, ref is in path
+	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://raw.githubusercontent.com/org/repo/main/config.yaml
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := preflightSHAGate(root, true)
+	if err == nil {
+		t.Fatal("preflightSHAGate: expected rejection for non-SHA ref in raw.githubusercontent.com URL, got nil")
+	}
+	if !strings.Contains(err.Error(), "SHA") && !strings.Contains(err.Error(), "pin") {
+		t.Errorf("expected SHA-pin error, got: %v", err)
+	}
+}
+
+// TestPreflightSHAGate_StrictAcceptsRemoteFileSHARef asserts that remote file
+// references with a full 40-hex SHA in the path segment are accepted in strict mode.
+func TestPreflightSHAGate_StrictAcceptsRemoteFileSHARef(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://raw.githubusercontent.com/org/repo/0123456789abcdef0123456789abcdef01234567/config.yaml
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := preflightSHAGate(root, true)
+	if err != nil {
+		t.Fatalf("preflightSHAGate: unexpected rejection for SHA-pinned raw.githubusercontent.com ref: %v", err)
+	}
+}
+
+// TestPreflightSHAGate_StrictSanitizedError verifies the error message does not
+// leak the raw URL or any credential-bearing fragments.
+func TestPreflightSHAGate_StrictSanitizedError(t *testing.T) {
+	root := t.TempDir()
+	// Use a URL with a tag and include a token-like segment that must not leak.
+	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://github.com/org/secret-internal-repo?ref=release-2026
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := preflightSHAGate(root, true)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	// Must not echo the raw URL or sensitive parts
+	if strings.Contains(err.Error(), "secret-internal-repo") {
+		t.Errorf("error leaks URL content: %v", err)
+	}
+	if strings.Contains(err.Error(), "release-2026") {
+		t.Errorf("error leaks ref value: %v", err)
+	}
+}

@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"sigs.k8s.io/kustomize/api/konfig"
@@ -537,4 +538,131 @@ func sanitizePath(path, root string) string {
 		return "<path>"
 	}
 	return rel
+}
+
+// ---------------------------------------------------------------------------
+// Ref extraction
+// ---------------------------------------------------------------------------
+
+// extractRef extracts the pinned ref (tag, branch, or SHA) from a classified
+// remote reference. It handles three cases:
+//
+//  1. HTTPS / GitHub shorthand with a ?ref= query parameter — returns the
+//     value of ?ref=.
+//  2. raw.githubusercontent.com URLs — the ref is the 3rd path segment
+//     (index 2, 0-based) immediately after org/repo: /org/repo/<ref>/...
+//  3. Anything else (including local paths and unrecognised forms) — returns "".
+//
+// extractRef never echoes the raw value in an error; it simply returns "" on
+// any form it cannot recognise.
+func extractRef(raw string) string {
+	// Strip go-getter prefix before any inspection.
+	s := raw
+	if startsWithIgnoreCase(raw, "git::") {
+		s = raw[len("git::"):]
+	}
+
+	// raw.githubusercontent.com: ref is the 3rd path segment after the host
+	// (path layout: /org/repo/<ref>/[rest...]).
+	if isHTTPURL(s) {
+		u, err := url.Parse(s)
+		if err != nil {
+			return ""
+		}
+		if strings.EqualFold(u.Hostname(), "raw.githubusercontent.com") {
+			return rawGitHubRef(u.Path)
+		}
+		// Generic HTTPS URL: use ?ref= query param.
+		return u.Query().Get("ref")
+	}
+
+	// GitHub shorthand (no scheme): extract ?ref= from the query portion.
+	if isGitHubShorthand(s) {
+		_, query, _ := strings.Cut(s, "?")
+		if query == "" {
+			return ""
+		}
+		vals, err := url.ParseQuery(query)
+		if err != nil {
+			return ""
+		}
+		return vals.Get("ref")
+	}
+
+	return ""
+}
+
+// rawGitHubRef extracts the ref (3rd path segment) from a raw.githubusercontent.com
+// URL path of the form /org/repo/<ref>/... Segments are 1-based in the split
+// (the first element after Split("/", ...) is empty for the leading slash).
+func rawGitHubRef(path string) string {
+	// path = /org/repo/ref/...
+	// Split gives: ["", "org", "repo", "ref", ...]
+	parts := strings.SplitN(path, "/", 5)
+	if len(parts) >= 4 && parts[3] != "" {
+		return parts[3]
+	}
+	return ""
+}
+
+// ---------------------------------------------------------------------------
+// SHA predicate
+// ---------------------------------------------------------------------------
+
+// reSHA40 matches a full 40-character lowercase hexadecimal Git commit SHA.
+var reSHA40 = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// isSHAPinned returns true if ref is a full 40-character lowercase hex Git
+// commit SHA (i.e. not a tag, branch, or symbolic ref). Uppercase hex is
+// intentionally rejected: Git SHA refs in kustomization.yaml must be
+// lowercase to match krusty's normalisation.
+func isSHAPinned(ref string) bool {
+	return reSHA40.MatchString(ref)
+}
+
+// ---------------------------------------------------------------------------
+// Preflight SHA-pin gate
+// ---------------------------------------------------------------------------
+
+// preflightSHAGate runs the classify → tree-walk → SHA-gate preflight sequence
+// for a resolved kustomize root directory. When requireSHAPinnedRemoteBases is
+// true, every discovered remote reference must be pinned to a full 40-hex SHA;
+// any tag, branch, or undeterminable ref causes an immediate error and no
+// network/git call is made.
+//
+// In permissive mode (requireSHAPinnedRemoteBases = false) the gate is a no-op
+// and always returns nil.
+//
+// Error messages are sanitized: the raw URL and ref value are never included.
+func preflightSHAGate(rootDir string, requireSHAPinnedRemoteBases bool) error {
+	if !requireSHAPinnedRemoteBases {
+		return nil
+	}
+
+	// Tree-walk discovers all remote references reachable from rootDir.
+	// This itself classifies every reference (fail-closed on invalid forms)
+	// and does not make any network or git calls.
+	remotes, err := treeWalkKustomize(rootDir)
+	if err != nil {
+		return fmt.Errorf("preflight: tree walk failed: %w", err)
+	}
+
+	for _, r := range remotes {
+		ref := r.Ref // already extracted by classifyKustomizeReference for git-dir refs
+		if ref == "" {
+			// For refKindRemoteFile, classifyKustomizeReference leaves Ref empty.
+			// We must extract the ref ourselves from the raw URL.
+			ref = extractRef(r.Raw)
+		}
+		if !isSHAPinned(ref) {
+			// Sanitized: we do not echo r.Raw or ref.
+			return fmt.Errorf(
+				"preflight: remote base is not SHA-pinned (requireSHAPinnedRemoteBases=true); "+
+					"pin the ?ref= (or equivalent) to a full 40-character lowercase hex SHA; "+
+					"found %d remote reference(s), at least one uses a tag or branch ref",
+				len(remotes),
+			)
+		}
+	}
+	return nil
 }
