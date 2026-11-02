@@ -31,3 +31,26 @@ func TestLoadFixtureMetalOperator(t *testing.T) {
 		t.Errorf("exclusions not parsed: %+v", f.Exclusions)
 	}
 }
+
+func TestLoadFixtureIPAMCAPI(t *testing.T) {
+	f, err := LoadFixture("../../testdata/fixtures/ipam-capi")
+	if err != nil {
+		t.Fatalf("load fixture: %v", err)
+	}
+	if f.RepoURL == "" || f.SHA == "" {
+		t.Error("fixture must pin a git repo URL + SHA")
+	}
+	if !f.IsKustomize() {
+		t.Error("ipam-capi fixture must have kustomizePath set")
+	}
+	if f.KustomizePath != "system/kustomize/ipam-capi-remote/managedresources" {
+		t.Errorf("kustomizePath = %q, want system/kustomize/ipam-capi-remote/managedresources", f.KustomizePath)
+	}
+	if f.CR == nil || f.CR.Spec.Source.Kustomize == nil {
+		t.Error("ipam-capi fixture CR must have a kustomize source")
+	}
+	// OverlayRaw must be nil for kustomize fixtures (no Helm values).
+	if len(f.OverlayRaw) != 0 {
+		t.Error("kustomize fixture must not load overlay values bytes (overlayValues field absent)")
+	}
+}

@@ -1,0 +1,28 @@
+apiVersion: dual-deployment-operator.cc.sap/v1alpha1
+kind: DualDeploymentOperator
+metadata:
+  name: ipam-capi-remote
+  namespace: shoot--cp--m-qa-de-1
+spec:
+  shootNamespace: kube-system
+  source:
+    kustomize:
+      # Pin to the same sapcc/helm-charts commit SHA used by all other equivalence
+      # fixtures. The ref is the full 40-character commit SHA so the gitResolver
+      # takes the fetchSHA code path (full-depth fetch + arbitrary-SHA checkout).
+      url: "https://github.com/sapcc/helm-charts//system/kustomize/ipam-capi-remote?ref=33e68278ace26fe23e0c2b36a9266a58c9b47707"
+      # seedPath is set to a valid value but is never exercised in this fixture:
+      # only the shoot overlay (managedresources) is compared. The seed/manager
+      # overlay is deferred — see fixture.yaml and README.md for the rationale.
+      seedPath: seed
+      shootPath: managedresources
+  shootAccess:
+    secretName: ipam-capi-remote-kubeconfig
+    server: https://api.m-qa-de-1.internal
+  # Transformations intentionally minimal for the equivalence fixture:
+  # the shoot/managedresources overlay emits bare CRDs + RBAC and no webhooks,
+  # so rewriteWebhookURL and the webhook-label patches are no-ops here.
+  # filterKinds[Service] is also a no-op for the managedresources overlay
+  # (it emits no Services). We add no transformations so the comparison is
+  # between the raw krusty output on both sides.
+  transformations: []

@@ -27,6 +27,12 @@ type Fixture struct {
 	CRFile        string           `json:"cr"`
 	Exclusions    []ExclusionEntry `json:"exclusions"`
 
+	// KustomizePath, when non-empty, selects the kustomize-based golden render
+	// path instead of the Helm path. Set this to the subpath within the repo to
+	// build (e.g. system/kustomize/ipam-capi-remote/managedresources). When set,
+	// ChartPath, ChartFullname and OverlayValues are ignored for golden rendering.
+	KustomizePath string `json:"kustomizePath,omitempty"`
+
 	ComparedKinds      []string         `json:"comparedKinds"`
 	KnownDivergences   []ExclusionEntry `json:"knownDivergences"`
 	IgnoreLabels       []string         `json:"ignoreLabels"`
@@ -36,6 +42,10 @@ type Fixture struct {
 	OverlayRaw []byte                           `json:"-"`
 	Dir        string                           `json:"-"`
 }
+
+// IsKustomize reports whether this fixture uses kustomize-based golden rendering
+// instead of Helm.
+func (f *Fixture) IsKustomize() bool { return f.KustomizePath != "" }
 
 // LoadFixture reads fixture.yaml plus the referenced CR and overlay-values file.
 func LoadFixture(dir string) (*Fixture, error) {
@@ -59,9 +69,12 @@ func LoadFixture(dir string) (*Fixture, error) {
 	}
 	f.CR = cr
 
-	f.OverlayRaw, err = os.ReadFile(filepath.Join(dir, f.OverlayValues))
-	if err != nil {
-		return nil, err
+	// OverlayValues is Helm-specific; kustomize fixtures omit it.
+	if f.OverlayValues != "" {
+		f.OverlayRaw, err = os.ReadFile(filepath.Join(dir, f.OverlayValues))
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &f, nil
 }

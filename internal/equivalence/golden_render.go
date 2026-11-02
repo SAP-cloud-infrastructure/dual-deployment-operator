@@ -21,6 +21,9 @@ import (
 	"helm.sh/helm/v3/pkg/getter"
 	"helm.sh/helm/v3/pkg/registry"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"sigs.k8s.io/kustomize/api/krusty"
+	"sigs.k8s.io/kustomize/api/types"
+	"sigs.k8s.io/kustomize/kyaml/filesys"
 	"sigs.k8s.io/yaml"
 )
 
@@ -110,6 +113,83 @@ func RenderGolden(ctx context.Context, req GoldenRenderReq) ([]*unstructured.Uns
 		return nil, fmt.Errorf("golden: template %s: %w", req.ChartPath, err)
 	}
 	return splitYAMLDocs([]byte(rel.Manifest))
+}
+
+// KustomizeGoldenRenderReq describes a kustomize-based golden render: clone the
+// source repo from git at a pinned SHA and run krusty.Run on the given subpath.
+type KustomizeGoldenRenderReq struct {
+	RepoURL       string // e.g. https://github.com/sapcc/helm-charts.git
+	SHA           string // pinned commit SHA (immutable)
+	KustomizePath string // subpath within the repo to build, e.g. system/kustomize/ipam-capi-remote/managedresources
+	Namespace     string // namespace to assign to namespaced resources
+}
+
+// RenderGoldenKustomize clones the repo at the pinned SHA, runs krusty.Run on
+// the given kustomize subpath, and returns the parsed documents. Fails loudly
+// on any error (never skips). The krusty build runs with LoadRestrictionsNone,
+// matching the production kustomizeSource.Render behaviour, so krusty will
+// fetch transitive remote bases during the build — this requires network access
+// to github.com and raw.githubusercontent.com (same requirement as production).
+func RenderGoldenKustomize(ctx context.Context, req KustomizeGoldenRenderReq) ([]*unstructured.Unstructured, error) {
+	tmp, err := os.MkdirTemp("", "ddo-golden-kustomize-git-")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.RemoveAll(tmp) }()
+
+	// 1. Clone at the pinned SHA (full fetch so arbitrary historical SHAs resolve).
+	repo, err := git.PlainInit(tmp, false)
+	if err != nil {
+		return nil, fmt.Errorf("golden-kustomize: git init: %w", err)
+	}
+	remote, err := repo.CreateRemote(&config.RemoteConfig{Name: "origin", URLs: []string{req.RepoURL}})
+	if err != nil {
+		return nil, fmt.Errorf("golden-kustomize: git remote: %w", err)
+	}
+	if err := remote.FetchContext(ctx, &git.FetchOptions{
+		RefSpecs: []config.RefSpec{
+			"+refs/heads/*:refs/heads/*",
+			"+refs/tags/*:refs/tags/*",
+		},
+	}); err != nil {
+		return nil, fmt.Errorf("golden-kustomize: git fetch: %w", err)
+	}
+	w, err := repo.Worktree()
+	if err != nil {
+		return nil, fmt.Errorf("golden-kustomize: worktree: %w", err)
+	}
+	if err := w.Checkout(&git.CheckoutOptions{Hash: plumbing.NewHash(req.SHA)}); err != nil {
+		return nil, fmt.Errorf("golden-kustomize: checkout %s: %w", req.SHA, err)
+	}
+
+	kustomizeDir := filepath.Join(tmp, req.KustomizePath)
+
+	// 2. Run krusty with LoadRestrictionsNone (matches production kustomize source
+	// behaviour; required because the overlay's remote bases live outside the
+	// overlay subdir and krusty must be allowed to follow those URLs).
+	opts := krusty.MakeDefaultOptions()
+	opts.LoadRestrictions = types.LoadRestrictionsNone
+	kust := krusty.MakeKustomizer(opts)
+	resMap, err := kust.Run(filesys.MakeFsOnDisk(), kustomizeDir)
+	if err != nil {
+		return nil, fmt.Errorf("golden-kustomize: krusty build %s: %w", req.KustomizePath, err)
+	}
+	yamlBytes, err := resMap.AsYaml()
+	if err != nil {
+		return nil, fmt.Errorf("golden-kustomize: serialize: %w", err)
+	}
+	docs, err := splitYAMLDocs(yamlBytes)
+	if err != nil {
+		return nil, fmt.Errorf("golden-kustomize: parse docs: %w", err)
+	}
+
+	// 3. Apply namespace to namespaced resources (mirrors manifest.ApplyNamespace).
+	for _, d := range docs {
+		if d.GetNamespace() == "" {
+			d.SetNamespace(req.Namespace)
+		}
+	}
+	return docs, nil
 }
 
 func mergeValuesYAML(docs [][]byte) (map[string]any, error) {
