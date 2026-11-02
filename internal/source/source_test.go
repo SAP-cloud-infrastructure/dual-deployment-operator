@@ -58,6 +58,59 @@ func TestFromKustomizeRequiresRootResolver(t *testing.T) {
 	}
 }
 
+// TestDepsRequireSHAPinnedDefaultFalse asserts that the zero value of Deps
+// leaves RequireSHAPinnedRemoteBases unset (false), matching the operator's
+// --kustomize-require-sha-pinned-remote-bases flag default of false.
+func TestDepsRequireSHAPinnedDefaultFalse(t *testing.T) {
+	var d Deps
+	if d.RequireSHAPinnedRemoteBases != false {
+		t.Error("Deps zero value: RequireSHAPinnedRemoteBases must default to false")
+	}
+}
+
+// TestFromThreadsRequireSHAPinnedIntoKustomizeSource asserts that From()
+// propagates Deps.RequireSHAPinnedRemoteBases into the constructed kustomizeSource.
+func TestFromThreadsRequireSHAPinnedIntoKustomizeSource(t *testing.T) {
+	spec := v1alpha1.Source{Kustomize: &v1alpha1.KustomizeSource{URL: "u?ref=x", SeedPath: "seed", ShootPath: "shoot"}}
+
+	// false (default)
+	sOff, err := From(spec, Deps{RootResolver: fakeRootResolver{}})
+	if err != nil {
+		t.Fatalf("From(false): %v", err)
+	}
+	ksOff := unwrapKustomizeSource(t, sOff)
+	if ksOff.requireSHAPinnedRemoteBases != false {
+		t.Error("From with RequireSHAPinnedRemoteBases=false: kustomizeSource.requireSHAPinnedRemoteBases should be false")
+	}
+
+	// true (strict mode)
+	sOn, err := From(spec, Deps{RootResolver: fakeRootResolver{}, RequireSHAPinnedRemoteBases: true})
+	if err != nil {
+		t.Fatalf("From(true): %v", err)
+	}
+	ksOn := unwrapKustomizeSource(t, sOn)
+	if ksOn.requireSHAPinnedRemoteBases != true {
+		t.Error("From with RequireSHAPinnedRemoteBases=true: kustomizeSource.requireSHAPinnedRemoteBases should be true")
+	}
+}
+
+// unwrapKustomizeSource extracts the *kustomizeSource from a Source, unwrapping
+// the cachingSource decorator if present.
+func unwrapKustomizeSource(t *testing.T, s Source) *kustomizeSource {
+	t.Helper()
+	if ks, ok := s.(*kustomizeSource); ok {
+		return ks
+	}
+	// cachingSource wraps the inner source; reach through it.
+	if cs, ok := s.(*cachingSource); ok {
+		if ks, ok := cs.inner.(*kustomizeSource); ok {
+			return ks
+		}
+	}
+	t.Fatalf("expected *kustomizeSource (possibly wrapped), got %T", s)
+	return nil
+}
+
 func TestFromRejectsNeither(t *testing.T) {
 	if _, err := From(v1alpha1.Source{}, Deps{}); err == nil {
 		t.Error("expected error when neither discriminator set")

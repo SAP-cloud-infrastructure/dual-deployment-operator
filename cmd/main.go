@@ -39,11 +39,20 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
+// requireSHAPinnedRemoteBases is populated from
+// --kustomize-require-sha-pinned-remote-bases and threaded into source.Deps.
+// Declared at package level so tests can verify default registration.
+var requireSHAPinnedRemoteBases bool
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(dualdeploymentoperatorv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
+
+	flag.BoolVar(&requireSHAPinnedRemoteBases, "kustomize-require-sha-pinned-remote-bases", false,
+		"When true, every kustomize remote base reference must be pinned to a full 40-hex lowercase commit SHA. "+
+			"Tags, branches, and undeterminable refs are rejected before any fetch occurs.")
 }
 
 //nolint:gocyclo
@@ -202,9 +211,10 @@ func main() {
 			Cluster:      "seed",
 		},
 		SourceDeps: source.Deps{
-			ChartLoader:  source.NewHelmLoader(sourceScratchDir),
-			RootResolver: source.NewGitResolver(),
-			RenderCache:  source.NewRenderCache(),
+			ChartLoader:                 source.NewHelmLoader(sourceScratchDir),
+			RootResolver:                source.NewGitResolver(),
+			RenderCache:                 source.NewRenderCache(),
+			RequireSHAPinnedRemoteBases: requireSHAPinnedRemoteBases,
 		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "dualdeploymentoperator")
