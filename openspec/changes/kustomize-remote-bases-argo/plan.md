@@ -111,7 +111,7 @@ binding authority. `proposal.md` has the why/what-changes summary.
   expect PASS.
 - Commit: `feat(source): fail-closed sanitized wrapper around krusty Run`
 
-- [ ] Task 3 complete
+- [x] Task 3 complete
 
 ---
 
