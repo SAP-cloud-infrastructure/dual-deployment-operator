@@ -12,41 +12,15 @@ import (
 	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/internal/source"
 )
 
-// TestEquivalenceIPAMCAPI proves that the operator's kustomize render for the
-// ipam-capi shoot overlay produces output equivalent to today's ipam-capi-remote
-// Helm chart's shoot content at the same pinned sapcc/helm-charts SHA.
-//
-// This follows the same pattern as the four Helm-source fixtures: golden side =
-// git clone + helm dependency build + helm template of system/ipam-capi-remote/;
-// operator side = source.From → Render (KustomizeSource, shoot mode) → transform.Build.
-// Both sides are scoped to the managedresources/shoot content, compared per resource
-// after normalization and allowlist stripping.
-//
-// # Scope: shoot overlay only
-//
-// Only the shoot/managedresources overlay is compared. The seed/manager overlay
-// is deliberately excluded — see testdata/fixtures/ipam-capi/README.md and
+// TestEquivalenceIPAMCAPI is the fifth equivalence fixture. It follows the exact
+// same structure as TestEquivalence (the four Helm-source fixtures), with one
+// deliberate deviation: CaptureShootOnly is used instead of CaptureOperator so
+// that only the shoot render runs. The seed/manager overlay at this SHA uses
+// repo-root-relative patch paths that only resolve when kustomize builds from the
+// repo root; KustomizeSource builds from the overlay subdir, so the seed render
+// fails. See testdata/fixtures/ipam-capi/README.md and
 // docs/implementation.md §"ipam-capi equivalence is DEFERRED" for the full
-// rationale. In short: the manager overlay references patch files by repo-root-
-// relative paths that only resolve when kustomize builds from the repo root;
-// the operator's KustomizeSource builds from the overlay subdir instead, so
-// those patch paths fail. Closing the seed overlay requires extending
-// KustomizeSource (CRD + source change, design §9.4) — explicitly out of scope.
-// CaptureShootOnly is used to avoid triggering the broken seed render.
-//
-// # Network access
-//
-// This test gates on RUN_EQUIVALENCE=1. The golden Helm render requires:
-//   - git clone of github.com/sapcc/helm-charts
-//   - helm dependency build pulling subcharts from the internal keppel OCI
-//     registry (keppel.global.cloud.sap/ccloud-helm/...) — same as the other
-//     four Helm fixtures
-//
-// The operator-side kustomize render requires:
-//   - git clone of github.com/sapcc/helm-charts (same SHA)
-//   - krusty fetching transitive remote bases from github.com and
-//     raw.githubusercontent.com (cluster-api-ipam-provider-in-cluster ?ref=v1.1.0,
-//     cluster-api CRD bases v1.13.4) — public/anonymous
+// rationale. Only the shoot comparison is made; seed is left nil and not asserted.
 func TestEquivalenceIPAMCAPI(t *testing.T) {
 	requireEquivalenceEnabled(t)
 
@@ -55,11 +29,8 @@ func TestEquivalenceIPAMCAPI(t *testing.T) {
 		t.Fatalf("load fixture: %v", err)
 	}
 
-	// Golden side: render the ipam-capi-remote Helm wrapper chart from git at
-	// the pinned SHA. system/ipam-capi-remote/ is the helmified wrapper (the
-	// current deployed baseline), same structure as the other four operator
-	// fixtures. Its shoot content is wrapped in ManagedResources and must be
-	// unwrapped before comparison.
+	// Golden side: identical to TestEquivalence — render the wrapper chart from
+	// git at the pinned SHA, unwrap ManagedResources, classify.
 	goldenDocs, err := RenderGolden(context.Background(), GoldenRenderReq{
 		RepoURL:    f.RepoURL,
 		SHA:        f.SHA,
@@ -68,7 +39,7 @@ func TestEquivalenceIPAMCAPI(t *testing.T) {
 		Namespace:  f.CR.Namespace,
 	})
 	if err != nil {
-		t.Fatalf("golden helm render: %v", err)
+		t.Fatalf("golden render: %v", err)
 	}
 	shootFromMR, passthrough, err := UnwrapManagedResources(goldenDocs)
 	if err != nil {
@@ -82,61 +53,30 @@ func TestEquivalenceIPAMCAPI(t *testing.T) {
 		t.Fatalf("golden classify: %v", err)
 	}
 
-	// Operator side: drive ONLY the shoot render+transform pipeline. The seed
-	// render is deliberately skipped — the ipam-capi seed/manager overlay
-	// uses repo-root-relative patch paths that only resolve when building from
-	// the repo root, not from the overlay subdir that KustomizeSource uses.
-	// CaptureShootOnly avoids triggering that broken seed render entirely.
+	// Operator side: shoot only (deliberate deviation from TestEquivalence which
+	// calls CaptureOperator for both seed+shoot). The seed render is skipped
+	// because the seed/manager overlay at this SHA has repo-root-relative patch
+	// paths that fail when KustomizeSource builds from the overlay subdir.
 	deps := source.Deps{
 		RootResolver: source.NewGitResolver(),
 	}
 	opShoot, err := CaptureShootOnly(context.Background(), f.CR, deps)
 	if err != nil {
-		t.Fatalf("operator shoot capture: %v", err)
+		t.Fatalf("operator capture: %v", err)
 	}
 
-	// Scoped equivalence (Decision B): compare only the delivered kinds both
-	// sides are expected to produce, dropping per-fixture known divergences.
-	scope := Scope{
-		ComparedKinds:      f.ComparedKinds,
-		KnownDivergences:   f.KnownDivergences,
-		IgnoreLabels:       f.IgnoreLabels,
-		CanonicalNamespace: f.CanonicalNamespace,
-	}
-	goldenShoot := scope.Apply(golden.Shoot)
-	opShootScoped := scope.Apply(opShoot)
+	// Scoped comparison — identical to TestEquivalence, shoot side only.
+	scope := Scope{ComparedKinds: f.ComparedKinds, KnownDivergences: f.KnownDivergences, IgnoreLabels: f.IgnoreLabels, CanonicalNamespace: f.CanonicalNamespace}
+	goldenShoot, opShootScoped := scope.Apply(golden.Shoot), scope.Apply(opShoot)
 
-	// Drop migration exclusions from both sides. These are objects that exist on
-	// both sides but with intentional field-level differences (e.g. CRD conversion
-	// fields deliberately changed as part of the Helm→kustomize migration). They
-	// cannot be handled by knownDivergences (which only suppresses single-sided
-	// missing/extra) — they must be excluded from comparison entirely.
-	for _, ex := range f.MigrationExclusions {
-		for k, u := range goldenShoot {
-			if u.GetKind() == ex.Kind && u.GetName() == ex.Name {
-				delete(goldenShoot, k)
-			}
-		}
-		for k, u := range opShootScoped {
-			if u.GetKind() == ex.Kind && u.GetName() == ex.Name {
-				delete(opShootScoped, k)
-			}
-		}
-	}
-
-	// Non-vacuity floor: ipam-capi's shoot overlay delivers CRDs + RBAC,
-	// so neither scoped set may be empty. A fixture typo (bad comparedKinds,
-	// over-broad suppression) that empties both sides would pass a vacuous
-	// Compare — guard against that false green.
 	if len(goldenShoot) == 0 {
-		t.Fatalf("scoped golden shoot set is empty — fixture comparedKinds or chartPath likely wrong")
+		t.Fatalf("scoped golden shoot set is empty — fixture comparedKinds/scoping likely wrong")
 	}
 	if len(opShootScoped) == 0 {
-		t.Fatalf("scoped operator shoot set is empty — fixture CR or comparedKinds likely wrong")
+		t.Fatalf("scoped operator shoot set is empty — fixture CR/scoping likely wrong")
 	}
 
-	shootReport := scope.CompareScoped(goldenShoot, opShootScoped)
-	if !shootReport.Equal() {
-		t.Errorf("ipam-capi shoot render mismatch:\n%s", shootReport.String())
+	if shootReport := scope.CompareScoped(goldenShoot, opShootScoped); !shootReport.Equal() {
+		t.Errorf("shoot render mismatch:\n%s", shootReport.String())
 	}
 }

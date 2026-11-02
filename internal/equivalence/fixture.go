@@ -32,17 +32,6 @@ type Fixture struct {
 	// golden render always uses the Helm chart path in ChartPath).
 	KustomizePath string `json:"kustomizePath,omitempty"`
 
-	// MigrationExclusions lists objects to drop from BOTH the golden and operator
-	// sets before comparison. Use for objects that exist on both sides but with
-	// intentional field-level differences that are part of a deliberate migration
-	// delta (e.g. CRD conversion field changes during a Helm→kustomize migration).
-	// Unlike Exclusions (golden-side only) and KnownDivergences (single-sided
-	// missing/extra only), MigrationExclusions suppress both-sided field mismatches.
-	// Justify each entry: these objects are NOT compared, so any unintentional drift
-	// in them will go undetected. Use sparingly; prefer knownDivergences for
-	// single-sided objects.
-	MigrationExclusions []ExclusionEntry `json:"migrationExclusions,omitempty"`
-
 	ComparedKinds      []string         `json:"comparedKinds"`
 	KnownDivergences   []ExclusionEntry `json:"knownDivergences"`
 	IgnoreLabels       []string         `json:"ignoreLabels"`

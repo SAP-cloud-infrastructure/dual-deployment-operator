@@ -1,82 +1,67 @@
 # ipam-capi equivalence fixture
 
-This is the fifth equivalence fixture in the suite. It proves that the operator's
-new kustomize render for the **ipam-capi-remote DDO overlay** (`system/kustomize/ipam-capi-remote-ddo/`)
-produces identity-equivalent output to today's **ipam-capi-remote Helm chart**
-(`system/ipam-capi-remote/`) for the shoot/resource kinds that are not subject to
-intentional r7 migration deltas.
+This is the fifth equivalence fixture in the suite. It follows the **exact same
+structure** as the four Helm-source fixtures (metal-operator, boot-operator,
+argora-operator, khalkeon), with one deliberate deviation noted below.
 
-Golden side: `git clone` + `helm dependency build` + `helm template system/ipam-capi-remote/`,
-then unwrap ManagedResources → shoot object set.
+Golden side: `git clone` + `helm dependency build` + `helm template system/ipam-capi-remote/`
+at the pinned SHA `33e68278`, then `UnwrapManagedResources` + `ClassifyGolden` — identical
+to how `TestEquivalence` works for every other operator.
 
-Operator side: `source.From` → `Render` (KustomizeSource, shoot mode only via
-`CaptureShootOnly`) → `transform.Build` pipeline.
+Operator side: `source.From` → `Render` (KustomizeSource, `shootPath: managedresources`) →
+`transform.Build` — the real production render pipeline.
 
-## About the DDO overlay (PR #13218)
+SHA is `33e68278ace26fe23e0c2b36a9266a58c9b47707` — the same commit pinned by all
+four existing fixtures.
 
-The operator-side kustomize source is `system/kustomize/ipam-capi-remote-ddo/`,
-the real DDO migration overlay from **sapcc/helm-charts PR #13218**
-(`feat/ipam-capi-remote-ddo-m-qa-de-200` branch, SHA `726f6ccee8eef46152f8abc7cc0b107e6e7f9596`).
+## Deliberate deviation: shoot-only capture
 
-**PR #13218 is currently a DRAFT (as of 2026-11-02).** The overlay exists on the PR
-branch but NOT on `master`. Both `system/ipam-capi-remote/` (Helm golden) and
-`system/kustomize/ipam-capi-remote-ddo/` (DDO overlay) coexist at the PR branch SHA,
-which is why both fixture sides use the same pinned commit.
+`CaptureShootOnly` is used instead of `CaptureOperator` (the main `TestEquivalence` loop
+uses `CaptureOperator` for both seed+shoot). Only the shoot comparison is made; seed is
+not rendered.
 
-**Once PR #13218 is merged**, update `sha:` in `fixture.yaml` and `url ?ref=` in
-`cr.yaml` to a post-merge commit on `main` where both paths are present.
+### Why the seed render is skipped
 
-## Scope: shoot overlay only
+The `seed/manager` overlay at this SHA uses **repo-root-relative patch paths**:
 
-**Only the `shoot/` overlay is tested.** The `seed/` overlay is NOT covered by this fixture.
+```yaml
+# system/kustomize/ipam-capi-remote/manager/kustomization.yaml
+patches:
+  - path: kustomize/ipam-capi-remote/manager/some-patch.yaml
+```
 
-Unlike the original ipam-capi-remote source (deferred in `docs/implementation.md`),
-the new DDO overlay's `seed/` overlay IS buildable with `KustomizeSource` — it uses only
-`../base` and `../additions/seed`, both vendored, with no repo-root-relative patches.
-The original deferral reason no longer applies to `ipam-capi-remote-ddo`.
+These resolve when kustomize builds from the **repository root** (as `make build-ipam-capi-remote`
+does), but the operator's `KustomizeSource` builds from the **overlay subdir**
+(`system/kustomize/ipam-capi-remote/seed`), so the relative paths escape to a location that
+doesn't exist there, and the build fails with `no such file`.
 
-The shoot-only scope matches the task-8 brief. A follow-up fixture can add seed coverage.
+Closing this requires extending `KustomizeSource` so the clone root and the kustomize-build
+directory can differ — a CRD + source change (design §9.4) explicitly out of scope here.
 
-## Migration deltas: what the fixture does and does not check
+See **`docs/implementation.md`** → *"`ipam-capi` equivalence is DEFERRED to a standalone
+future follow-up"* for the complete deferral rationale.
 
-This fixture compares the new DDO overlay's output against the legacy Helm chart.
-The DDO overlay intentionally changes some fields as part of the r7 migration:
-
-| Object | Change | Handling |
-|--------|--------|----------|
-| Pool CRDs (4x) | `spec.conversion`: `service`→`null`, explicit webhook URL | `migrationExclusions` (not compared) |
-| Core CRDs (3x) | `spec.conversion`: `{strategy: None}` patch added | `migrationExclusions` (not compared) |
-| Webhook configurations | `dual-deployment-operator.cc.sap/webhook-injector` label added | `ignoreLabels` (stripped before compare) |
-| Pool CRDs | Same webhook-injector label | `ignoreLabels` |
-| `ipam-capi-remote-webhook-injector` ClusterRole | RBAC rules updated for r7 injector | `migrationExclusions` (not compared) |
-| Leader-election RBAC (4 objects) | Dropped (manager runs `--leader-elect=false`) | `knownDivergences` (golden-only, expected missing) |
-
-Everything else (CRD schemas, remaining RBAC, ServiceAccounts, WebhookConfiguration
-policies other than labels) is compared normally and must match.
-
-`migrationExclusions` objects are NOT regression-guarded by this fixture. The PR's own
-test suite (`tests/crd_diff_test.sh`, `tests/migration_contract.py`) covers those fields
-independently.
+The `managedresources/` (shoot) overlay **is** self-contained and renders today — it
+directly references upstream without any repo-root-relative paths. That is what this
+fixture covers.
 
 ## Network requirements
 
 This test is gated on `RUN_EQUIVALENCE=1` because it requires outbound network access:
 
 - **Golden side (Helm)**: git clone of `github.com/sapcc/helm-charts` + `helm dependency build`
-  pulling subcharts from the internal keppel OCI registry. Same requirement as the other
+  pulling subcharts from the internal keppel OCI registry — same requirement as the other
   four Helm fixtures.
 - **Operator side (kustomize)**: git clone of `github.com/sapcc/helm-charts` (same SHA) +
-  krusty fetching the provider directory base
-  (`cluster-api-ipam-provider-in-cluster//config/crd?ref=<SHA>`, a git directory base)
-  and three core CRDs via SHA-pinned `raw.githubusercontent.com` HTTP file URLs.
-  The DDO operator code handles both `refKindRemoteGitDir` and `refKindRemoteFile`
-  correctly per `internal/source/remotepolicy.go`. All kustomize sources are public/anonymous.
+  krusty fetching the `managedresources/` overlay's remote bases from `github.com` and
+  `raw.githubusercontent.com` (`cluster-api-ipam-provider-in-cluster ?ref=v1.1.0`,
+  cluster-api CRD bases `v1.13.4`). All kustomize sources are public/anonymous.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `fixture.yaml` | Pinned SHA (PR branch), chart path, kustomize overlay path, scope config, migration exclusions |
-| `cr.yaml` | `DualDeploymentOperator` CR targeting the real DDO kustomize overlay |
+| `fixture.yaml` | Pinned SHA, chart/kustomize paths, scope, known divergences |
+| `cr.yaml` | `DualDeploymentOperator` CR with KustomizeSource, `shootPath: managedresources` |
 | `overlay-values.yaml` | Per-cluster Helm overlay values for the golden render |
 | `README.md` | This file |

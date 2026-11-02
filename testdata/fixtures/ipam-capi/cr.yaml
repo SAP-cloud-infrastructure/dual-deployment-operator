@@ -2,26 +2,25 @@ apiVersion: dual-deployment-operator.cc.sap/v1alpha1
 kind: DualDeploymentOperator
 metadata:
   name: ipam-capi-remote
-  namespace: shoot--cp--m-qa-de-200
+  namespace: shoot--cp--m-qa-de-1
 spec:
   shootNamespace: kube-system
   source:
     kustomize:
-      # Pin to the HEAD of sapcc/helm-charts feat/ipam-capi-remote-ddo-m-qa-de-200 branch
-      # (PR #13218, currently draft). This is the real DDO source.kustomize overlay for
-      # ipam-capi-remote, located at system/kustomize/ipam-capi-remote-ddo/.
-      # The ref is a full 40-character commit SHA (not a mutable tag/branch).
-      url: "https://github.com/sapcc/helm-charts//system/kustomize/ipam-capi-remote-ddo?ref=726f6ccee8eef46152f8abc7cc0b107e6e7f9596"
-      # The new DDO overlay has proper seed/ and shoot/ overlays. Both are
-      # buildable with KustomizeSource — the seed overlay uses only vendored
-      # resources (../base + ../additions/seed), no repo-root-relative patches.
-      # This fixture tests the shoot overlay only (task-8 scope); see README.md.
+      # Pin to the same sapcc/helm-charts commit SHA used by all other equivalence
+      # fixtures. The ref is the full 40-character commit SHA so the gitResolver
+      # takes the fetchSHA code path (full-depth fetch + arbitrary-SHA checkout).
+      # system/kustomize/ipam-capi-remote/managedresources is the self-contained
+      # upstream CRDs+RBAC overlay (no repo-root-relative patches; renders standalone).
+      url: "https://github.com/sapcc/helm-charts//system/kustomize/ipam-capi-remote?ref=33e68278ace26fe23e0c2b36a9266a58c9b47707"
+      # seedPath is set but never exercised in this fixture: the seed/manager
+      # overlay uses repo-root-relative patches that only resolve from the repo
+      # root, not from the overlay subdir. CaptureShootOnly skips the seed render.
+      # See testdata/fixtures/ipam-capi/README.md and
+      # docs/implementation.md §"ipam-capi equivalence is DEFERRED".
       seedPath: seed
-      shootPath: shoot
+      shootPath: managedresources
   shootAccess:
     secretName: ipam-capi-remote-kubeconfig
-    server: https://api.m-qa-de-200.cp.internal.a-qa-de-200.soil-garden.qa-de-1.cloud.sap
-  # No transformations for the equivalence fixture — we compare raw render output.
-  # The ipam-capi-remote-ddo overlay itself encodes the r7 CR shape (target labels
-  # for the webhook-injector, image overrides via kustomize images: transformer).
+    server: https://api.m-qa-de-1.internal
   transformations: []

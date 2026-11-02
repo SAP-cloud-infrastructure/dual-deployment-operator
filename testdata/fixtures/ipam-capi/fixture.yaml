@@ -1,40 +1,20 @@
 operator: ipam-capi
-# chartPath/chartFullname/overlayValues describe the golden-side Helm render:
-# system/ipam-capi-remote/ is the helmified wrapper chart (the current deployed
-# baseline). The golden render is git clone + helm dependency build + helm template,
-# exactly as for the other four operator fixtures.
 chartFullname: ipam-capi-remote
 repoURL: https://github.com/sapcc/helm-charts.git
-# SHA is the HEAD of feat/ipam-capi-remote-ddo-m-qa-de-200 (PR #13218, draft).
-# Both system/ipam-capi-remote/ (Helm golden) and system/kustomize/ipam-capi-remote-ddo/
-# (new DDO kustomize overlay) coexist at this commit — choosing the same SHA for both
-# sides pins the comparison to a coherent snapshot.
-#
-# NOTE: PR #13218 is currently a DRAFT (as of 2026-11-02). Once merged, update
-# this SHA to a commit on main that includes the merged overlay.
-sha: 726f6ccee8eef46152f8abc7cc0b107e6e7f9596
+sha: 33e68278ace26fe23e0c2b36a9266a58c9b47707
 chartPath: system/ipam-capi-remote
 overlayValues: overlay-values.yaml
 cr: cr.yaml
+# kustomizePath documents the operator-side overlay (source.kustomize.url root +
+# shootPath). Present for documentation; the golden render uses chartPath above.
+kustomizePath: system/kustomize/ipam-capi-remote
 
-# kustomizePath documents the real DDO source.kustomize overlay path in
-# sapcc/helm-charts (PR #13218). The operator-side CR uses shootPath: shoot
-# within this overlay root. The fixture uses the PR branch SHA above where
-# this path exists; it does NOT exist on master (PR is still draft).
-kustomizePath: system/kustomize/ipam-capi-remote-ddo
-
-# ── Seed overlay ──────────────────────────────────────────────────────────────
-# This fixture tests only the shoot overlay (task-8 scope). The new DDO overlay
-# at system/kustomize/ipam-capi-remote-ddo/ has a proper seed/ overlay that IS
-# buildable with KustomizeSource (uses only ../base and ../additions/seed, both
-# vendored — no repo-root-relative patches). The original deferral reason from
-# docs/implementation.md §"ipam-capi equivalence is DEFERRED" no longer applies
-# to ipam-capi-remote-ddo. A follow-up fixture can add seed coverage.
-# See README.md for more context.
-# ──────────────────────────────────────────────────────────────────────────────
-
-# comparedKinds scopes the equivalence assertion to the resource kinds delivered
-# by the shoot overlay (CRDs + RBAC + WebhookConfigurations).
+# comparedKinds scopes the equivalence assertion (Decision B) to the resource
+# kinds the managedresources overlay delivers (CRDs + RBAC). WebhookConfigurations
+# are excluded because the operator-side CR uses shootPath: managedresources, which
+# contains only the upstream CRDs+RBAC overlay — webhooks live in the separate
+# webhooks/ overlay. The golden Helm chart emits WebhookConfigurations as part of
+# its shoot content, but managedresources-only does not.
 comparedKinds:
   - CustomResourceDefinition
   - ClusterRole
@@ -42,84 +22,59 @@ comparedKinds:
   - Role
   - RoleBinding
   - ServiceAccount
-  - ValidatingWebhookConfiguration
-  - MutatingWebhookConfiguration
 
-# canonicalNamespace neutralizes namespace-only divergences where the Helm chart
-# hardcodes a namespace on cluster-scoped resources.
+# canonicalNamespace neutralizes a namespace-only divergence: the Helm chart's
+# managedresources/ pre-render hardcodes namespace "kube-system" on some
+# cluster-scoped leader-election RBAC; the upstream kustomize source keeps them
+# cluster-scoped with an empty namespace. Canonicalize to kube-system.
 canonicalNamespace: kube-system
 
-# exclusions: objects in the golden Helm render that the operator render has no
-# equivalent for (dropped from golden side only).
+# Objects the golden render emits that the operator render has no equivalent for.
 exclusions: []
 
-# migrationExclusions: objects that exist on BOTH sides but with intentional
-# field-level differences that are part of the deliberate Helm→DDO migration delta.
-# These are excluded from comparison on both sides (not comparable like-for-like).
-# Unlike knownDivergences (single-sided missing/extra), migrationExclusions suppress
-# both-sided field mismatches. Each entry is justified below.
-#
-# Use sparingly: excluded objects are NOT regression-guarded. The entry is justified
-# if the field change is an intentional design decision in the DDO overlay.
-migrationExclusions:
-  # CRD conversion fields: the DDO overlay applies SAP conversion shim patches that
-  # change spec.conversion on pool CRDs (service→URL-only) and add {strategy:None}
-  # on core CRDs. These are intentional r7 migration changes — the test verifies
-  # identity parity (same CRD names, same schema) while accepting the conversion delta.
-  # (PR README: "four SAP pool conversion shims"; "core CRD conversion default".)
-  - kind: CustomResourceDefinition
-    name: clusters.cluster.x-k8s.io
-    reason: "DDO overlay adds {strategy:None} conversion patch; field change is intentional r7 migration delta"
-  - kind: CustomResourceDefinition
-    name: globalinclusterippools.ipam.cluster.x-k8s.io
-    reason: "DDO overlay applies URL-only conversion shim (service:null, explicit URL); intentional r7 migration delta"
-  - kind: CustomResourceDefinition
-    name: globalinclusterprefixpools.ipam.cluster.x-k8s.io
-    reason: "DDO overlay applies URL-only conversion shim; intentional r7 migration delta"
-  - kind: CustomResourceDefinition
-    name: inclusterippools.ipam.cluster.x-k8s.io
-    reason: "DDO overlay applies URL-only conversion shim; intentional r7 migration delta"
-  - kind: CustomResourceDefinition
-    name: inclusterprefixpools.ipam.cluster.x-k8s.io
-    reason: "DDO overlay applies URL-only conversion shim; intentional r7 migration delta"
-  - kind: CustomResourceDefinition
-    name: ipaddressclaims.ipam.cluster.x-k8s.io
-    reason: "DDO overlay adds {strategy:None} conversion patch; intentional r7 migration delta"
-  - kind: CustomResourceDefinition
-    name: ipaddresses.ipam.cluster.x-k8s.io
-    reason: "DDO overlay adds {strategy:None} conversion patch; intentional r7 migration delta"
-  # Webhook-injector ClusterRole rules: the DDO overlay uses updated r7 RBAC rules
-  # (get,patch for CRDs/admission configs + separate list,watch for informers).
-  # The Helm chart has legacy pre-r7 rules. The rule change is an intentional r7
-  # migration delta; the ClusterRole still exists on both sides (same name).
+# ignoreLabels: legacy delivery-mechanism labels baked into the committed
+# managedresources/ pre-render that the operator's kustomize render does not
+# reproduce (the clusterctl move-hierarchy marker).
+ignoreLabels:
+  - clusterctl.cluster.x-k8s.io
+
+# knownDivergences: in-scope objects present on exactly one side that are
+# expected and must not be reported as missing/extra (kind+name, justified).
+knownDivergences:
+  # sapcc additions in the Helm wrapper chart not present in the upstream kustomize source.
+  - kind: ClusterRole
+    name: ipam-capi-manager-admin-role
+    reason: "sapcc addition (admin role); upstream kustomize source emits no equivalent"
   - kind: ClusterRole
     name: ipam-capi-remote-webhook-injector
-    reason: "DDO overlay uses updated r7 webhook-injector RBAC rules vs legacy Helm rules; intentional r7 migration delta"
-
-# knownDivergences: in-scope objects present on exactly ONE side (missing/extra).
-# These are suppressed by CompareScoped (single-sided only; never hides field mismatches).
-knownDivergences:
-  # Leader-election RBAC intentionally dropped by DDO overlay: the manager runs
-  # --leader-elect=false, so leader-election RBAC is no longer needed. The Helm
-  # chart still delivers it. (PR README: "The redundant leader-election RBAC is
-  # intentionally dropped: the manager runs --leader-elect=false".)
-  - kind: ClusterRole
-    name: ipam-capi-remote-leader-election-role
-    reason: "DDO overlay drops leader-election RBAC (manager runs --leader-elect=false); Helm chart still delivers it"
+    reason: "sapcc addition (webhook-injector RBAC); upstream kustomize source emits no equivalent"
+  - kind: ClusterRoleBinding
+    name: ipam-capi-metal-admin-rolebinding
+    reason: "sapcc addition (metal admin binding); upstream kustomize source emits no equivalent"
+  - kind: ClusterRoleBinding
+    name: ipam-capi-metal-rolebinding
+    reason: "sapcc addition (metal rolebinding); upstream kustomize source emits no equivalent"
+  - kind: ClusterRoleBinding
+    name: ipam-capi-remote-webhook-injector-rolebinding
+    reason: "sapcc addition (webhook-injector RBAC binding); upstream kustomize source emits no equivalent"
+  # Leader-election: the wrapper delivers it as ClusterRole/ClusterRoleBinding
+  # (namespace kube-system); the upstream kustomize source keeps it as
+  # Role/RoleBinding — a divergent kind pair (same pattern as the other 4 fixtures).
   - kind: ClusterRole
     name: ipam-capi-leader-election-role
-    reason: "DDO overlay drops leader-election RBAC; Helm chart still delivers it"
-  - kind: ClusterRoleBinding
-    name: ipam-capi-remote-leader-election-rolebinding
-    reason: "DDO overlay drops leader-election RBAC binding; Helm chart still delivers it"
+    reason: "wrapper promotes leader-election to ClusterRole; upstream kustomize keeps it Role — divergent kind pair"
+  - kind: ClusterRole
+    name: ipam-capi-remote-leader-election-role
+    reason: "wrapper promotes leader-election (remote) to ClusterRole; upstream kustomize keeps it Role — divergent kind pair"
   - kind: ClusterRoleBinding
     name: ipam-capi-leader-election-rolebinding
-    reason: "DDO overlay drops leader-election RBAC binding; Helm chart still delivers it"
-
-# ignoreLabels: the DDO overlay bakes dual-deployment-operator.cc.sap/webhook-injector
-# labels into WebhookConfigurations and pool CRDs (r7 target-label for injector CA
-# stamping). The Helm chart does not carry these labels. Strip them before comparison
-# so the label addition does not cause false positives; the conversion/URL changes
-# on the same pool CRDs are handled separately via migrationExclusions.
-ignoreLabels:
-  - dual-deployment-operator.cc.sap/webhook-injector
+    reason: "wrapper promotes leader-election binding to ClusterRoleBinding; upstream kustomize keeps it RoleBinding — divergent kind pair"
+  - kind: ClusterRoleBinding
+    name: ipam-capi-remote-leader-election-rolebinding
+    reason: "wrapper promotes leader-election binding to ClusterRoleBinding; upstream kustomize keeps it RoleBinding — divergent kind pair"
+  - kind: Role
+    name: ipam-capi-leader-election-role
+    reason: "upstream kustomize keeps leader-election as Role; wrapper promotes to ClusterRole — divergent kind pair"
+  - kind: RoleBinding
+    name: ipam-capi-leader-election-rolebinding
+    reason: "upstream kustomize keeps leader-election binding as RoleBinding; wrapper promotes to ClusterRoleBinding — divergent kind pair"
