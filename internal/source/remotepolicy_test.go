@@ -799,6 +799,9 @@ func TestClassifyKustomizeReference_GitHubShorthand_AcceptsUnambiguous(t *testin
 		// double-slash boundary — unambiguous even with subpath
 		{"github.com/org/repo//subdir?ref=v1", "v1"},
 		{"github.com/org/repo//deep/nested?ref=abc1234", "abc1234"},
+		// .git/ boundary — unambiguous (regression: round-3 finding)
+		{"github.com/org/repo.git/subdir?ref=v1", "v1"},
+		{"github.com/org/repo.git?ref=v1", "v1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.raw, func(t *testing.T) {

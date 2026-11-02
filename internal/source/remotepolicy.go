@@ -277,13 +277,21 @@ func classifyGitHubShorthand(raw string) (refKind, string, error) {
 }
 
 // hasAmbiguousShorthandPath returns true when a GitHub shorthand path has more
-// than 2 non-empty path segments (org + repo) without an explicit // separator.
-// github.com/org/repo → 2 segments → unambiguous.
-// github.com/org/repo//subdir → has // → unambiguous.
-// github.com/org/repo/subdir → 3 segments, no // → ambiguous → reject.
+// than 2 non-empty path segments (org + repo) without an explicit repo/path
+// boundary marker (// separator or .git suffix). Mirrors the HTTPS check in
+// hasAmbiguousPathBoundary so both forms treat the same markers as unambiguous.
+//
+// github.com/org/repo → 2 segments → unambiguous
+// github.com/org/repo//subdir → has // → unambiguous
+// github.com/org/repo.git/subdir → has .git → unambiguous
+// github.com/org/repo/subdir → 3 segments, no marker → ambiguous → reject
 func hasAmbiguousShorthandPath(pathPart string) bool {
 	// If the path contains //, the boundary is explicit — not ambiguous.
 	if strings.Contains(pathPart, "//") {
+		return false
+	}
+	// .git suffix is an explicit boundary marker (e.g. repo.git/subdir).
+	if strings.Contains(pathPart, ".git") {
 		return false
 	}
 	// Strip the leading "github.com/" to count only the path segments after the host.
@@ -291,7 +299,7 @@ func hasAmbiguousShorthandPath(pathPart string) bool {
 	if idx := strings.Index(pathPart, "/"); idx >= 0 {
 		afterHost = pathPart[idx+1:] // everything after "github.com/"
 	}
-	// >2 segments after the host means there's an extra subdir without a // marker.
+	// >2 segments after the host means there's an extra subdir without a marker.
 	return pathSegmentCount("/"+afterHost) > 2
 }
 
