@@ -7,9 +7,11 @@ package source
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"sigs.k8s.io/kustomize/api/krusty"
+	"sigs.k8s.io/kustomize/api/resmap"
 	"sigs.k8s.io/kustomize/api/types"
 	"sigs.k8s.io/kustomize/kyaml/filesys"
 
@@ -25,6 +27,13 @@ import (
 // The hook is package-level so remotepolicy_test.go can install it without
 // exported plumbing.
 var kustomizeFetchHook func()
+
+// krustyRunHook is a test-only hook that, when non-nil, makes runKrusty return
+// this error instead of executing the real krust.Run. This lets tests inject
+// synthetic krusty errors (including errors containing raw URLs and credentials)
+// to verify that the sanitizing wrapper behaves correctly without requiring any
+// network access. In production this is always nil.
+var krustyRunHook error
 
 type kustomizeSource struct {
 	spec                        *v1alpha1.KustomizeSource
@@ -61,9 +70,13 @@ func (k *kustomizeSource) Render(ctx context.Context, mode Mode, namespace strin
 	if kustomizeFetchHook != nil {
 		kustomizeFetchHook()
 	}
-	resMap, err := kust.Run(filesys.MakeFsOnDisk(), root)
+
+	resMap, err := runKrusty(kust, root)
 	if err != nil {
-		return nil, fmt.Errorf("source: kustomize build (mode=%s): %w", mode, err)
+		// sanitizeKrustyError maps krusty's raw error (which can contain
+		// repository URLs, credentials, or git command output) to a stable
+		// sanitized message. The raw error is dropped — never forwarded.
+		return nil, fmt.Errorf("source: kustomize build (mode=%s): %w", mode, sanitizeKrustyError(err))
 	}
 	yamlBytes, err := resMap.AsYaml()
 	if err != nil {
@@ -75,4 +88,38 @@ func (k *kustomizeSource) Render(ctx context.Context, mode Mode, namespace strin
 	}
 	manifest.ApplyNamespace(manifests, namespace)
 	return manifests, nil
+}
+
+// runKrusty executes krust.Run against the given root on the real filesystem,
+// returning the resource map or an error. In tests, krustyRunHook (when non-nil)
+// short-circuits the real call and returns the synthetic error directly —
+// this allows injection of raw-URL-bearing errors to verify sanitization.
+func runKrusty(kust *krusty.Kustomizer, root string) (resmap.ResMap, error) {
+	if krustyRunHook != nil {
+		return nil, krustyRunHook
+	}
+	return kust.Run(filesys.MakeFsOnDisk(), root)
+}
+
+// sanitizeKrustyError maps a raw error from krusty.Run to a stable, sanitized
+// render error. krusty errors can contain repository URLs, embedded credentials
+// (if the caller mis-configured an authSecretRef), full git command strings, or
+// HTTP status lines — none of which should be surfaced to the operator's
+// reconciliation log or status conditions.
+//
+// Design: we apply uniform sanitization — never forward the raw error message,
+// always substitute a fixed descriptive string. This is strictly safer than
+// trying to classify and partially sanitize: any partial approach risks missing
+// a new krusty error format that leaks a URL.
+//
+// The returned error:
+//   - Is nil iff err == nil (success path is completely unaffected).
+//   - Uses errors.New (not fmt.Errorf with %w) so the raw error is never
+//     accessible via errors.Unwrap or errors.As — preventing callers from
+//     accidentally logging the sanitized-away detail.
+func sanitizeKrustyError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return errors.New("remote fetch or build failed: krusty encountered an error building the kustomization (details omitted to prevent credential/URL leakage; check git access and remote base availability)")
 }
