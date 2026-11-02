@@ -198,22 +198,9 @@ binding authority. `proposal.md` has the why/what-changes summary.
 
 ---
 
-## Task 8: Final gate
+## Task 8: ipam-capi equivalence fixture (partial — shoot overlay only)
 
-- 8.1 `go build ./...`
-- 8.2 `KUBEBUILDER_ASSETS=$(setup-envtest use 1.36 -p path) go test ./...`
-- 8.3 `make run-golangci-lint`
-- 8.4 `openspec validate kustomize-remote-bases-argo --strict`
-- 8.5 `git diff --check`
-- 8.6 `code-reviewer` subagent review (model `openai/gpt-6-astra`), address findings.
-
-- [ ] Task 8 complete
-
----
-
-## Task 9: ipam-capi equivalence fixture (partial — shoot overlay only)
-
-- 9.1 Add a fifth `RUN_EQUIVALENCE=1`-gated fixture under
+- 8.1 Add a fifth `RUN_EQUIVALENCE=1`-gated fixture under
   `testdata/fixtures/ipam-capi/` (golden: `sapcc/helm-charts` at a pinned
   SHA via `git clone` + `helm dependency build` + `helm template` of
   `system/ipam-capi-remote/`; operator side:
@@ -221,7 +208,7 @@ binding authority. `proposal.md` has the why/what-changes summary.
   `system/kustomize/ipam-capi-remote/` at the same SHA), scoped to the
   `managedresources`/shoot overlay only — it is self-contained and renders
   today, unlike the `manager`/seed overlay.
-- 9.2 Do NOT attempt the seed overlay fixture: it is blocked by
+- 8.2 Do NOT attempt the seed overlay fixture: it is blocked by
   `kustomize/ipam-capi-remote/manager`'s repo-root-relative `patches[].path`
   values, which only resolve when kustomize builds from the repo root —
   `KustomizeSource` builds from the overlay subdir instead. Closing it
@@ -230,9 +217,22 @@ binding authority. `proposal.md` has the why/what-changes summary.
   that is explicitly out of scope for this change (Global Constraints — no
   `RootResolver`/CRD/API changes) and stays a standalone future follow-up
   per `docs/implementation.md`'s existing deferral note.
-- 9.3 Record in the fixture's README/comment why the seed overlay is
+- 8.3 Record in the fixture's README/comment why the seed overlay is
   skipped and link back to `docs/implementation.md`'s ipam-capi deferral
   note, so the follow-up change has a ready pointer.
 - Commit: `test(equivalence): add ipam-capi shoot-overlay fixture (seed overlay deferred)`
+
+- [ ] Task 8 complete
+
+---
+
+## Task 9: Final gate
+
+- 9.1 `go build ./...`
+- 9.2 `KUBEBUILDER_ASSETS=$(setup-envtest use 1.36 -p path) go test ./...`
+- 9.3 `make run-golangci-lint`
+- 9.4 `openspec validate kustomize-remote-bases-argo --strict`
+- 9.5 `git diff --check`
+- 9.6 `code-reviewer` subagent review (model `openai/gpt-6-astra`), address findings.
 
 - [ ] Task 9 complete
