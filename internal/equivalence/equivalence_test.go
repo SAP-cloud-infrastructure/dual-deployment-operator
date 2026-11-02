@@ -14,14 +14,16 @@ import (
 )
 
 // requireEquivalenceEnabled gates the network-dependent equivalence tests. The
-// golden render runs `helm dependency build`, which pulls subcharts from the
-// internal-only keppel OCI registry — unreachable from public CI runners. Set
-// RUN_EQUIVALENCE=1 to run these tests where that registry is reachable
+// golden render for Helm-source fixtures runs `helm dependency build`, which
+// pulls subcharts from the internal-only keppel OCI registry — unreachable from
+// public CI runners. The ipam-capi kustomize fixture additionally requires krusty
+// to fetch transitive remote bases from github.com during the build. Set
+// RUN_EQUIVALENCE=1 to run these tests where network access is available
 // (local dev, internal runners).
 func requireEquivalenceEnabled(t *testing.T) {
 	t.Helper()
 	if os.Getenv("RUN_EQUIVALENCE") == "" {
-		t.Skip("equivalence tests require RUN_EQUIVALENCE=1 (needs the internal keppel OCI registry)")
+		t.Skip("equivalence tests require RUN_EQUIVALENCE=1 (needs network access: internal keppel OCI registry and/or public github.com)")
 	}
 }
 

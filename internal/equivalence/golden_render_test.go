@@ -8,6 +8,8 @@ package equivalence
 import (
 	"context"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 func TestGoldenRenderMetalOperatorFromGit(t *testing.T) {
@@ -27,4 +29,57 @@ func TestGoldenRenderMetalOperatorFromGit(t *testing.T) {
 	if len(docs) == 0 {
 		t.Fatal("expected rendered documents from metal-operator-remote")
 	}
+}
+
+// TestRenderGoldenKustomizeNamespaceHandling verifies that RenderGoldenKustomize
+// mirrors manifest.ApplyNamespace exactly:
+//   - cluster-scoped kinds (CRD, ClusterRole, …) always get an empty namespace,
+//     even if krusty stamped one onto them
+//   - namespaced resources without a namespace are stamped with req.Namespace
+//   - namespaced resources that already have a namespace are left unchanged
+//
+// This is a pure offline test exercising applyGoldenKustomizeNamespace, the
+// shared helper called by RenderGoldenKustomize, without a git clone.
+func TestRenderGoldenKustomizeNamespaceHandling(t *testing.T) {
+	docs := []*unstructured.Unstructured{
+		makeTestObj("apiextensions.k8s.io/v1", "CustomResourceDefinition", "spurious-ns", "foos.example.com"),
+		makeTestObj("rbac.authorization.k8s.io/v1", "ClusterRole", "", "foo-role"),
+		makeTestObj("v1", "ServiceAccount", "", "foo-sa"),
+		makeTestObj("v1", "ServiceAccount", "already-set", "bar-sa"),
+	}
+	// Call the production helper directly — no duplication.
+	applyGoldenKustomizeNamespace(docs, "target-ns")
+
+	cases := []struct {
+		name   string
+		wantNS string
+	}{
+		{"foos.example.com", ""},   // CRD: spurious namespace cleared
+		{"foo-role", ""},           // ClusterRole: stays empty
+		{"foo-sa", "target-ns"},    // SA without namespace: stamped
+		{"bar-sa", "already-set"},  // SA with existing namespace: unchanged
+	}
+	byName := map[string]*unstructured.Unstructured{}
+	for _, d := range docs {
+		byName[d.GetName()] = d
+	}
+	for _, tc := range cases {
+		d := byName[tc.name]
+		if d == nil {
+			t.Errorf("object %q not found", tc.name)
+			continue
+		}
+		if got := d.GetNamespace(); got != tc.wantNS {
+			t.Errorf("object %q: namespace = %q, want %q", tc.name, got, tc.wantNS)
+		}
+	}
+}
+
+func makeTestObj(apiVersion, kind, ns, name string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	u.SetAPIVersion(apiVersion)
+	u.SetKind(kind)
+	u.SetNamespace(ns)
+	u.SetName(name)
+	return u
 }

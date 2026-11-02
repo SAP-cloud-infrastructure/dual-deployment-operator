@@ -1,0 +1,6 @@
+# Representative per-cluster overlay values for system/ipam-capi-remote/ golden render.
+# These mirror the cc/kube-secrets shape for a chosen QA shoot.
+# ipam-capi's wrapper chart requires region to select RBAC group bindings
+# (same pattern as the other four operator fixtures).
+global:
+  region: qa-de-1

@@ -1,16 +1,16 @@
 # ipam-capi equivalence fixture
 
 This is the fifth equivalence fixture in the suite. It proves that the operator's
-kustomize render for the **ipam-capi shoot overlay** (`managedresources/`) matches the
-golden output produced by running `krusty.Run` directly on the same overlay at the
-same pinned `sapcc/helm-charts` commit SHA.
+kustomize render for the **ipam-capi shoot overlay** (`managedresources/`) produces
+output equivalent to today's **ipam-capi-remote Helm chart** (`system/ipam-capi-remote/`)
+at the same pinned `sapcc/helm-charts` commit SHA — the same golden baseline pattern
+used by all four existing operator fixtures.
 
-Unlike the four Helm fixtures (metal-operator, boot-operator, argora-operator, khalkeon),
-whose golden render uses `helm dependency build` + `helm template`, this fixture's golden
-render uses `krusty.Run` with `LoadRestrictionsNone` — the same engine the operator's
-production `kustomizeSource.Render` uses. This means both sides ultimately call the same
-krusty code path; the comparison proves end-to-end equivalence between the direct golden
-krusty run and the operator's full render+transform pipeline.
+Golden side: `git clone` + `helm dependency build` + `helm template system/ipam-capi-remote/`,
+then unwrap ManagedResources → shoot object set.
+
+Operator side: `source.From` → `Render` (KustomizeSource, shoot mode only) →
+`transform.Build` pipeline, captured before the delivery layer.
 
 ## Scope: shoot overlay only
 
@@ -52,27 +52,27 @@ ipam-capi-specific blockers. The relevant excerpt:
 > (build from the repo root, target the overlay) — a CRD + source change (design §9.4),
 > hence its own follow-up rather than part of the equivalence-tests change.
 
-When that `KustomizeSource` extension ships, a **second fixture** (e.g.
-`testdata/fixtures/ipam-capi-seed/`) can be added to cover the manager/seed overlay,
-and the `cr.yaml` here updated to use `seedPath: seed` with the extended CR field
-that specifies the clone root separately from the build dir.
+When that `KustomizeSource` extension ships, a second test covering the seed/manager overlay
+can be added alongside this fixture. The `cr.yaml` here already has a `seedPath: seed` field
+that will be exercised once the seed render is unblocked.
 
 ## Network requirements
 
-- The golden krusty build fetches transitive remote bases at build time:
-  - `github.com/kubernetes-sigs/cluster-api-ipam-provider-in-cluster//config/*?ref=v1.1.0`
-  - `raw.githubusercontent.com/kubernetes-sigs/cluster-api/v1.13.4/config/crd/bases/*.yaml`
-- The operator-side render clones `sapcc/helm-charts` at the pinned SHA via `gitResolver`.
-- All sources are **public/anonymous** — no OCI registry credentials needed (unlike the
-  Helm fixtures, which pull subcharts from the internal keppel OCI registry).
+This test is gated on `RUN_EQUIVALENCE=1` because it requires outbound network access:
 
-The test is still gated on `RUN_EQUIVALENCE=1` because it requires outbound network access
-to `github.com` and `raw.githubusercontent.com`, which is not available on public CI runners.
+- **Golden side (Helm)**: git clone of `github.com/sapcc/helm-charts` + `helm dependency build`
+  pulling subcharts from the internal keppel OCI registry (`keppel.global.cloud.sap/ccloud-helm/…`).
+  Same requirement as the other four Helm fixtures.
+- **Operator side (kustomize)**: git clone of `github.com/sapcc/helm-charts` (same SHA) +
+  krusty fetching transitive remote bases (`cluster-api-ipam-provider-in-cluster ?ref=v1.1.0`,
+  cluster-api CRD bases `v1.13.4`) from `github.com` and `raw.githubusercontent.com`.
+  All kustomize sources are public/anonymous (no OCI registry credentials needed for this side).
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `fixture.yaml` | Pinned SHA, kustomize overlay path, comparison scope config |
-| `cr.yaml` | Representative `DualDeploymentOperator` CR for the operator-side render |
+| `fixture.yaml` | Pinned SHA, Helm chart path, overlay values file, kustomize overlay path, comparison scope config |
+| `cr.yaml` | Representative `DualDeploymentOperator` CR for the operator-side kustomize render |
+| `overlay-values.yaml` | Per-cluster Helm overlay values for the golden `ipam-capi-remote` chart render |
 | `README.md` | This file — scope rationale and network requirements |

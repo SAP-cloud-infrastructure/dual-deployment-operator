@@ -25,6 +25,8 @@ import (
 	"sigs.k8s.io/kustomize/api/types"
 	"sigs.k8s.io/kustomize/kyaml/filesys"
 	"sigs.k8s.io/yaml"
+
+	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/internal/manifest"
 )
 
 // GoldenRenderReq describes an option-A golden render: clone the wrapper chart
@@ -183,13 +185,31 @@ func RenderGoldenKustomize(ctx context.Context, req KustomizeGoldenRenderReq) ([
 		return nil, fmt.Errorf("golden-kustomize: parse docs: %w", err)
 	}
 
-	// 3. Apply namespace to namespaced resources (mirrors manifest.ApplyNamespace).
-	for _, d := range docs {
-		if d.GetNamespace() == "" {
-			d.SetNamespace(req.Namespace)
-		}
-	}
+	// 3. Apply namespace, mirroring manifest.ApplyNamespace exactly.
+	applyGoldenKustomizeNamespace(docs, req.Namespace)
 	return docs, nil
+}
+
+// applyGoldenKustomizeNamespace mirrors manifest.ApplyNamespace:
+// cluster-scoped kinds are normalized to empty namespace (clearing any spurious
+// namespace stamped by krusty/upstream); namespaced resources without a namespace
+// are stamped with ns; those that already have a namespace are left unchanged.
+func applyGoldenKustomizeNamespace(docs []*unstructured.Unstructured, ns string) {
+	for _, d := range docs {
+		if manifest.IsClusterScoped(d.GetKind()) {
+			if d.GetNamespace() != "" {
+				d.SetNamespace("")
+			}
+			continue
+		}
+		if ns == "" {
+			continue
+		}
+		if d.GetNamespace() != "" {
+			continue
+		}
+		d.SetNamespace(ns)
+	}
 }
 
 func mergeValuesYAML(docs [][]byte) (map[string]any, error) {

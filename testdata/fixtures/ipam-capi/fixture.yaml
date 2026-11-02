@@ -1,30 +1,41 @@
 operator: ipam-capi
+# chartPath/chartFullname/overlayValues describe the golden-side Helm render:
+# system/ipam-capi-remote/ is the helmified wrapper chart (the current deployed
+# baseline, same structure as the other four operator fixtures). The golden render
+# is git clone + helm dependency build + helm template, exactly as for metal-operator.
+chartFullname: ipam-capi-remote
 repoURL: https://github.com/sapcc/helm-charts.git
 sha: 33e68278ace26fe23e0c2b36a9266a58c9b47707
-# kustomizePath selects the kustomize-based golden render path instead of Helm.
-# The golden render is krusty.Run on this subpath at the pinned SHA, matching the
-# production kustomizeSource.Render behaviour with LoadRestrictionsNone.
-# krusty will fetch transitive remote bases from github.com during the build
-# (cluster-api-ipam-provider-in-cluster ?ref=v1.1.0, cluster-api CRD bases
-# v1.13.4) — both are public/anonymous, no OCI registry access needed.
-kustomizePath: system/kustomize/ipam-capi-remote/managedresources
+chartPath: system/ipam-capi-remote
+overlayValues: overlay-values.yaml
 cr: cr.yaml
+
+# kustomizePath documents the operator-side kustomize overlay path (shoot only).
+# The operator-side render uses KustomizeSource at the same pinned SHA.
+# Not used by RenderGolden (Helm); present for documentation and future use.
+kustomizePath: system/kustomize/ipam-capi-remote/managedresources
 
 # ── Seed overlay deliberately excluded ────────────────────────────────────────
 # The seed/manager overlay is NOT covered by this fixture. See README.md for
 # the full rationale; brief summary:
 #   ipam-capi's manager overlay references patch files by repo-root-relative
-#   paths (patches[].path: kustomize/ipam-capi-remote/manager/…).  Those paths
-#   only resolve when kustomize builds from the repo root.  The operator's
+#   paths (patches[].path: kustomize/ipam-capi-remote/manager/…). Those paths
+#   only resolve when kustomize builds from the repo root. The operator's
 #   KustomizeSource builds from the overlay subdir, so the relative paths
-#   double and the build fails with "no such file".  Closing the seed overlay
+#   double and the build fails with "no such file". Closing the seed overlay
 #   requires extending KustomizeSource so the clone root and the kustomize-build
 #   dir can differ (CRD + source change, design §9.4) — explicitly out of scope
 #   here per docs/implementation.md §"ipam-capi equivalence is DEFERRED".
 # ──────────────────────────────────────────────────────────────────────────────
 
-# comparedKinds scopes the equivalence assertion to the resource kinds ipam-capi's
-# shoot overlay delivers (CRDs + RBAC from cluster-api-ipam-provider-in-cluster).
+# comparedKinds scopes the equivalence assertion to the resource kinds delivered
+# by the operator's managedresources overlay. WebhookConfigurations are excluded
+# because the operator-side CR uses shootPath: managedresources, which only
+# contains upstream CRDs+RBAC — webhooks live in the separate webhooks/ overlay.
+# The golden Helm chart emits WebhookConfigurations as part of its shoot content,
+# but the managedresources-only operator render does not, so comparing them would
+# always report them missing on the operator side. They are deliberately out of
+# scope for this fixture (task-8-brief: "managedresources/shoot overlay only").
 comparedKinds:
   - CustomResourceDefinition
   - ClusterRole
@@ -32,25 +43,61 @@ comparedKinds:
   - Role
   - RoleBinding
   - ServiceAccount
-  - ValidatingWebhookConfiguration
-  - MutatingWebhookConfiguration
 
-# exclusions: objects present in the golden krusty build that the operator render
-# has no equivalent for (e.g. RBAC the upstream kustomize source emits but the
-# operator's transformation pipeline explicitly filters out). Leave empty unless
-# a concrete divergence is identified at run time; add with justification.
+# canonicalNamespace neutralizes a namespace-only divergence: the ipam-capi Helm
+# chart's managedresources/ pre-render hardcodes namespace "kube-system" on some
+# cluster-scoped leader-election RBAC (ClusterRole/ClusterRoleBinding promoted
+# from the upstream Role/RoleBinding), while the upstream kustomize source and
+# the operator both keep them as cluster-scoped with an empty namespace.
+# Canonicalize to kube-system so this stale-golden namespace does not mask genuine drift.
+canonicalNamespace: kube-system
+
+# exclusions: objects present in the golden Helm render that the operator render
+# has no equivalent for.
 exclusions: []
 
 # knownDivergences: in-scope objects present on exactly one side that are expected
-# and must not be reported as missing/extra. Leave empty for now; populate after
-# the first real RUN_EQUIVALENCE=1 run identifies any structural divergences
-# (e.g. label additions from the upstream kustomize commonLabels stanza that the
-# krusty golden emits but the operator-side krusty does not, or vice-versa).
-knownDivergences: []
+# and must not be reported as missing/extra (kind+name, justified).
+knownDivergences:
+  # sapcc additions in the Helm wrapper chart not present in the upstream kustomize source.
+  - kind: ClusterRole
+    name: ipam-capi-manager-admin-role
+    reason: "sapcc addition (admin role); upstream kustomize source emits no equivalent"
+  - kind: ClusterRole
+    name: ipam-capi-leader-election-role
+    reason: "wrapper promotes leader-election to ClusterRole; upstream kustomize keeps it a Role — divergent kind pair"
+  - kind: ClusterRole
+    name: ipam-capi-remote-leader-election-role
+    reason: "wrapper promotes leader-election (remote) to ClusterRole; upstream kustomize keeps it a Role — divergent kind pair (if present)"
+  - kind: ClusterRole
+    name: ipam-capi-remote-webhook-injector
+    reason: "sapcc addition (webhook-injector RBAC); upstream kustomize source emits no equivalent"
+  - kind: ClusterRoleBinding
+    name: ipam-capi-metal-admin-rolebinding
+    reason: "sapcc addition (metal admin binding); upstream kustomize source emits no equivalent"
+  - kind: ClusterRoleBinding
+    name: ipam-capi-metal-rolebinding
+    reason: "sapcc addition (metal rolebinding); upstream kustomize source emits no equivalent"
+  - kind: ClusterRoleBinding
+    name: ipam-capi-leader-election-rolebinding
+    reason: "wrapper promotes leader-election binding to ClusterRoleBinding; upstream kustomize keeps it a RoleBinding — divergent kind pair"
+  - kind: ClusterRoleBinding
+    name: ipam-capi-remote-leader-election-rolebinding
+    reason: "wrapper promotes leader-election binding (remote) to ClusterRoleBinding; upstream kustomize keeps it a RoleBinding — divergent kind pair (if present)"
+  - kind: ClusterRoleBinding
+    name: ipam-capi-remote-webhook-injector-rolebinding
+    reason: "sapcc addition (webhook-injector RBAC binding); upstream kustomize source emits no equivalent"
+  # Upstream kustomize source keeps leader-election as Role/RoleBinding (not promoted).
+  - kind: Role
+    name: ipam-capi-leader-election-role
+    reason: "upstream kustomize keeps leader-election as Role; Helm wrapper promotes it to ClusterRole — divergent kind pair"
+  - kind: RoleBinding
+    name: ipam-capi-leader-election-rolebinding
+    reason: "upstream kustomize keeps leader-election binding as RoleBinding; Helm wrapper promotes it to ClusterRoleBinding — divergent kind pair"
 
-# ignoreLabels: per-fixture label keys stripped before comparison. Add kustomize-
-# provenance labels emitted by the upstream kustomize source (e.g. commonLabels
-# stanza keys) that the golden krusty build produces but the operator-side render
-# does not, or that differ between the two krusty runs for incidental reasons.
-# Leave empty initially; populate after the first real run.
+# ignoreLabels: per-fixture label keys stripped before comparison. Add labels
+# baked into the Helm golden (e.g. helm.sh/chart, app.kubernetes.io/managed-by)
+# that the kustomize operator render does not reproduce. The global allowlist in
+# allowlist.go already covers helm.sh/chart and app.kubernetes.io/managed-by;
+# list only ipam-capi-specific label keys here.
 ignoreLabels: []
