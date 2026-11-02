@@ -44,18 +44,25 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Collect the shared-library closure of /usr/bin/git AND the git-core transport
-# helpers into /git-libs.  We scan every binary under /usr/lib/git-core/ that is
-# an ELF executable (e.g. git-remote-https, git-remote-http) in addition to
-# /usr/bin/git itself, so their transitive deps (libcurl-gnutls, libssl, libz,
-# libpcre2-posix, …) are included.  Without this step, HTTPS remote-base fetches
-# fail at runtime with "error while loading shared libraries: libcurl-gnutls.so".
+# helpers into /git-libs.  We enumerate every -executable file under git-core
+# and run ldd on each; ldd exits non-zero for non-ELF files (scripts) — we
+# suppress those errors with "|| true" so the pipeline keeps running.  Scanning
+# the helpers is essential: git-remote-https links against libcurl-gnutls which
+# /usr/bin/git itself does not, and omitting it would break HTTPS remote bases.
+#
+# Fail-closed build-time guards (both must pass or the build aborts):
+#   1. At least one library was collected (guards against a silent empty closure).
+#   2. libcurl-gnutls is present (guards the HTTPS transport chain specifically).
 RUN mkdir -p /git-libs && \
-    find /usr/bin/git /usr/lib/git-core/ -type f -executable \
-         -exec sh -c 'file "$1" | grep -q ELF' _ {} \; -print | \
-      xargs -I '{}' ldd '{}' 2>/dev/null | \
+    find /usr/bin/git /usr/lib/git-core/ -type f -executable -print | \
+      xargs -I '{}' sh -c 'ldd "$1" 2>/dev/null || true' _ {} | \
       awk '/=>/ { print $3 } /^\// { print $1 }' | \
       grep -E '^/' | sort -u | \
-      xargs -I '{}' cp --parents '{}' /git-libs
+      xargs -I '{}' cp --parents '{}' /git-libs && \
+    lib_count=$(find /git-libs -name '*.so*' | wc -l) && \
+    [ "$lib_count" -gt 0 ] || { echo "ERROR: git shared-lib collection produced 0 libraries"; exit 1; } && \
+    find /git-libs -name 'libcurl-gnutls*' | grep -q . || \
+      { echo "ERROR: libcurl-gnutls not found in git-libs — HTTPS transport will fail"; exit 1; }
 
 # ── final image ───────────────────────────────────────────────────────────────
 # Use distroless/base (not static) as the final base image.

@@ -61,13 +61,14 @@ bookworm / debian 12) would risk glibc version skew.
 | `/usr/lib/git-core/` | `/usr/lib/git-core/` | git sub-commands (`git-remote-https`, etc.) |
 | `/git-libs/` (ldd closure) | `/` | shared libraries (`libc`, `libcurl-gnutls`, `libz`, `libpcre2-posix`, etc.) |
 
-The ldd closure is collected by scanning **both** `/usr/bin/git` and every ELF
-executable under `/usr/lib/git-core/` (e.g. `git-remote-https`, `git-remote-http`):
+The ldd closure is collected by scanning **both** `/usr/bin/git` and every
+executable under `/usr/lib/git-core/` (e.g. `git-remote-https`, `git-remote-http`).
+`ldd` is run on each file; non-ELF files (shell scripts) emit an error on stderr
+which is suppressed with `|| true` so they don't abort the pipeline:
 
 ```sh
-find /usr/bin/git /usr/lib/git-core/ -type f -executable \
-     -exec sh -c 'file "$1" | grep -q ELF' _ {} \; -print | \
-  xargs -I '{}' ldd '{}' 2>/dev/null | \
+find /usr/bin/git /usr/lib/git-core/ -type f -executable -print | \
+  xargs -I '{}' sh -c 'ldd "$1" 2>/dev/null || true' _ {} | \
   awk '/=>/ { print $3 } /^\// { print $1 }' | \
   grep -E '^/' | sort -u | \
   xargs -I '{}' cp --parents '{}' /git-libs
@@ -77,6 +78,14 @@ Scanning the git-core helpers is essential: `git-remote-https` links against
 `libcurl-gnutls` (for HTTPS transport) which `/usr/bin/git` itself does not
 directly depend on. Omitting this step would cause HTTPS remote-base fetches to
 fail at runtime with `error while loading shared libraries: libcurl-gnutls.so.4`.
+
+**Fail-closed build-time guards** — the collection RUN step aborts the build
+(non-zero exit) if either of these assertions fails:
+
+1. Zero libraries collected — guards against a silent empty closure (e.g. if
+   `ldd` or `find` paths change in a future Debian package update).
+2. `libcurl-gnutls` absent — guards the HTTPS transport chain specifically,
+   since it is the most critical lib that is not pulled in via `/usr/bin/git`.
 
 No shell, package manager, or unrelated Debian tooling is copied into the final
 image. The distroless posture is preserved.
@@ -164,21 +173,26 @@ docker build -t ddo:task6-test .
 
 **Step 2 — Verify git is present and executable:**
 ```bash
-docker run --rm ddo:task6-test /usr/bin/git version
+docker run --rm --entrypoint=/usr/bin/git ddo:task6-test version
 # Expected output: git version 2.x.y
 ```
 
-**Step 3 — Verify HTTPS transport works (requires network):**
+**Step 3 — Verify HTTPS transport works (required, needs network):**
 ```bash
-docker run --rm ddo:task6-test /usr/bin/git ls-remote https://github.com/kubernetes-sigs/kustomize HEAD
-# Expected: prints a SHA + HEAD ref, exit 0
-# This exercises git-remote-https and its libcurl-gnutls dependency.
+docker run --rm --entrypoint=/usr/bin/git ddo:task6-test \
+  ls-remote https://github.com/kubernetes-sigs/kustomize HEAD
+# Expected: prints a SHA + "HEAD" ref line, exit 0.
+# This exercises git-remote-https and its libcurl-gnutls dependency end-to-end.
+# A "error while loading shared libraries" failure here means the lib collection
+# in the git-provider stage missed a dependency — this step is REQUIRED before
+# promoting any new image build to production.
 ```
 
-**Step 4 — Verify manager binary still runs:**
+**Step 4 — Verify manager binary still runs (entrypoint intact):**
 ```bash
-docker run --rm --entrypoint=/usr/bin/git ddo:task6-test version
-docker run --rm ddo:task6-test  # should print usage/error (no kubeconfig) — exit non-zero but not "exec format error"
+docker run --rm ddo:task6-test
+# Expected: exits non-zero with a kubeconfig/flag error from the manager —
+# NOT "exec format error" (which would indicate a broken binary or wrong arch).
 ```
 
 **Step 5 — Verify non-root user:**
@@ -190,7 +204,7 @@ docker inspect ddo:task6-test | jq '.[0].Config.User'
 # Expected: "65532:65532"
 ```
 
-**Step 6 — e2e kind test (optional, network-dependent):**
+**Step 6 — e2e kind test (required, network-dependent):**
 Apply a `KustomizeSource` CR with a remote kustomize base reference (e.g. pointing
 to a real git repo at a pinned SHA). Verify the operator reconciles successfully
 and the rendered manifests contain the expected resources from the remote base.
@@ -201,6 +215,6 @@ and the rendered manifests contain the expected resources from the remote base.
 
 | File | Change |
 |---|---|
-| `Dockerfile` | New `git-provider` stage (debian:trixie-slim); switch final stage to `distroless/base-debian13:nonroot`; copy git binary + git-core + **full recursive shared-lib closure** (including libcurl-gnutls for HTTPS transport) |
+| `Dockerfile` | New `git-provider` stage (debian:trixie-slim); switch final stage to `distroless/base-debian13:nonroot`; copy git binary + git-core + full recursive shared-lib closure; drop `file`-based ELF filter (unavailable in base image) in favour of ldd-with-`|| true`; add build-time fail-closed guards for empty closure and missing `libcurl-gnutls` |
 | `internal/source/git_binary_test.go` | New — dedicated fail-closed tests for git-missing error path |
-| `.superpowers/sdd/plan/task-6-report.md` | This file |
+| `.superpowers/sdd/plan/task-6-report.md` | This file; review fixes: corrected ldd snippet, fixed `docker run` verification commands to use `--entrypoint`, promoted HTTPS check and e2e test from optional to required |
