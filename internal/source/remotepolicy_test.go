@@ -765,3 +765,121 @@ func TestTreeWalkKustomize_VisitsBasesField(t *testing.T) {
 		t.Errorf("unexpected remote ref: %q", remotes[0].Raw)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Round-2 review findings
+// ---------------------------------------------------------------------------
+
+// Finding 4 (round 2): GitHub shorthand ambiguous path boundary
+// github.com/org/repo/subdir?ref=v1 must be rejected (same ambiguity as HTTPS).
+// github.com/org/repo?ref=v1 (no subpath) must still be accepted.
+
+func TestClassifyKustomizeReference_GitHubShorthand_RejectsAmbiguousSubdir(t *testing.T) {
+	cases := []string{
+		"github.com/org/repo/subdir?ref=v1",
+		"github.com/org/repo/deep/nested?ref=v1",
+	}
+	for _, raw := range cases {
+		t.Run(raw, func(t *testing.T) {
+			_, _, err := classifyKustomizeReference(raw)
+			if err == nil {
+				t.Errorf("classifyKustomizeReference(%q): expected rejection (ambiguous shorthand path, no // boundary), got nil", raw)
+			}
+		})
+	}
+}
+
+func TestClassifyKustomizeReference_GitHubShorthand_AcceptsUnambiguous(t *testing.T) {
+	cases := []struct {
+		raw     string
+		wantRef string
+	}{
+		// bare org/repo — unambiguous (exactly 2 segments, no subpath)
+		{"github.com/org/repo?ref=v1", "v1"},
+		// double-slash boundary — unambiguous even with subpath
+		{"github.com/org/repo//subdir?ref=v1", "v1"},
+		{"github.com/org/repo//deep/nested?ref=abc1234", "abc1234"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			got, ref, err := classifyKustomizeReference(tc.raw)
+			if err != nil {
+				t.Fatalf("classifyKustomizeReference(%q) unexpected error: %v", tc.raw, err)
+			}
+			if got != refKindRemoteGitDir {
+				t.Errorf("classifyKustomizeReference(%q) = %v, want refKindRemoteGitDir", tc.raw, got)
+			}
+			if ref != tc.wantRef {
+				t.Errorf("classifyKustomizeReference(%q) ref = %q, want %q", tc.raw, ref, tc.wantRef)
+			}
+		})
+	}
+}
+
+// Coverage gap: RejectsFileTraversalEscape but with the outside file actually
+// created, confirming the boundary check fires even when the target exists.
+func TestTreeWalkKustomize_RejectsExistingFileOutsideRoot(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+
+	// Create the outside file so os.Stat succeeds — boundary must still be caught.
+	if err := os.WriteFile(filepath.Join(outside, "outside.yaml"), []byte("kind: ConfigMap\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// kustomization.yaml references the outside file via a relative traversal.
+	// We need the relative path from root to the outside file.
+	rel, err := filepath.Rel(root, filepath.Join(outside, "outside.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - `+rel+`
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, walkErr := treeWalkKustomize(root)
+	if walkErr == nil {
+		t.Fatal("treeWalkKustomize: expected boundary violation for existing file outside root, got nil")
+	}
+	if !strings.Contains(walkErr.Error(), "boundary") && !strings.Contains(walkErr.Error(), "escape") {
+		t.Errorf("expected boundary error, got: %v", walkErr)
+	}
+}
+
+// Coverage gap: symlinked kustomization.yaml pointing outside the root.
+func TestTreeWalkKustomize_RejectsSymlinkedKustomizationFile(t *testing.T) {
+	if !supportsSymlinks(t) {
+		t.Skip("symlinks not supported")
+	}
+	root := t.TempDir()
+	outside := t.TempDir()
+
+	// Create a real kustomization.yaml outside the root.
+	if err := os.WriteFile(filepath.Join(outside, "kustomization.yaml"), []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: []
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Symlink root/kustomization.yaml → outside/kustomization.yaml
+	if err := os.Symlink(
+		filepath.Join(outside, "kustomization.yaml"),
+		filepath.Join(root, "kustomization.yaml"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	_, walkErr := treeWalkKustomize(root)
+	if walkErr == nil {
+		t.Fatal("treeWalkKustomize: expected boundary violation for symlinked kustomization.yaml outside root, got nil")
+	}
+	if !strings.Contains(walkErr.Error(), "boundary") && !strings.Contains(walkErr.Error(), "escape") {
+		t.Errorf("expected boundary error, got: %v", walkErr)
+	}
+}

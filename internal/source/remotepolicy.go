@@ -249,8 +249,16 @@ func hasAmbiguousPathBoundary(u *url.URL) bool {
 
 // classifyGitHubShorthand classifies a github.com/org/repo[//path][?ref=] reference.
 func classifyGitHubShorthand(raw string) (refKind, string, error) {
-	// Split off query
-	_, query, _ := strings.Cut(raw, "?")
+	// Split off query to inspect the path portion separately.
+	pathPart, query, _ := strings.Cut(raw, "?")
+
+	// Finding 4 (round 2): apply the same repo/path boundary validation as the
+	// HTTPS classifier. github.com/org/repo is exactly 3 path segments (host +
+	// org + repo); any additional segment without a // separator is ambiguous.
+	// Strip the "github.com/" prefix to get just the path, then check.
+	if hasAmbiguousShorthandPath(pathPart) {
+		return 0, "", errors.New("remote reference: ambiguous GitHub shorthand path (multi-segment path with no // boundary); use // to separate repo from subpath")
+	}
 
 	// Finding 5: only ?ref= is mandatory; do NOT fall back to ?version=.
 	ref := ""
@@ -266,6 +274,25 @@ func classifyGitHubShorthand(raw string) (refKind, string, error) {
 	}
 
 	return refKindRemoteGitDir, ref, nil
+}
+
+// hasAmbiguousShorthandPath returns true when a GitHub shorthand path has more
+// than 2 non-empty path segments (org + repo) without an explicit // separator.
+// github.com/org/repo → 2 segments → unambiguous.
+// github.com/org/repo//subdir → has // → unambiguous.
+// github.com/org/repo/subdir → 3 segments, no // → ambiguous → reject.
+func hasAmbiguousShorthandPath(pathPart string) bool {
+	// If the path contains //, the boundary is explicit — not ambiguous.
+	if strings.Contains(pathPart, "//") {
+		return false
+	}
+	// Strip the leading "github.com/" to count only the path segments after the host.
+	afterHost := pathPart
+	if idx := strings.Index(pathPart, "/"); idx >= 0 {
+		afterHost = pathPart[idx+1:] // everything after "github.com/"
+	}
+	// >2 segments after the host means there's an extra subdir without a // marker.
+	return pathSegmentCount("/"+afterHost) > 2
 }
 
 // pathSegmentCount counts non-empty path segments in a URL path string.
