@@ -222,7 +222,7 @@ binding authority. `proposal.md` has the why/what-changes summary.
   note, so the follow-up change has a ready pointer.
 - Commit: `test(equivalence): add ipam-capi shoot-overlay fixture (seed overlay deferred)`
 
-- [ ] Task 8 complete
+- [x] Task 8 complete
 
 ---
 

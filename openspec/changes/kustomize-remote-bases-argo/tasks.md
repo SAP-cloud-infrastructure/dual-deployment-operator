@@ -44,7 +44,7 @@ SPDX-License-Identifier: Apache-2.0
 
 ## 8. ipam-capi equivalence fixture (partial — shoot overlay only)
 
-- [ ] 8.1 Add a fifth `RUN_EQUIVALENCE=1`-gated fixture under
+- [x] 8.1 Add a fifth `RUN_EQUIVALENCE=1`-gated fixture under
   `testdata/fixtures/ipam-capi/` (golden: `sapcc/helm-charts` at a pinned
   SHA via `git clone` + `helm dependency build` + `helm template` of
   `system/ipam-capi-remote/`; operator side:
@@ -66,7 +66,7 @@ SPDX-License-Identifier: Apache-2.0
   note, so the follow-up change has a ready pointer.
 - Commit: `test(equivalence): add ipam-capi shoot-overlay fixture (seed overlay deferred)`
 
-- [ ] Task 8 complete
+- [x] Task 8 complete
 
 ## 9. Final gate
 
