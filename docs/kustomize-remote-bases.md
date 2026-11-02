@@ -11,6 +11,14 @@ are rendered separately, so remote content is fetched as part of each render.
 There is no hermetic offline render or SHA-keyed cache for remote Kustomize bases.
 A remote fetch failure fails the render rather than silently omitting content.
 
+> **Note on the operator's render cache:** The operator includes an opt-in
+> in-memory render cache keyed by the resolved content identifier (git SHA or OCI
+> digest). When a cache hit occurs, the cached result is returned directly and
+> krusty is **not** invoked — meaning remote bases are **not** re-fetched and the
+> preflight check is **not** re-run. The cache therefore does not change security
+> properties for new content, but it does mean that subsequent reconciles of
+> unchanged source content skip the preflight entirely.
+
 For example, a GitHub remote directory may be referenced as:
 
 ```yaml
@@ -43,6 +51,14 @@ The default is `false`, which permits tags and branches. When set to `true`, the
 preflight requires every reachable remote reference to use a 40-character
 lowercase hexadecimal commit SHA and rejects other refs before any remote fetch.
 The flag governs transitive remote bases, not the configured source-root URL.
+
+> **Preflight scope:** The preflight walks the **locally reachable** kustomization
+> tree — the files that exist in the local clone at the time of the check. It does
+> not fetch remote bases first and then inspect their kustomization files; remote
+> bases that themselves reference further remotes are invisible to the preflight
+> until after krusty fetches them. The SHA-pin check therefore covers the entry
+> points visible before the first fetch, not kustomizations nested inside remote
+> repositories.
 
 ## Credentials and network access
 
