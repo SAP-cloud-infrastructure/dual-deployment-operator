@@ -285,7 +285,7 @@ func classifyHTTPURL(raw string) (refKind, string, error) {
 	// "?ref=sha&bad=%zz") is rejected rather than silently returning partial
 	// results. url.URL.Query() calls url.ParseQuery internally but discards
 	// the error — a malformed query could extract a valid ?ref= and pass the
-	// SHA gate even though krusty/git would see the WHOLE unparseable query
+	// SHA gate even though krusty/git would see the WHOLE unparsable query
 	// string and default to HEAD (bypassing the pinned SHA entirely).
 	var ref string
 	if u.RawQuery != "" {

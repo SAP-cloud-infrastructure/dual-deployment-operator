@@ -1382,17 +1382,17 @@ func TestResolveAndCheckBoundary_NonExistentOutOfBounds(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestClassifyHTTPURL_RejectsMalformedQuery verifies that a URL with a valid
-// ?ref= but also an unparseable query fragment (e.g. ?ref=sha&bad=%zz) is
+// ?ref= but also an unparsable query fragment (e.g. ?ref=sha&bad=%zz) is
 // rejected, not silently accepted with only the valid portion extracted.
 //
 // Background: url.URL.Query() silently drops malformed query fragments and
 // returns partial results; a mixed valid+invalid query like ?ref=<sha>&bad=%zz
 // would extract the valid SHA and pass the strict SHA gate, while krusty/git
-// would see the whole unparseable query and default to HEAD — bypassing the
+// would see the whole unparsable query and default to HEAD — bypassing the
 // pin entirely. We must use url.ParseQuery explicitly and reject on parse error.
 func TestClassifyHTTPURL_RejectsMalformedQuery(t *testing.T) {
 	cases := []string{
-		// valid ?ref= combined with an unparseable fragment — must be REJECTED
+		// valid ?ref= combined with an unparsable fragment — must be REJECTED
 		"https://github.com/org/repo?ref=0123456789abcdef0123456789abcdef01234567&bad=%zz",
 		"https://example.com/org/repo?ref=abc123&x=%gg",
 		// purely malformed query — must be REJECTED
