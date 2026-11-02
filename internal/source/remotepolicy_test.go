@@ -194,6 +194,16 @@ func TestClassifyKustomizeReference_SanitizedErrors(t *testing.T) {
 			raw:     "git@github.com:org/secret-repo.git?ref=v1",
 			mustNot: "secret-repo",
 		},
+		// Finding 1: malformed credential-bearing URLs must also not leak
+		{
+			raw:     "https://user:SECRET@host/%zz",
+			mustNot: "SECRET",
+		},
+		// Finding 1: SCP-style with credential must not leak username or path
+		{
+			raw:     "user:SECRET@host:repo",
+			mustNot: "SECRET",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.raw, func(t *testing.T) {
@@ -206,6 +216,346 @@ func TestClassifyKustomizeReference_SanitizedErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Finding 3: git:: prefix stripping — SSH still rejected, HTTPS accepted
+// ---------------------------------------------------------------------------
+
+func TestClassifyKustomizeReference_GitDoubleColon_SSHRejected(t *testing.T) {
+	cases := []string{
+		"git::ssh://git@host/repo?ref=v1",
+		"git::git@github.com:org/repo?ref=v1",
+	}
+	for _, raw := range cases {
+		t.Run(raw, func(t *testing.T) {
+			_, _, err := classifyKustomizeReference(raw)
+			if err == nil {
+				t.Errorf("classifyKustomizeReference(%q): expected SSH rejection after git:: strip, got nil", raw)
+			}
+		})
+	}
+}
+
+func TestClassifyKustomizeReference_GitDoubleColon_HTTPSAccepted(t *testing.T) {
+	cases := []struct {
+		raw     string
+		wantRef string
+	}{
+		{"git::https://github.com/org/repo?ref=v1", "v1"},
+		{"git::https://gitlab.com/org/repo//path?ref=abc123", "abc123"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			got, ref, err := classifyKustomizeReference(tc.raw)
+			if err != nil {
+				t.Fatalf("classifyKustomizeReference(%q) unexpected error: %v", tc.raw, err)
+			}
+			if got != refKindRemoteGitDir {
+				t.Errorf("classifyKustomizeReference(%q) = %v, want refKindRemoteGitDir", tc.raw, got)
+			}
+			if ref != tc.wantRef {
+				t.Errorf("classifyKustomizeReference(%q) ref = %q, want %q", tc.raw, ref, tc.wantRef)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Finding 4: ambiguous paths with ?ref= (multi-segment, no //) must be rejected
+// ---------------------------------------------------------------------------
+
+func TestClassifyKustomizeReference_RejectAmbiguousWithRef(t *testing.T) {
+	cases := []string{
+		// multi-segment path after org/repo, no // separator, even though ?ref= present
+		"https://example.com/org/repo/subdir?ref=v1",
+		"https://github.com/org/repo/subdir?ref=v1",
+	}
+	for _, raw := range cases {
+		t.Run(raw, func(t *testing.T) {
+			_, _, err := classifyKustomizeReference(raw)
+			if err == nil {
+				t.Errorf("classifyKustomizeReference(%q): expected rejection (ambiguous path, no // boundary), got nil", raw)
+			}
+		})
+	}
+}
+
+func TestClassifyKustomizeReference_AcceptDoubleSlashWithRef(t *testing.T) {
+	// double-slash boundary makes the repo/path split unambiguous
+	cases := []struct {
+		raw     string
+		wantRef string
+	}{
+		{"https://example.com/org/repo//subdir?ref=v1", "v1"},
+		{"https://github.com/org/repo//subdir?ref=v1", "v1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			got, ref, err := classifyKustomizeReference(tc.raw)
+			if err != nil {
+				t.Fatalf("classifyKustomizeReference(%q) unexpected error: %v", tc.raw, err)
+			}
+			if got != refKindRemoteGitDir {
+				t.Errorf("classifyKustomizeReference(%q) = %v, want refKindRemoteGitDir", tc.raw, got)
+			}
+			if ref != tc.wantRef {
+				t.Errorf("classifyKustomizeReference(%q) ref = %q, want %q", tc.raw, ref, tc.wantRef)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Finding 5: GitHub shorthand — exact ref extraction, no ?version= fallback
+// ---------------------------------------------------------------------------
+
+func TestClassifyKustomizeReference_GitHubShorthand_ExactRef(t *testing.T) {
+	cases := []struct {
+		raw     string
+		wantRef string
+	}{
+		{"github.com/org/repo?ref=v1.2.3", "v1.2.3"},
+		{"github.com/org/repo//path?ref=abc1234", "abc1234"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			_, ref, err := classifyKustomizeReference(tc.raw)
+			if err != nil {
+				t.Fatalf("classifyKustomizeReference(%q) unexpected error: %v", tc.raw, err)
+			}
+			if ref != tc.wantRef {
+				t.Errorf("classifyKustomizeReference(%q) ref = %q, want %q", tc.raw, ref, tc.wantRef)
+			}
+		})
+	}
+}
+
+func TestClassifyKustomizeReference_GitHubShorthand_MissingRef(t *testing.T) {
+	cases := []string{
+		"github.com/org/repo",                 // no query at all
+		"github.com/org/repo?version=v1",      // version= not accepted (only ref=)
+		"github.com/org/repo?ref=",            // empty ref=
+	}
+	for _, raw := range cases {
+		t.Run(raw, func(t *testing.T) {
+			_, _, err := classifyKustomizeReference(raw)
+			if err == nil {
+				t.Errorf("classifyKustomizeReference(%q): expected rejection (missing ?ref=), got nil", raw)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Finding 6: deduplication — ordered set semantics
+// ---------------------------------------------------------------------------
+
+func buildTreeWithDuplicateRemotes(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+
+	write := func(path, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// root lists the same remote twice in resources
+	write(filepath.Join(root, "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://github.com/org/repo?ref=v1.0.0
+  - ./child
+  - https://github.com/org/repo?ref=v1.0.0
+`)
+	// child also references the same remote
+	write(filepath.Join(root, "child", "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://github.com/org/repo?ref=v1.0.0
+`)
+	return root
+}
+
+func TestTreeWalkKustomize_Deduplicates(t *testing.T) {
+	root := buildTreeWithDuplicateRemotes(t)
+
+	remotes, err := treeWalkKustomize(root)
+	if err != nil {
+		t.Fatalf("treeWalkKustomize: %v", err)
+	}
+	if len(remotes) != 1 {
+		t.Fatalf("expected 1 deduplicated remote, got %d: %v", len(remotes), remotes)
+	}
+	if remotes[0].Raw != "https://github.com/org/repo?ref=v1.0.0" {
+		t.Errorf("unexpected remote ref: %q", remotes[0].Raw)
+	}
+}
+
+func buildTreeWithSharedLocalSubtree(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+
+	write := func(path, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// root → child-a and child-b, both of which reference the same remote
+	write(filepath.Join(root, "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ./child-a
+  - ./child-b
+`)
+	write(filepath.Join(root, "child-a", "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://github.com/org/shared?ref=v2.0.0
+`)
+	write(filepath.Join(root, "child-b", "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://github.com/org/shared?ref=v2.0.0
+`)
+	return root
+}
+
+func TestTreeWalkKustomize_DeduplicatesSharedSubtree(t *testing.T) {
+	root := buildTreeWithSharedLocalSubtree(t)
+
+	remotes, err := treeWalkKustomize(root)
+	if err != nil {
+		t.Fatalf("treeWalkKustomize: %v", err)
+	}
+	if len(remotes) != 1 {
+		t.Fatalf("expected 1 deduplicated remote from shared subtree, got %d: %v", len(remotes), remotes)
+	}
+	if remotes[0].Raw != "https://github.com/org/shared?ref=v2.0.0" {
+		t.Errorf("unexpected remote ref: %q", remotes[0].Raw)
+	}
+}
+
+func buildTreeWithOrderedMultipleRemotes(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+
+	write := func(path, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// first remote is in root, second in child — order must be preserved
+	write(filepath.Join(root, "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://github.com/org/first?ref=v1.0.0
+  - ./child
+`)
+	write(filepath.Join(root, "child", "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://github.com/org/second?ref=v2.0.0
+`)
+	return root
+}
+
+func TestTreeWalkKustomize_PreservesFirstDiscoveryOrder(t *testing.T) {
+	root := buildTreeWithOrderedMultipleRemotes(t)
+
+	remotes, err := treeWalkKustomize(root)
+	if err != nil {
+		t.Fatalf("treeWalkKustomize: %v", err)
+	}
+	if len(remotes) != 2 {
+		t.Fatalf("expected 2 ordered remotes, got %d: %v", len(remotes), remotes)
+	}
+	if remotes[0].Raw != "https://github.com/org/first?ref=v1.0.0" {
+		t.Errorf("remotes[0] = %q, want first", remotes[0].Raw)
+	}
+	if remotes[1].Raw != "https://github.com/org/second?ref=v2.0.0" {
+		t.Errorf("remotes[1] = %q, want second", remotes[1].Raw)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Finding 2: boundary checks on files + symlinks
+// ---------------------------------------------------------------------------
+
+func TestTreeWalkKustomize_RejectsFileEscapeViaSymlink(t *testing.T) {
+	if !supportsSymlinks(t) {
+		t.Skip("symlinks not supported")
+	}
+	root := t.TempDir()
+	outside := t.TempDir()
+
+	// Create an outside file
+	if err := os.WriteFile(filepath.Join(outside, "outside.yaml"), []byte("kind: ConfigMap\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Symlink inside root pointing to outside file
+	if err := os.Symlink(filepath.Join(outside, "outside.yaml"), filepath.Join(root, "escaping.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	// kustomization.yaml references the symlink (which resolves outside root)
+	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ./escaping.yaml
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := treeWalkKustomize(root)
+	if err == nil {
+		t.Fatal("treeWalkKustomize: expected boundary violation for symlinked file escape, got nil")
+	}
+	if !strings.Contains(err.Error(), "boundary") && !strings.Contains(err.Error(), "escape") {
+		t.Errorf("expected boundary error, got: %v", err)
+	}
+}
+
+func TestTreeWalkKustomize_RejectsFileTraversalEscape(t *testing.T) {
+	root := t.TempDir()
+	// kustomization.yaml references a file outside root via ../
+	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../outside.yaml
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := treeWalkKustomize(root)
+	if err == nil {
+		t.Fatal("treeWalkKustomize: expected boundary violation for ../ file escape, got nil")
+	}
+	if !strings.Contains(err.Error(), "boundary") && !strings.Contains(err.Error(), "escape") {
+		t.Errorf("expected boundary error, got: %v", err)
+	}
+}
+
+// supportsSymlinks returns true if symlinks can be created in t.TempDir().
+func supportsSymlinks(t *testing.T) bool {
+	t.Helper()
+	dir := t.TempDir()
+	err := os.Symlink(dir, filepath.Join(dir, "test-link"))
+	return err == nil
 }
 
 // ---------------------------------------------------------------------------

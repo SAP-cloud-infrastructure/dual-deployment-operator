@@ -73,44 +73,55 @@ type RemoteRef struct {
 // bases entry string. It returns the kind and the extracted ref (non-empty for
 // refKindRemoteGitDir), or an error for forms that DDO must reject.
 //
-// Rejected forms (fail-closed, sanitized errors):
+// Rejected forms (fail-closed, sanitized errors — raw value never echoed):
+//   - The legacy go-getter git:: prefix is stripped; the underlying form is
+//     then classified and may itself be rejected.
 //   - SSH URLs (git@ SCP-style, ssh:// scheme)
 //   - URLs with embedded userinfo (user:token@host) — use authSecretRef instead
 //   - URLs with a fragment (#)
-//   - Multi-segment HTTPS paths with no // separator and no ?ref= that are
-//     ambiguous (looks like a remote but has extra path segments without a
-//     clear repo/path split marker)
+//   - HTTPS URLs with extra path segments after the repo root (>2 segments)
+//     with no // separator, regardless of whether ?ref= is present —
+//     the repo/path boundary is ambiguous.
+//   - Remote git directory references without a mandatory ?ref=
 func classifyKustomizeReference(raw string) (refKind, string, error) {
+	// Finding 3: strip the legacy go-getter git:: prefix before any other check.
+	// krusty silently strips it too; we strip it so we can classify (and reject)
+	// the underlying form correctly.
+	stripped := raw
+	if startsWithIgnoreCase(raw, "git::") {
+		stripped = raw[len("git::"):]
+	}
+
 	// --- SSH rejection (before any URL parse so we never include the raw value) ---
 	// git@host:org/repo SCP style
-	if isSCPStyle(raw) {
+	if isSCPStyle(stripped) {
 		return 0, "", errors.New("remote reference: SCP-style SSH references are not supported; use HTTPS with authSecretRef for private repositories")
 	}
 	// ssh:// scheme
-	if startsWithIgnoreCase(raw, "ssh://") {
+	if startsWithIgnoreCase(stripped, "ssh://") {
 		return 0, "", errors.New("remote reference: SSH (ssh://) scheme is not supported; use HTTPS with authSecretRef for private repositories")
 	}
 
 	// --- Fragment rejection ---
-	if strings.Contains(raw, "#") {
+	if strings.Contains(stripped, "#") {
 		return 0, "", errors.New("remote reference: URL fragments (#) are not supported in kustomize references")
 	}
 
 	// --- Local path: no scheme, starts with ./ ../ a bare name, or absolute ---
 	// A URL has a scheme (https:// / http://) or is a GitHub shorthand
 	// (github.com/…). Everything else without one of those is local.
-	if isLocalPath(raw) {
+	if isLocalPath(stripped) {
 		return refKindLocal, "", nil
 	}
 
 	// --- HTTPS / HTTP URL: parse carefully ---
-	if isHTTPURL(raw) {
-		return classifyHTTPURL(raw)
+	if isHTTPURL(stripped) {
+		return classifyHTTPURL(stripped)
 	}
 
 	// --- GitHub shorthand: github.com/org/repo[//path][?ref=] (no scheme) ---
-	if isGitHubShorthand(raw) {
-		return classifyGitHubShorthand(raw)
+	if isGitHubShorthand(stripped) {
+		return classifyGitHubShorthand(stripped)
 	}
 
 	// Anything else is unrecognised — treated as local by krusty but DDO
@@ -173,7 +184,8 @@ func isGitHubShorthand(raw string) bool {
 func classifyHTTPURL(raw string) (refKind, string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return 0, "", errors.New("remote reference: malformed URL (parse error)")
+		// Do NOT include raw or err.Error() — they may contain credential fragments.
+		return 0, "", errors.New("remote reference: malformed URL")
 	}
 
 	// Reject embedded userinfo (credentials in URL)
@@ -193,36 +205,59 @@ func classifyHTTPURL(raw string) (refKind, string, error) {
 		return refKindRemoteFile, "", nil
 	}
 
+	// Finding 4: validate repository/path boundary independent of ref presence.
+	// krusty uses exactly 2 path segments (org/repo) as the default repo path
+	// for non-file:// URLs. More segments without an explicit // separator or a
+	// .git suffix means the repo/path boundary is ambiguous — reject always.
+	if hasAmbiguousPathBoundary(u) {
+		return 0, "", errors.New("remote reference: ambiguous remote path (multi-segment path with no // or .git boundary); use // to separate repo from subpath")
+	}
+
 	// Remote git directory: requires ?ref=
 	ref := u.Query().Get("ref")
 	if ref == "" {
-		// Check for multi-segment path that might be ambiguous.
-		// krusty's default for github.com is exactly 2 path segments (org/repo);
-		// for other hosts it requires explicit // or .git marker.
-		// Without ?ref= AND without a // separator, we reject as ambiguous.
-		if !strings.Contains(raw, "//"+u.Host) && pathSegmentsAfterHost(u.Path) > 2 {
-			return 0, "", errors.New("remote reference: ambiguous remote path (multi-segment, no // separator, no ?ref=); add ?ref=<sha-or-tag> to pin")
-		}
 		return 0, "", errors.New("remote reference: remote git directory references require a pinned ?ref= query parameter")
 	}
 
 	return refKindRemoteGitDir, ref, nil
 }
 
+// hasAmbiguousPathBoundary returns true when a URL's path contains more than 2
+// non-empty segments (org/repo/extra…) with no explicit repo boundary marker
+// (// separator or .git suffix). In such cases the repo-root/kust-root split
+// is undefined and the reference must be rejected.
+func hasAmbiguousPathBoundary(u *url.URL) bool {
+	// If the raw URL contains //, the boundary is explicit — not ambiguous.
+	// Note: the raw URL's "//" after stripping the scheme is the double-slash
+	// marker, not the scheme "://". We check the raw URL's path portion.
+	// url.Parse stores the path without the //-separator, so we check the
+	// original string for the double-slash after the host.
+	rawPath := u.RawPath
+	if rawPath == "" {
+		rawPath = u.Path
+	}
+	if strings.Contains(rawPath, "//") {
+		return false
+	}
+	// Check for .git boundary marker in the path (e.g. repo.git/subdir)
+	if strings.Contains(rawPath, ".git") {
+		return false
+	}
+	// Count non-empty path segments; >2 is ambiguous
+	return pathSegmentCount(u.Path) > 2
+}
+
 // classifyGitHubShorthand classifies a github.com/org/repo[//path][?ref=] reference.
 func classifyGitHubShorthand(raw string) (refKind, string, error) {
 	// Split off query
-	base, query, _ := strings.Cut(raw, "?")
-	_ = base
+	_, query, _ := strings.Cut(raw, "?")
 
+	// Finding 5: only ?ref= is mandatory; do NOT fall back to ?version=.
 	ref := ""
 	if query != "" {
 		vals, err := url.ParseQuery(query)
 		if err == nil {
 			ref = vals.Get("ref")
-			if ref == "" {
-				ref = vals.Get("version")
-			}
 		}
 	}
 
@@ -233,17 +268,14 @@ func classifyGitHubShorthand(raw string) (refKind, string, error) {
 	return refKindRemoteGitDir, ref, nil
 }
 
-// pathSegmentsAfterHost counts non-empty path segments in a URL path.
-func pathSegmentsAfterHost(path string) int {
-	// path includes leading /; trim it
+// pathSegmentCount counts non-empty path segments in a URL path string.
+func pathSegmentCount(path string) int {
 	path = strings.TrimPrefix(path, "/")
 	if path == "" {
 		return 0
 	}
-	// Also ignore the // double-slash separator (already handled above)
-	parts := strings.Split(path, "/")
 	count := 0
-	for _, p := range parts {
+	for _, p := range strings.Split(path, "/") {
 		if p != "" {
 			count++
 		}
@@ -273,8 +305,8 @@ type kustomizationYAML struct {
 // It detects reference cycles (same canonical path visited twice) and rejects
 // path/symlink escapes (any local path that resolves outside rootDir).
 //
-// Returns the ordered slice of RemoteRef values discovered (one per remote entry,
-// in DFS order).
+// Returns an ordered set of RemoteRef values discovered (DFS order,
+// first-occurrence deduplicated by Raw value).
 func treeWalkKustomize(rootDir string) ([]RemoteRef, error) {
 	// Canonicalize the root so we can detect escapes reliably.
 	absRoot, err := filepath.EvalSymlinks(rootDir)
@@ -284,9 +316,10 @@ func treeWalkKustomize(rootDir string) ([]RemoteRef, error) {
 	absRoot = filepath.Clean(absRoot)
 
 	var remotes []RemoteRef
-	visited := make(map[string]bool) // canonical paths already on the stack (cycle detection)
+	seen := make(map[string]bool)    // deduplicate remote refs by Raw
+	visited := make(map[string]bool) // DFS stack for cycle detection (canonical dirs)
 
-	if err := walkDir(absRoot, absRoot, visited, &remotes); err != nil {
+	if err := walkDir(absRoot, absRoot, visited, seen, &remotes); err != nil {
 		return nil, err
 	}
 	return remotes, nil
@@ -294,15 +327,20 @@ func treeWalkKustomize(rootDir string) ([]RemoteRef, error) {
 
 // walkDir recursively visits a single directory's kustomization.yaml,
 // accumulating remote refs and detecting cycles/escapes.
-func walkDir(absRoot, dir string, visited map[string]bool, remotes *[]RemoteRef) error {
+func walkDir(absRoot, dir string, visited, seen map[string]bool, remotes *[]RemoteRef) error {
 	// Resolve the dir canonically (follow symlinks)
 	absDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		// Directory may not exist (e.g. escape target); treat as boundary violation
 		if os.IsNotExist(err) {
-			return fmt.Errorf("tree walk: path boundary violation: directory %q does not exist or escapes the root boundary", sanitizePath(dir, absRoot))
+			// Non-existent target: still check boundary before giving up silently.
+			// Use filepath.Clean(Abs) as a best-effort canonical path for boundary check.
+			absApprox := filepath.Clean(dir)
+			if !isUnderRoot(absRoot, absApprox) {
+				return fmt.Errorf("tree walk: path boundary violation: local reference escapes the root boundary")
+			}
+			return nil // non-existent but in-bounds — skip
 		}
-		return fmt.Errorf("tree walk: resolve dir: %w", err)
+		return fmt.Errorf("tree walk: resolve directory: %w", err)
 	}
 	absDir = filepath.Clean(absDir)
 
@@ -318,8 +356,9 @@ func walkDir(absRoot, dir string, visited map[string]bool, remotes *[]RemoteRef)
 	visited[absDir] = true
 	defer func() { delete(visited, absDir) }()
 
-	// Read and parse kustomization.yaml (try both names)
-	kust, err := readKustomization(absDir)
+	// Finding 2: boundary-check the kustomization file itself before reading it,
+	// to catch a symlinked kustomization.yaml that resolves outside the root.
+	kust, err := readKustomizationBounded(absRoot, absDir)
 	if err != nil {
 		return err
 	}
@@ -337,59 +376,108 @@ func walkDir(absRoot, dir string, visited map[string]bool, remotes *[]RemoteRef)
 		}
 		kind, ref, err := classifyKustomizeReference(raw)
 		if err != nil {
-			return fmt.Errorf("tree walk: invalid reference %q: %w", sanitizeRef(raw), err)
+			// Finding 1: do NOT include raw in the error message.
+			return fmt.Errorf("tree walk: invalid reference in kustomization: %w", err)
 		}
 
 		switch kind {
 		case refKindLocal:
-			// Local path: compute the child directory and recurse.
-			childDir := filepath.Join(absDir, raw)
-			// Before recursing, check the child is a directory (not a file resource).
-			// If it's a file, skip it.
-			info, statErr := os.Stat(childDir)
-			if statErr != nil {
-				// Could be a non-existent path — could be a future escape, skip gracefully
-				// or propagate the escape if clearly outside root.
-				absChild, evalErr := filepath.Abs(childDir)
-				if evalErr == nil && !isUnderRoot(absRoot, absChild) {
-					return fmt.Errorf("tree walk: path boundary violation: local reference %q escapes the root boundary", sanitizeRef(raw))
-				}
+			// Local path: compute the child path and boundary-check before deciding
+			// whether to recurse (directory) or skip (file).
+			childPath := filepath.Join(absDir, raw)
+
+			// Finding 2: resolve symlinks and check boundary for every referenced
+			// path, including files, before any stat-based skip decision.
+			absChild, boundErr := resolveAndCheckBoundary(absRoot, childPath)
+			if boundErr != nil {
+				return boundErr
+			}
+			if absChild == "" {
+				// Non-existent but in-bounds — skip.
 				continue
+			}
+
+			info, statErr := os.Lstat(absChild)
+			if statErr != nil {
+				continue // resolved but stat failed — skip
 			}
 			if !info.IsDir() {
-				continue
+				continue // file resource — boundary already checked above, skip recursion
 			}
-			// Recursion: abs child path already computed above
-			absChild := filepath.Clean(childDir)
-			// Check escape before recursing (symlink-safe check after EvalSymlinks inside walkDir)
-			if !isUnderRoot(absRoot, absChild) {
-				return fmt.Errorf("tree walk: path boundary violation: local reference %q escapes the root boundary", sanitizeRef(raw))
-			}
-			if err := walkDir(absRoot, childDir, visited, remotes); err != nil {
+
+			if err := walkDir(absRoot, absChild, visited, seen, remotes); err != nil {
 				return err
 			}
+
 		case refKindRemoteGitDir, refKindRemoteFile:
-			*remotes = append(*remotes, RemoteRef{Raw: raw, Kind: kind, Ref: ref})
+			// Finding 6: deduplicate by Raw value, preserving first-discovery order.
+			if !seen[raw] {
+				seen[raw] = true
+				*remotes = append(*remotes, RemoteRef{Raw: raw, Kind: kind, Ref: ref})
+			}
 		}
 	}
 	return nil
 }
 
-// readKustomization reads and parses a kustomization.yaml (or kustomization.yml)
-// from dir. Returns nil (no error) if no kustomization file exists in the dir.
-func readKustomization(dir string) (*kustomizationYAML, error) {
+// resolveAndCheckBoundary resolves path (which may contain symlinks) to its
+// canonical form and checks it is within absRoot. Returns the canonical path, or
+// ("", nil) if the path does not exist (but is in-bounds), or ("", err) for
+// boundary violations or unexpected errors.
+func resolveAndCheckBoundary(absRoot, path string) (string, error) {
+	abs, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Path doesn't exist. Use Abs to get a non-symlinked approximation
+			// and check the boundary.
+			approx, aErr := filepath.Abs(path)
+			if aErr != nil {
+				return "", nil // can't determine; skip
+			}
+			approx = filepath.Clean(approx)
+			if !isUnderRoot(absRoot, approx) {
+				return "", fmt.Errorf("tree walk: path boundary violation: local reference escapes the root boundary")
+			}
+			return "", nil // non-existent, in-bounds
+		}
+		return "", fmt.Errorf("tree walk: resolve path: %w", err)
+	}
+	abs = filepath.Clean(abs)
+	if !isUnderRoot(absRoot, abs) {
+		return "", fmt.Errorf("tree walk: path boundary violation: local reference escapes the root boundary")
+	}
+	return abs, nil
+}
+
+// readKustomizationBounded reads and parses a kustomization.yaml from dir,
+// checking that the file itself (after symlink resolution) is within absRoot.
+// Returns nil (no error) if no kustomization file exists in the dir.
+func readKustomizationBounded(absRoot, dir string) (*kustomizationYAML, error) {
 	for _, name := range konfig.RecognizedKustomizationFileNames() {
 		path := filepath.Join(dir, name)
-		data, err := os.ReadFile(path)
-		if os.IsNotExist(err) {
-			continue
-		}
+
+		// Finding 2: resolve the kustomization file itself and check its boundary.
+		absFile, err := filepath.EvalSymlinks(path)
 		if err != nil {
-			return nil, fmt.Errorf("tree walk: read %s: %w", filepath.Base(path), err)
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("tree walk: resolve kustomization file: %w", err)
+		}
+		absFile = filepath.Clean(absFile)
+		if !isUnderRoot(absRoot, absFile) {
+			return nil, fmt.Errorf("tree walk: path boundary violation: kustomization file escapes the root boundary")
+		}
+
+		data, err := os.ReadFile(absFile)
+		if err != nil {
+			// Finding 1: do not include the path in the error (may contain FS details).
+			return nil, fmt.Errorf("tree walk: read kustomization file: %w", err)
 		}
 		var k kustomizationYAML
 		if err := yaml.Unmarshal(data, &k); err != nil {
-			return nil, fmt.Errorf("tree walk: parse %s: %w", filepath.Base(path), err)
+			// Finding 1: do not include the path in the error.
+			return nil, fmt.Errorf("tree walk: parse kustomization file: %w", err)
 		}
 		return &k, nil
 	}
@@ -414,21 +502,4 @@ func sanitizePath(path, root string) string {
 		return "<path>"
 	}
 	return rel
-}
-
-// sanitizeRef sanitizes a raw reference string for error messages by replacing
-// any userinfo or credentials with a placeholder. For remote refs, only the host
-// portion is preserved; for local refs the value is returned as-is (no creds).
-func sanitizeRef(raw string) string {
-	// If it looks like it has userinfo, redact it entirely
-	u, err := url.Parse(raw)
-	if err != nil || u.User == nil {
-		// No userinfo: return a truncated version (avoid leaking long remote URLs)
-		if len(raw) > 60 {
-			return raw[:57] + "..."
-		}
-		return raw
-	}
-	// Has userinfo — return only scheme+host
-	return u.Scheme + "://" + u.Host + "/..."
 }
