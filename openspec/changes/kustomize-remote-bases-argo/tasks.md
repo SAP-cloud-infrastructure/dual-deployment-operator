@@ -12,10 +12,10 @@ SPDX-License-Identifier: Apache-2.0
 
 ## 2. SHA-pin enforcement preflight (TDD)
 
-- [ ] 2.1 RED: tests for ref extraction — git base `?ref=`, `raw.githubusercontent.com` path segment after `<org>/<repo>`, generic URL `?ref=` — and for the 40-char lowercase-hex SHA predicate.
-- [ ] 2.2 GREEN: implement ref extraction + SHA predicate.
-- [ ] 2.3 RED: tests for the preflight gate — strict mode rejects a tag/branch/undeterminable ref before any fetch; strict mode accepts a 40-hex SHA; permissive (default) accepts a tag. Assert strict rejection happens with no network/git invocation.
-- [ ] 2.4 GREEN: implement the preflight gate taking a `requireSHAPinnedRemoteBases bool`; wire it to run after the tree walk, before krusty.
+- [x] 2.1 RED: tests for ref extraction — git base `?ref=`, `raw.githubusercontent.com` path segment after `<org>/<repo>`, generic URL `?ref=` — and for the 40-char lowercase-hex SHA predicate.
+- [x] 2.2 GREEN: implement ref extraction + SHA predicate.
+- [x] 2.3 RED: tests for the preflight gate — strict mode rejects a tag/branch/undeterminable ref before any fetch; strict mode accepts a 40-hex SHA; permissive (default) accepts a tag. Assert strict rejection happens with no network/git invocation.
+- [x] 2.4 GREEN: implement the preflight gate taking a `requireSHAPinnedRemoteBases bool`; wire it to run after the tree walk, before krusty.
 
 ## 3. Fail-closed sanitized fetch wrapper (TDD)
 

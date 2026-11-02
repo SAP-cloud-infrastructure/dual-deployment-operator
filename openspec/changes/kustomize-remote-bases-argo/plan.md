@@ -96,7 +96,7 @@ binding authority. `proposal.md` has the why/what-changes summary.
   before krusty. Run — expect PASS.
 - Commit: `feat(source): SHA-pin enforcement preflight for remote bases`
 
-- [ ] Task 2 complete
+- [x] Task 2 complete
 
 ---
 
@@ -117,6 +117,17 @@ binding authority. `proposal.md` has the why/what-changes summary.
 
 ## Task 4: Render wiring (TDD)
 
+> **Partial progress note (added after Task 2, commit a5eb10d):** Task 2's
+> fix round already wired `preflightSHAGate` into `kustomizeSource.Render()`
+> immediately before `kust.Run`, and added the `requireSHAPinnedRemoteBases`
+> field. What remains for this task: (a) make sure classification +
+> tree-walk (not just the SHA gate) run before `kust.Run` in ALL modes,
+> including permissive (currently the preflight skips classify/tree-walk
+> in permissive mode per cod-7's review — confirm whether this is correct
+> per spec or a gap); (b) the 4.1 RED/4.2 GREEN test cases below, if not
+> already covered by Task 2's tests; (c) the 4.3 REFACTOR dedup pass.
+> Do not re-wire what's already wired — verify and extend only.
+
 - 4.1 RED: `kustomize_test.go` cases — Render runs classification +
   preflight before `kust.Run`; a disallowed reference (strict mode,
   unpinned) fails before krusty; an allowed tree renders via krusty
@@ -135,6 +146,14 @@ binding authority. `proposal.md` has the why/what-changes summary.
 ---
 
 ## Task 5: Operator flag + manager wiring
+
+> **Partial progress note (added after Task 2, commit a5eb10d):** Task 2's
+> fix round already added `Deps.RequireSHAPinnedRemoteBases` and threaded it
+> through `source.From()`. What remains: `cmd/main.go` still needs the
+> actual `--kustomize-require-sha-pinned-remote-bases` CLI flag definition
+> and the assignment of its value into `Deps.RequireSHAPinnedRemoteBases`
+> (per cod-7's review, `cmd/main.go:204-208` is the relevant area). Strict
+> mode is currently unreachable from the operator until this flag exists.
 
 - 5.1 Add operator-level flag
   `--kustomize-require-sha-pinned-remote-bases` (default `false`) in
