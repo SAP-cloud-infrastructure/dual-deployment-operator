@@ -61,12 +61,22 @@ bookworm / debian 12) would risk glibc version skew.
 | `/usr/lib/git-core/` | `/usr/lib/git-core/` | git sub-commands (`git-remote-https`, etc.) |
 | `/git-libs/` (ldd closure) | `/` | shared libraries (`libc`, `libcurl-gnutls`, `libz`, `libpcre2-posix`, etc.) |
 
-The ldd closure is collected with:
+The ldd closure is collected by scanning **both** `/usr/bin/git` and every ELF
+executable under `/usr/lib/git-core/` (e.g. `git-remote-https`, `git-remote-http`):
 
 ```sh
-ldd /usr/bin/git | awk '/=>/ { print $3 } /^\// { print $1 }' \
-  | grep -E '^/' | sort -u | xargs -I '{}' cp --parents '{}' /git-libs
+find /usr/bin/git /usr/lib/git-core/ -type f -executable \
+     -exec sh -c 'file "$1" | grep -q ELF' _ {} \; -print | \
+  xargs -I '{}' ldd '{}' 2>/dev/null | \
+  awk '/=>/ { print $3 } /^\// { print $1 }' | \
+  grep -E '^/' | sort -u | \
+  xargs -I '{}' cp --parents '{}' /git-libs
 ```
+
+Scanning the git-core helpers is essential: `git-remote-https` links against
+`libcurl-gnutls` (for HTTPS transport) which `/usr/bin/git` itself does not
+directly depend on. Omitting this step would cause HTTPS remote-base fetches to
+fail at runtime with `error while loading shared libraries: libcurl-gnutls.so.4`.
 
 No shell, package manager, or unrelated Debian tooling is copied into the final
 image. The distroless posture is preserved.
@@ -162,7 +172,7 @@ docker run --rm ddo:task6-test /usr/bin/git version
 ```bash
 docker run --rm ddo:task6-test /usr/bin/git ls-remote https://github.com/kubernetes-sigs/kustomize HEAD
 # Expected: prints a SHA + HEAD ref, exit 0
-# If libcurl-gnutls or a required lib is missing, this will fail with "error while loading shared libraries"
+# This exercises git-remote-https and its libcurl-gnutls dependency.
 ```
 
 **Step 4 — Verify manager binary still runs:**
@@ -191,6 +201,6 @@ and the rendered manifests contain the expected resources from the remote base.
 
 | File | Change |
 |---|---|
-| `Dockerfile` | New `git-provider` stage (debian:trixie-slim); switch final stage to `distroless/base-debian13:nonroot`; copy git binary + git-core + shared libs |
+| `Dockerfile` | New `git-provider` stage (debian:trixie-slim); switch final stage to `distroless/base-debian13:nonroot`; copy git binary + git-core + **full recursive shared-lib closure** (including libcurl-gnutls for HTTPS transport) |
 | `internal/source/git_binary_test.go` | New — dedicated fail-closed tests for git-missing error path |
 | `.superpowers/sdd/plan/task-6-report.md` | This file |

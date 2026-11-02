@@ -43,11 +43,17 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends git ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Collect the shared-library closure of /usr/bin/git into /git-libs so the final
-# COPY step is a single, auditable directory.  We use `ldd` + awk to extract only
-# absolute library paths, then copy each with its full directory tree preserved.
+# Collect the shared-library closure of /usr/bin/git AND the git-core transport
+# helpers into /git-libs.  We scan every binary under /usr/lib/git-core/ that is
+# an ELF executable (e.g. git-remote-https, git-remote-http) in addition to
+# /usr/bin/git itself, so their transitive deps (libcurl-gnutls, libssl, libz,
+# libpcre2-posix, …) are included.  Without this step, HTTPS remote-base fetches
+# fail at runtime with "error while loading shared libraries: libcurl-gnutls.so".
 RUN mkdir -p /git-libs && \
-    ldd /usr/bin/git | awk '/=>/ { print $3 } /^\// { print $1 }' | \
+    find /usr/bin/git /usr/lib/git-core/ -type f -executable \
+         -exec sh -c 'file "$1" | grep -q ELF' _ {} \; -print | \
+      xargs -I '{}' ldd '{}' 2>/dev/null | \
+      awk '/=>/ { print $3 } /^\// { print $1 }' | \
       grep -E '^/' | sort -u | \
       xargs -I '{}' cp --parents '{}' /git-libs
 
