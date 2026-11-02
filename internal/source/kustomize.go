@@ -35,7 +35,7 @@ var kustomizeFetchHook func()
 // synthetic krusty errors (including errors containing raw URLs and credentials)
 // to verify that the sanitizing wrapper behaves correctly without requiring any
 // network access. In production this is always nil.
-var krustyRunHook error
+var krustyRunHook error //nolint:errname // this is a hook variable, not a sentinel error; the linter incorrectly treats any var of type error as a sentinel
 
 type kustomizeSource struct {
 	spec                        *v1alpha1.KustomizeSource

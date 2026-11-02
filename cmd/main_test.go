@@ -66,4 +66,3 @@ func TestBuildSourceDepsFlagVarBinding(t *testing.T) {
 		t.Error("after setting requireSHAPinnedRemoteBases=false, buildSourceDeps returned Deps with RequireSHAPinnedRemoteBases=true")
 	}
 }
-

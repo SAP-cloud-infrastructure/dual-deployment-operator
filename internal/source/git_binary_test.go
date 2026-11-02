@@ -37,7 +37,7 @@ import (
 func TestGitMissingError_SanitizedFailClosed(t *testing.T) {
 	// This is the exact error message krusty emits when it cannot find git:
 	// see sigs.k8s.io/kustomize/pkg/git.ClonerUsingGitExec
-	gitNotFoundErr := &gitNotFoundSimulator{msg: "no 'git' program on path"}
+	gitNotFoundErr := &gitNotFoundSimulatorError{msg: "no 'git' program on path"}
 
 	sanitized := sanitizeKrustyError(gitNotFoundErr)
 
@@ -69,7 +69,7 @@ func TestGitMissingError_EndToEndSanitized(t *testing.T) {
 	src := buildKustomizeSourceForRoot(t, root)
 
 	// Simulate krusty failing with the "no git on PATH" error.
-	withKrustyRunHook(t, &gitNotFoundSimulator{msg: "no 'git' program on path"})
+	withKrustyRunHook(t, &gitNotFoundSimulatorError{msg: "no 'git' program on path"})
 
 	ms, err := src.Render(context.Background(), ModeSeed, "ns")
 
@@ -91,8 +91,8 @@ func TestGitMissingError_EndToEndSanitized(t *testing.T) {
 	}
 }
 
-// gitNotFoundSimulator is a minimal error type that simulates krusty's
+// gitNotFoundSimulatorError is a minimal error type that simulates krusty's
 // "no 'git' program on path" error without requiring any real process execution.
-type gitNotFoundSimulator struct{ msg string }
+type gitNotFoundSimulatorError struct{ msg string }
 
-func (e *gitNotFoundSimulator) Error() string { return e.msg }
+func (e *gitNotFoundSimulatorError) Error() string { return e.msg }

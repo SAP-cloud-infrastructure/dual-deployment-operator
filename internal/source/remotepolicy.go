@@ -141,12 +141,11 @@ func isSCPStyle(raw string) bool {
 	if strings.Contains(raw, "://") {
 		return false
 	}
-	atIdx := strings.Index(raw, "@")
-	if atIdx < 0 {
+	_, after, found := strings.Cut(raw, "@")
+	if !found {
 		return false
 	}
 	// After @, must have host:path (colon before any slash)
-	after := raw[atIdx+1:]
 	colonIdx := strings.Index(after, ":")
 	slashIdx := strings.Index(after, "/")
 	return colonIdx >= 0 && (slashIdx < 0 || colonIdx < slashIdx)
@@ -297,8 +296,8 @@ func hasAmbiguousShorthandPath(pathPart string) bool {
 	}
 	// Strip the leading "github.com/" to count only the path segments after the host.
 	afterHost := pathPart
-	if idx := strings.Index(pathPart, "/"); idx >= 0 {
-		afterHost = pathPart[idx+1:] // everything after "github.com/"
+	if _, rest, found := strings.Cut(pathPart, "/"); found {
+		afterHost = rest // everything after "github.com/"
 	}
 	// >2 segments after the host means there's an extra subdir without a marker.
 	return pathSegmentCount("/"+afterHost) > 2
@@ -311,7 +310,7 @@ func pathSegmentCount(path string) int {
 		return 0
 	}
 	count := 0
-	for _, p := range strings.Split(path, "/") {
+	for p := range strings.SplitSeq(path, "/") {
 		if p != "" {
 			count++
 		}
@@ -375,7 +374,7 @@ func treeWalkKustomizeFrom(isolationRoot, entryPoint string) ([]RemoteRef, error
 	}
 	absEntry = filepath.Clean(absEntry)
 	if !isUnderRoot(absIsolationRoot, absEntry) {
-		return nil, fmt.Errorf("tree walk: entry point is outside isolation root")
+		return nil, errors.New("tree walk: entry point is outside isolation root")
 	}
 
 	var remotes []RemoteRef
@@ -399,7 +398,7 @@ func walkDir(absRoot, dir string, visited, seen map[string]bool, remotes *[]Remo
 			// Use filepath.Clean(Abs) as a best-effort canonical path for boundary check.
 			absApprox := filepath.Clean(dir)
 			if !isUnderRoot(absRoot, absApprox) {
-				return fmt.Errorf("tree walk: path boundary violation: local reference escapes the root boundary")
+				return errors.New("tree walk: path boundary violation: local reference escapes the root boundary")
 			}
 			return nil // non-existent but in-bounds — skip
 		}
@@ -409,7 +408,7 @@ func walkDir(absRoot, dir string, visited, seen map[string]bool, remotes *[]Remo
 
 	// Boundary check: absDir must be within absRoot
 	if !isUnderRoot(absRoot, absDir) {
-		return fmt.Errorf("tree walk: path boundary violation: local reference escapes the root boundary")
+		return errors.New("tree walk: path boundary violation: local reference escapes the root boundary")
 	}
 
 	// Cycle detection
@@ -495,11 +494,11 @@ func resolveAndCheckBoundary(absRoot, path string) (string, error) {
 			// and check the boundary.
 			approx, aErr := filepath.Abs(path)
 			if aErr != nil {
-				return "", nil // can't determine; skip
+				return "", fmt.Errorf("tree walk: resolve path: %w", aErr) // fail-closed: can't determine boundary
 			}
 			approx = filepath.Clean(approx)
 			if !isUnderRoot(absRoot, approx) {
-				return "", fmt.Errorf("tree walk: path boundary violation: local reference escapes the root boundary")
+				return "", errors.New("tree walk: path boundary violation: local reference escapes the root boundary")
 			}
 			return "", nil // non-existent, in-bounds
 		}
@@ -507,7 +506,7 @@ func resolveAndCheckBoundary(absRoot, path string) (string, error) {
 	}
 	abs = filepath.Clean(abs)
 	if !isUnderRoot(absRoot, abs) {
-		return "", fmt.Errorf("tree walk: path boundary violation: local reference escapes the root boundary")
+		return "", errors.New("tree walk: path boundary violation: local reference escapes the root boundary")
 	}
 	return abs, nil
 }
@@ -529,7 +528,7 @@ func readKustomizationBounded(absRoot, dir string) (*kustomizationYAML, error) {
 		}
 		absFile = filepath.Clean(absFile)
 		if !isUnderRoot(absRoot, absFile) {
-			return nil, fmt.Errorf("tree walk: path boundary violation: kustomization file escapes the root boundary")
+			return nil, errors.New("tree walk: path boundary violation: kustomization file escapes the root boundary")
 		}
 
 		data, err := os.ReadFile(absFile)
@@ -696,7 +695,7 @@ func preflightSHAGate(isolationRoot, entryPoint string, requireSHAPinnedRemoteBa
 		// accidentally propagate a raw underlying error (e.g. a YAML parser
 		// message that echoes back a credential-bearing URL key). Use %v so
 		// the message is included as text but no error wrapping chain is exposed.
-		return fmt.Errorf("preflight: tree walk failed: %v", err)
+		return fmt.Errorf("preflight: tree walk failed: %v", err) //nolint:errorlint // intentional: no %w to prevent future accidental credential leakage through wrapped error chain
 	}
 
 	// Phase 2: SHA-pin gate — only in strict mode.

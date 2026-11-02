@@ -27,7 +27,6 @@ package source
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,7 +92,7 @@ func TestSanitizeKrustyError_NilPassthrough(t *testing.T) {
 func TestSanitizeKrustyError_GitExecURLNotEchoed(t *testing.T) {
 	// Simulate a krusty git-exec failure: "failed to run 'git fetch --depth=1
 	// https://secret-internal.corp.example/infra/repo HEAD': ..."
-	rawErr := fmt.Errorf("failed to run 'git fetch --depth=1 https://secret-internal.corp.example/infra/repo HEAD': exit status 128\nfatal: unable to access 'https://secret-internal.corp.example/infra/repo/': Could not resolve host: secret-internal.corp.example")
+	rawErr := errors.New("failed to run 'git fetch --depth=1 https://secret-internal.corp.example/infra/repo HEAD': exit status 128\nfatal: unable to access 'https://secret-internal.corp.example/infra/repo/': Could not resolve host: secret-internal.corp.example")
 
 	sanitized := sanitizeKrustyError(rawErr)
 	if sanitized == nil {
@@ -121,7 +120,7 @@ func TestSanitizeKrustyError_GitExecURLNotEchoed(t *testing.T) {
 func TestSanitizeKrustyError_CredentialBearingURLNotEchoed(t *testing.T) {
 	// Simulate a scenario where the raw error somehow carries embedded creds
 	// (e.g. from a mis-configured authSecretRef that ended up in a URL).
-	rawErr := fmt.Errorf("failed to run 'git fetch --depth=1 https://myuser:SUPERSECRET@github.com/org/repo HEAD': exit status 128\nfatal: repository not found")
+	rawErr := errors.New("failed to run 'git fetch --depth=1 https://myuser:SUPERSECRET@github.com/org/repo HEAD': exit status 128\nfatal: repository not found")
 
 	sanitized := sanitizeKrustyError(rawErr)
 	if sanitized == nil {
@@ -147,7 +146,7 @@ func TestSanitizeKrustyError_HTTPErrorSanitized(t *testing.T) {
 	// Simulate the ErrHTTP format from krusty's internal loader:
 	// "HTTP Error: status code 403 (Forbidden)" — this doesn't contain a URL
 	// directly but the wrapping chain might. We verify sanitization still applies.
-	rawErr := fmt.Errorf("HTTP Error: status code 403 (Forbidden) fetching https://internal-registry.corp.example/manifests/secret.yaml")
+	rawErr := errors.New("HTTP Error: status code 403 (Forbidden) fetching https://internal-registry.corp.example/manifests/secret.yaml")
 
 	sanitized := sanitizeKrustyError(rawErr)
 	if sanitized == nil {
@@ -190,7 +189,7 @@ func TestKrustyRunWrapper_FetchFailureProducesRenderError(t *testing.T) {
 	src := buildKustomizeSourceForRoot(t, root)
 
 	// Inject a raw git-exec error containing a URL.
-	syntheticErr := fmt.Errorf("failed to run 'git fetch --depth=1 https://private.corp.example/sensitive/repo HEAD': exit status 128\nfatal: unable to access 'https://private.corp.example/sensitive/repo/': Could not resolve host")
+	syntheticErr := errors.New("failed to run 'git fetch --depth=1 https://private.corp.example/sensitive/repo HEAD': exit status 128\nfatal: unable to access 'https://private.corp.example/sensitive/repo/': Could not resolve host")
 	withKrustyRunHook(t, syntheticErr)
 
 	ms, err := src.Render(context.Background(), ModeSeed, "ns")
@@ -219,7 +218,7 @@ func TestKrustyRunWrapper_CredentialBearingFetchError(t *testing.T) {
 	root := buildMinimalKustomizeRoot(t)
 	src := buildKustomizeSourceForRoot(t, root)
 
-	syntheticErr := fmt.Errorf("failed to run 'git fetch --depth=1 https://deploy-token:ghp_TOKENSECRET123@github.com/org/private-repo HEAD': exit status 128")
+	syntheticErr := errors.New("failed to run 'git fetch --depth=1 https://deploy-token:ghp_TOKENSECRET123@github.com/org/private-repo HEAD': exit status 128")
 	withKrustyRunHook(t, syntheticErr)
 
 	_, err := src.Render(context.Background(), ModeSeed, "ns")
@@ -246,7 +245,7 @@ func TestKrustyRunWrapper_HTTPNon2xxProducesRenderError(t *testing.T) {
 	src := buildKustomizeSourceForRoot(t, root)
 
 	// Simulate krusty's ErrHTTP error wrapping pattern.
-	syntheticErr := fmt.Errorf("HTTP Error: status code 404 (Not Found) while fetching https://cdn.internal.corp.example/bases/v2/kustomization.yaml")
+	syntheticErr := errors.New("HTTP Error: status code 404 (Not Found) while fetching https://cdn.internal.corp.example/bases/v2/kustomization.yaml")
 	withKrustyRunHook(t, syntheticErr)
 
 	_, err := src.Render(context.Background(), ModeSeed, "ns")
@@ -287,9 +286,9 @@ func TestKrustyRunWrapper_FailClosedNeverSilentPartialRender(t *testing.T) {
 		name string
 		err  error
 	}{
-		{"git-not-found", fmt.Errorf("no 'git' program on path")},
-		{"git-clone-fail", fmt.Errorf("failed to run 'git clone https://repo.example.com/org/r': exit status 128")},
-		{"http-error", fmt.Errorf("HTTP Error: status code 500 (Internal Server Error)")},
+		{"git-not-found", errors.New("no 'git' program on path")},
+		{"git-clone-fail", errors.New("failed to run 'git clone https://repo.example.com/org/r': exit status 128")},
+		{"http-error", errors.New("HTTP Error: status code 500 (Internal Server Error)")},
 		{"generic-error", errors.New("unexpected krusty internal failure")},
 		{"nil-error", nil}, // control: nil → no error from Render
 	}

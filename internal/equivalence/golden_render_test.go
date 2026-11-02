@@ -54,10 +54,10 @@ func TestRenderGoldenKustomizeNamespaceHandling(t *testing.T) {
 		name   string
 		wantNS string
 	}{
-		{"foos.example.com", ""},   // CRD: spurious namespace cleared
-		{"foo-role", ""},           // ClusterRole: stays empty
-		{"foo-sa", "target-ns"},    // SA without namespace: stamped
-		{"bar-sa", "already-set"},  // SA with existing namespace: unchanged
+		{"foos.example.com", ""},  // CRD: spurious namespace cleared
+		{"foo-role", ""},          // ClusterRole: stays empty
+		{"foo-sa", "target-ns"},   // SA without namespace: stamped
+		{"bar-sa", "already-set"}, // SA with existing namespace: unchanged
 	}
 	byName := map[string]*unstructured.Unstructured{}
 	for _, d := range docs {

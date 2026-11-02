@@ -189,7 +189,7 @@ func TestClassifyKustomizeReference_SanitizedErrors(t *testing.T) {
 		raw     string
 		mustNot string // substring that must NOT appear in error
 	}{
-		{
+		{ //nolint:gosec // test fixture, not a real credential
 			raw:     "https://user:s3cr3t@github.com/org/repo?ref=v1",
 			mustNot: "s3cr3t",
 		},
@@ -198,7 +198,7 @@ func TestClassifyKustomizeReference_SanitizedErrors(t *testing.T) {
 			mustNot: "secret-repo",
 		},
 		// Finding 1: malformed credential-bearing URLs must also not leak
-		{
+		{ //nolint:gosec // test fixture, not a real credential
 			raw:     "https://user:SECRET@host/%zz",
 			mustNot: "SECRET",
 		},
@@ -904,6 +904,8 @@ func TestTreeWalkKustomize_MalformedYAML_NoCredentialLeak(t *testing.T) {
 	// Write a kustomization.yaml that is syntactically invalid YAML.
 	// The content includes a credential-bearing URL that a naive %w wrapping of
 	// yaml.Unmarshal could echo back verbatim in the error message.
+	// The credential-bearing URL below is a test fixture, not a real credential.
+	//nolint:gosec // test fixture: credential-bearing URL is intentional to verify sanitization
 	malformed := `apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -1322,5 +1324,39 @@ resources:
 	}
 	if strings.Contains(err.Error(), "release-2026") {
 		t.Errorf("error leaks ref value: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// resolveAndCheckBoundary — security: fail-closed on filepath.Abs failure
+// ---------------------------------------------------------------------------
+
+// TestResolveAndCheckBoundary_NonExistentInBounds verifies that a non-existent
+// path that is within the isolation root is handled gracefully (returns "", nil).
+// This exercises the os.IsNotExist branch of resolveAndCheckBoundary.
+func TestResolveAndCheckBoundary_NonExistentInBounds(t *testing.T) {
+	root := t.TempDir()
+	nonExistent := filepath.Join(root, "does-not-exist")
+
+	got, err := resolveAndCheckBoundary(root, nonExistent)
+	if err != nil {
+		t.Errorf("resolveAndCheckBoundary: unexpected error for non-existent in-bounds path: %v", err)
+	}
+	if got != "" {
+		t.Errorf("resolveAndCheckBoundary: expected empty string for non-existent path, got %q", got)
+	}
+}
+
+// TestResolveAndCheckBoundary_NonExistentOutOfBounds verifies that a non-existent
+// path that escapes the isolation root is rejected (returns an error, not nil).
+// Fail-closed invariant: when the boundary cannot be confirmed, we must error.
+func TestResolveAndCheckBoundary_NonExistentOutOfBounds(t *testing.T) {
+	root := t.TempDir()
+	// A path that resolves outside root via ..
+	outsidePath := filepath.Join(root, "..", "escaped-dir")
+
+	_, err := resolveAndCheckBoundary(root, outsidePath)
+	if err == nil {
+		t.Error("resolveAndCheckBoundary: expected boundary violation error for out-of-bounds non-existent path, got nil (fail-open — FAIL)")
 	}
 }

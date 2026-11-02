@@ -313,9 +313,9 @@ func TestTask4_ClassificationRunsBeforeKrustyInPermissiveMode(t *testing.T) {
 // The fakeRootResolver is configured with baseDir=cloneDir and subPath="overlay",
 // so Render() receives cloneDir+"/overlay" as the krusty root and should walk
 // starting at cloneDir+"/overlay" (not at cloneDir).
-func buildOverlayTreeWithRemote(t *testing.T, remoteRef string) (cloneDir string, src *kustomizeSource) {
+func buildOverlayTreeWithRemote(t *testing.T, remoteRef string) *kustomizeSource {
 	t.Helper()
-	cloneDir = t.TempDir()
+	cloneDir := t.TempDir()
 
 	write := func(path, content string) {
 		t.Helper()
@@ -347,12 +347,12 @@ resources:
 `)
 
 	spec := v1alpha1.KustomizeSource{URL: cloneDir, SeedPath: "overlay", ShootPath: "overlay"}
-	src = &kustomizeSource{
+	src := &kustomizeSource{
 		spec:                        &spec,
 		resolver:                    fakeRootResolver{baseDir: cloneDir},
 		requireSHAPinnedRemoteBases: false,
 	}
-	return cloneDir, src
+	return src
 }
 
 // buildOverlayTreeNoRemote creates the same overlay structure but with no remote ref.
@@ -404,7 +404,7 @@ resources:
 // isolationRoot (cloneDir), not the overlay (cloneDir/overlay), so it misses the
 // SSH ref entirely and the preflight passes.
 func TestTask4Fix_P1_SSHRefInOverlayRejectedWithSubPath(t *testing.T) {
-	_, src := buildOverlayTreeWithRemote(t, "git@github.com:org/repo?ref=main")
+	src := buildOverlayTreeWithRemote(t, "git@github.com:org/repo?ref=main")
 	src.requireSHAPinnedRemoteBases = false // permissive — but SSH must still be rejected
 
 	fetchReached := false
@@ -426,7 +426,7 @@ func TestTask4Fix_P1_SSHRefInOverlayRejectedWithSubPath(t *testing.T) {
 // mode, an unpinned remote ref inside an overlay (with subPath) is caught.
 // Bug: walking from isolationRoot instead of overlay misses the ref.
 func TestTask4Fix_P1_StrictModeOverlayRefRejectedWithSubPath(t *testing.T) {
-	_, src := buildOverlayTreeWithRemote(t, "https://github.com/org/repo?ref=v1.2.3")
+	src := buildOverlayTreeWithRemote(t, "https://github.com/org/repo?ref=v1.2.3")
 	src.requireSHAPinnedRemoteBases = true // strict
 
 	fetchReached := false
