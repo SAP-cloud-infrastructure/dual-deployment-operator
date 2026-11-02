@@ -67,3 +67,55 @@ golangci-lint: 0 issues on `./cmd/...`
 None. The implementation is minimal and intentional. The flag is off by default, matching
 the spec requirement. Strict mode is now reachable by passing
 `--kustomize-require-sha-pinned-remote-bases=true` to the operator binary.
+
+---
+
+## Fix Round 1 (review finding: missing regression coverage on the assignment path)
+
+### Finding
+
+The initial `cmd/main_test.go` only checked flag registration metadata
+(`flag.Lookup(...).DefValue`). The source-level tests injected `Deps` directly, bypassing
+the `buildSourceDeps` / `main()` construction path entirely. Deleting
+`RequireSHAPinnedRemoteBases: requireSHAPinned` from the Deps constructor would have left
+every test green — the wiring was untested.
+
+### Fix
+
+Extracted the inline `source.Deps{...}` literal in `main()` into a package-level
+`buildSourceDeps(scratchDir string, requireSHAPinned bool) source.Deps` function. This
+makes the exact construction path testable without starting a manager.
+
+Two new tests added to `cmd/main_test.go`:
+
+- **`TestBuildSourceDepsWiresRequireSHAPinned`** — calls `buildSourceDeps("", false)` and
+  `buildSourceDeps("", true)` directly and asserts `RequireSHAPinnedRemoteBases` matches
+  the input for each.
+- **`TestBuildSourceDepsFlagVarBinding`** — simulates CLI parsing by mutating the
+  package-level `requireSHAPinnedRemoteBases` var (the one bound to the flag) then calling
+  `buildSourceDeps("", requireSHAPinnedRemoteBases)`, asserting the value propagates. This
+  is the same sequence `main()` performs after `flag.Parse()`.
+
+### RED-GREEN demonstration
+
+Temporarily removed `RequireSHAPinnedRemoteBases: requireSHAPinned,` from `buildSourceDeps`:
+
+```
+=== RED (assignment removed) ===
+--- FAIL: TestBuildSourceDepsWiresRequireSHAPinned
+    main_test.go:42: buildSourceDeps(true): RequireSHAPinnedRemoteBases = false, want true
+--- FAIL: TestBuildSourceDepsFlagVarBinding
+    main_test.go:60: after setting requireSHAPinnedRemoteBases=true, buildSourceDeps returned
+        Deps with RequireSHAPinnedRemoteBases=false; assignment in buildSourceDeps is missing
+
+=== GREEN (assignment restored) ===
+--- PASS: TestBuildSourceDepsWiresRequireSHAPinned
+--- PASS: TestBuildSourceDepsFlagVarBinding
+```
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `cmd/main.go` | Extracted `buildSourceDeps()` from inline literal in `main()`; `main()` now calls `buildSourceDeps(sourceScratchDir, requireSHAPinnedRemoteBases)` |
+| `cmd/main_test.go` | Added `TestBuildSourceDepsWiresRequireSHAPinned` and `TestBuildSourceDepsFlagVarBinding` |

@@ -44,6 +44,18 @@ var (
 // Declared at package level so tests can verify default registration.
 var requireSHAPinnedRemoteBases bool
 
+// buildSourceDeps constructs the source.Deps the controller uses.
+// Extracted from main() to allow unit tests to exercise the CLI-flag→Deps
+// assignment path without starting a manager.
+func buildSourceDeps(scratchDir string, requireSHAPinned bool) source.Deps {
+	return source.Deps{
+		ChartLoader:                 source.NewHelmLoader(scratchDir),
+		RootResolver:                source.NewGitResolver(),
+		RenderCache:                 source.NewRenderCache(),
+		RequireSHAPinnedRemoteBases: requireSHAPinned,
+	}
+}
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
@@ -210,12 +222,7 @@ func main() {
 			FieldManager: controller.FieldManagerName,
 			Cluster:      "seed",
 		},
-		SourceDeps: source.Deps{
-			ChartLoader:                 source.NewHelmLoader(sourceScratchDir),
-			RootResolver:                source.NewGitResolver(),
-			RenderCache:                 source.NewRenderCache(),
-			RequireSHAPinnedRemoteBases: requireSHAPinnedRemoteBases,
-		},
+		SourceDeps: buildSourceDeps(sourceScratchDir, requireSHAPinnedRemoteBases),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "dualdeploymentoperator")
 		os.Exit(1)
