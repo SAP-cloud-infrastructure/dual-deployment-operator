@@ -7,6 +7,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,27 +177,43 @@ resources:
 	}
 }
 
-// TestTask4_PermissiveModeUnpinnedTagAllowed verifies that in permissive mode
-// a remote reference pinned to a tag (not SHA) does NOT cause a preflight
-// rejection — it passes through to krusty. The fetch hook MUST fire (positive control).
-func TestTask4_PermissiveModeUnpinnedTagAllowed(t *testing.T) {
+// TestTask4_PermissiveModeAllowedTreePassesPreflight verifies that in permissive
+// mode a remote reference pinned to a tag (not SHA) passes the preflight and
+// does NOT cause a classification rejection. Strategy: use a local overlay with
+// a valid HTTPS tag ref and verify via krustyRunHook that krusty is actually
+// invoked (no pre-krusty rejection). The hook makes krust.Run return a
+// synthetic error (no network needed); we only check that the error is a
+// krusty-level error, not a preflight rejection.
+func TestTask4_PermissiveModeAllowedTreePassesPreflight(t *testing.T) {
 	src := buildKustomizeRootWith(t, `apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - https://unreachable.invalid/org/repo?ref=v1.2.3
+  - https://github.com/org/repo?ref=v1.2.3
 `, false /* permissive */)
 
 	fetchReached := false
-	old := kustomizeFetchHook
+	oldFetch := kustomizeFetchHook
 	kustomizeFetchHook = func() { fetchReached = true }
-	defer func() { kustomizeFetchHook = old }()
+	defer func() { kustomizeFetchHook = oldFetch }()
 
-	// Render will fail (kust.Run can't reach unreachable.invalid) but the hook
-	// must have fired before that network failure.
-	src.Render(context.Background(), ModeSeed, "ns") //nolint:errcheck
+	// Inject a synthetic krusty error so krust.Run never goes to the network.
+	syntheticErr := errors.New("synthetic-krusty-failure")
+	oldRun := krustyRunHook
+	krustyRunHook = syntheticErr
+	defer func() { krustyRunHook = oldRun }()
 
+	_, err := src.Render(context.Background(), ModeSeed, "ns")
+
+	// The fetch hook must have fired — preflight did not block the tag ref.
 	if !fetchReached {
-		t.Fatal("kustomizeFetchHook was NOT called for permissive mode with a valid HTTPS remote ref — classification is blocking when it should not")
+		t.Fatal("kustomizeFetchHook was NOT called in permissive mode — preflight incorrectly blocked a valid HTTPS tag ref")
+	}
+	// The error must be a krusty-level (sanitized) render error, not a preflight error.
+	if err == nil {
+		t.Fatal("expected a render error (from injected krusty hook), got nil")
+	}
+	if strings.Contains(err.Error(), "preflight") || strings.Contains(err.Error(), "SHA") || strings.Contains(err.Error(), "pin") {
+		t.Errorf("error looks like a preflight rejection but should be a krusty error: %v", err)
 	}
 }
 
@@ -277,6 +294,283 @@ func TestTask4_ClassificationRunsBeforeKrustyInPermissiveMode(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cycle") && !strings.Contains(err.Error(), "preflight") {
 		t.Errorf("expected cycle/preflight error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Task 4 Fix-round-1 — RED tests
+// ---------------------------------------------------------------------------
+
+// buildOverlayTree creates a realistic clone-like directory tree:
+//
+//	cloneDir/
+//	  base/
+//	    kustomization.yaml   (resources: [upstream-cm.yaml])
+//	    upstream-cm.yaml
+//	  overlay/
+//	    kustomization.yaml   (resources: [../base, <remoteRef>])
+//
+// The fakeRootResolver is configured with baseDir=cloneDir and subPath="overlay",
+// so Render() receives cloneDir+"/overlay" as the krusty root and should walk
+// starting at cloneDir+"/overlay" (not at cloneDir).
+func buildOverlayTreeWithRemote(t *testing.T, remoteRef string) (cloneDir string, src *kustomizeSource) {
+	t.Helper()
+	cloneDir = t.TempDir()
+
+	write := func(path, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write(filepath.Join(cloneDir, "base", "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - upstream-cm.yaml
+`)
+	write(filepath.Join(cloneDir, "base", "upstream-cm.yaml"), `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: upstream-cm
+data:
+  key: value
+`)
+	write(filepath.Join(cloneDir, "overlay", "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base
+  - `+remoteRef+`
+`)
+
+	spec := v1alpha1.KustomizeSource{URL: cloneDir, SeedPath: "overlay", ShootPath: "overlay"}
+	src = &kustomizeSource{
+		spec:                        &spec,
+		resolver:                    fakeRootResolver{baseDir: cloneDir},
+		requireSHAPinnedRemoteBases: false,
+	}
+	return cloneDir, src
+}
+
+// buildOverlayTreeNoRemote creates the same overlay structure but with no remote ref.
+// Used to test that the positive render path works correctly with a subpath overlay.
+func buildOverlayTreeNoRemote(t *testing.T) (cloneDir string, src *kustomizeSource) {
+	t.Helper()
+	cloneDir = t.TempDir()
+
+	write := func(path, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write(filepath.Join(cloneDir, "base", "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - upstream-cm.yaml
+`)
+	write(filepath.Join(cloneDir, "base", "upstream-cm.yaml"), `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: upstream-cm
+data:
+  key: value
+`)
+	write(filepath.Join(cloneDir, "overlay", "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base
+`)
+
+	spec := v1alpha1.KustomizeSource{URL: cloneDir, SeedPath: "overlay", ShootPath: "overlay"}
+	src = &kustomizeSource{
+		spec:                        &spec,
+		resolver:                    fakeRootResolver{baseDir: cloneDir},
+		requireSHAPinnedRemoteBases: false,
+	}
+	return cloneDir, src
+}
+
+// TestTask4Fix_P1_SSHRefInOverlayRejectedWithSubPath is the RED test for P1:
+// an SSH ref inside an overlay (which lives beneath the isolationRoot) must be
+// rejected even when subPath is non-empty. Bug: the current code walks from the
+// isolationRoot (cloneDir), not the overlay (cloneDir/overlay), so it misses the
+// SSH ref entirely and the preflight passes.
+func TestTask4Fix_P1_SSHRefInOverlayRejectedWithSubPath(t *testing.T) {
+	_, src := buildOverlayTreeWithRemote(t, "git@github.com:org/repo?ref=main")
+	src.requireSHAPinnedRemoteBases = false // permissive — but SSH must still be rejected
+
+	fetchReached := false
+	old := kustomizeFetchHook
+	kustomizeFetchHook = func() { fetchReached = true }
+	defer func() { kustomizeFetchHook = old }()
+
+	_, err := src.Render(context.Background(), ModeSeed, "ns")
+
+	if fetchReached {
+		t.Fatal("kust.Run reached despite SSH ref in overlay (classification must inspect overlay, not parent)")
+	}
+	if err == nil {
+		t.Fatal("expected SSH rejection for overlay with subPath, got nil — P1 bug: preflight scanned parent instead of overlay")
+	}
+}
+
+// TestTask4Fix_P1_StrictModeOverlayRefRejectedWithSubPath verifies that in strict
+// mode, an unpinned remote ref inside an overlay (with subPath) is caught.
+// Bug: walking from isolationRoot instead of overlay misses the ref.
+func TestTask4Fix_P1_StrictModeOverlayRefRejectedWithSubPath(t *testing.T) {
+	_, src := buildOverlayTreeWithRemote(t, "https://github.com/org/repo?ref=v1.2.3")
+	src.requireSHAPinnedRemoteBases = true // strict
+
+	fetchReached := false
+	old := kustomizeFetchHook
+	kustomizeFetchHook = func() { fetchReached = true }
+	defer func() { kustomizeFetchHook = old }()
+
+	_, err := src.Render(context.Background(), ModeSeed, "ns")
+
+	if fetchReached {
+		t.Fatal("kust.Run reached before SHA-gate (zero-fetch invariant violated for overlay with subPath)")
+	}
+	if err == nil {
+		t.Fatal("expected SHA-pin rejection for overlay with subPath in strict mode, got nil — P1 bug")
+	}
+	if !strings.Contains(err.Error(), "SHA") && !strings.Contains(err.Error(), "pin") {
+		t.Errorf("expected SHA-pin error, got: %v", err)
+	}
+}
+
+// TestTask4Fix_P1_OverlayBeneathParentNoKustomization verifies regression (a):
+// an overlay beneath a parent directory that has NO kustomization must still
+// have its own refs correctly classified/gated.
+func TestTask4Fix_P1_OverlayBeneathParentNoKustomization(t *testing.T) {
+	cloneDir := t.TempDir()
+
+	write := func(path, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// cloneDir has NO kustomization.yaml — only the overlay does.
+	write(filepath.Join(cloneDir, "overlay", "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - git@github.com:org/repo?ref=main
+`)
+
+	spec := v1alpha1.KustomizeSource{URL: cloneDir, SeedPath: "overlay", ShootPath: "overlay"}
+	src := &kustomizeSource{
+		spec:                        &spec,
+		resolver:                    fakeRootResolver{baseDir: cloneDir},
+		requireSHAPinnedRemoteBases: false,
+	}
+
+	fetchReached := false
+	old := kustomizeFetchHook
+	kustomizeFetchHook = func() { fetchReached = true }
+	defer func() { kustomizeFetchHook = old }()
+
+	_, err := src.Render(context.Background(), ModeSeed, "ns")
+
+	if fetchReached {
+		t.Fatal("kust.Run reached despite SSH ref — parent had no kustomization, overlay was not inspected")
+	}
+	if err == nil {
+		t.Fatal("expected rejection of SSH ref in overlay beneath a parent with no kustomization, got nil")
+	}
+}
+
+// TestTask4Fix_P1_OverlayBeneathParentWithUnrelatedKustomization verifies regression (b):
+// an overlay beneath a parent that has an UNRELATED kustomization (local-only, valid)
+// must not cause the parent's kustomization to incorrectly reject the overlay.
+func TestTask4Fix_P1_OverlayBeneathParentWithUnrelatedKustomization(t *testing.T) {
+	cloneDir := t.TempDir()
+
+	write := func(path, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The parent cloneDir has its own kustomization — local-only, valid.
+	write(filepath.Join(cloneDir, "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ./some-local-dir
+`)
+	// The overlay has only local refs — should render fine.
+	write(filepath.Join(cloneDir, "base", "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cm.yaml
+`)
+	write(filepath.Join(cloneDir, "base", "cm.yaml"), `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm
+`)
+	write(filepath.Join(cloneDir, "overlay", "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base
+`)
+
+	spec := v1alpha1.KustomizeSource{URL: cloneDir, SeedPath: "overlay", ShootPath: "overlay"}
+	src := &kustomizeSource{
+		spec:                        &spec,
+		resolver:                    fakeRootResolver{baseDir: cloneDir},
+		requireSHAPinnedRemoteBases: false,
+	}
+
+	_, err := src.Render(context.Background(), ModeSeed, "ns")
+	if err != nil {
+		t.Fatalf("expected successful render for overlay beneath parent with unrelated kustomization, got: %v", err)
+	}
+}
+
+// TestTask4Fix_P2_PermissiveModeAllowedTreeRendersSuccessfully replaces
+// TestTask4_PermissiveModeUnpinnedTagAllowed. Instead of contacting
+// unreachable.invalid and discarding the error, this test uses a deterministic
+// local fixture to prove the allowed-tree path actually renders successfully.
+//
+// Strategy: build a local clone tree with an overlay that has only valid local
+// refs. This proves that permissive mode does not block a legitimate local-only
+// tree, and the render returns real manifests — not just that a hook fired.
+func TestTask4Fix_P2_PermissiveModeAllowedTreeRendersSuccessfully(t *testing.T) {
+	_, src := buildOverlayTreeNoRemote(t)
+
+	ms, err := src.Render(context.Background(), ModeSeed, "ns")
+	if err != nil {
+		t.Fatalf("Render (permissive, local-only overlay): unexpected error: %v", err)
+	}
+	if len(ms) == 0 {
+		t.Fatal("Render returned empty manifest list — expected at least one manifest")
+	}
+	found := false
+	for _, m := range ms {
+		if m.Unstructured.GetKind() == "ConfigMap" && m.Unstructured.GetName() == "upstream-cm" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected ConfigMap/upstream-cm in rendered manifests, not found")
 	}
 }
 

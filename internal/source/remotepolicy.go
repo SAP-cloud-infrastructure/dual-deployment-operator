@@ -344,18 +344,45 @@ type kustomizationYAML struct {
 // Returns an ordered set of RemoteRef values discovered (DFS order,
 // first-occurrence deduplicated by Raw value).
 func treeWalkKustomize(rootDir string) ([]RemoteRef, error) {
-	// Canonicalize the root so we can detect escapes reliably.
-	absRoot, err := filepath.EvalSymlinks(rootDir)
+	return treeWalkKustomizeFrom(rootDir, rootDir)
+}
+
+// treeWalkKustomizeFrom is the core implementation: walk starting at entryPoint,
+// using isolationRoot as the boundary for local path / symlink escape checks.
+//
+// This separation is necessary for kustomize overlay layouts where the krusty
+// entry point is a subpath of the clone root (e.g. cloneDir/seed) and the
+// overlay legitimately references sibling directories (../base) that are within
+// the clone but outside the entryPoint directory. In that case:
+//
+//	isolationRoot = cloneDir        (the true boundary — all of the clone)
+//	entryPoint    = cloneDir/seed   (where krusty starts — the overlay)
+//
+// All local path resolution stays within isolationRoot; the walk starts at
+// entryPoint so refs inside the overlay are actually inspected.
+func treeWalkKustomizeFrom(isolationRoot, entryPoint string) ([]RemoteRef, error) {
+	// Canonicalize the isolation root so we can detect escapes reliably.
+	absIsolationRoot, err := filepath.EvalSymlinks(isolationRoot)
 	if err != nil {
-		return nil, fmt.Errorf("tree walk: resolve root: %w", err)
+		return nil, fmt.Errorf("tree walk: resolve isolation root: %w", err)
 	}
-	absRoot = filepath.Clean(absRoot)
+	absIsolationRoot = filepath.Clean(absIsolationRoot)
+
+	// Canonicalize the entry point. It must be within the isolation root.
+	absEntry, err := filepath.EvalSymlinks(entryPoint)
+	if err != nil {
+		return nil, fmt.Errorf("tree walk: resolve entry point: %w", err)
+	}
+	absEntry = filepath.Clean(absEntry)
+	if !isUnderRoot(absIsolationRoot, absEntry) {
+		return nil, fmt.Errorf("tree walk: entry point is outside isolation root")
+	}
 
 	var remotes []RemoteRef
 	seen := make(map[string]bool)    // deduplicate remote refs by Raw
 	visited := make(map[string]bool) // DFS stack for cycle detection (canonical dirs)
 
-	if err := walkDir(absRoot, absRoot, visited, seen, &remotes); err != nil {
+	if err := walkDir(absIsolationRoot, absEntry, visited, seen, &remotes); err != nil {
 		return nil, err
 	}
 	return remotes, nil
@@ -630,15 +657,26 @@ func isSHAPinned(ref string) bool {
 // preflightSHAGate runs the classify → tree-walk → SHA-gate preflight sequence
 // for a resolved kustomize root directory.
 //
+// Parameters:
+//   - isolationRoot: the boundary for local path / symlink escape checks.
+//     For a production git clone, this is the clone directory. For a subpath
+//     overlay (e.g. cloneDir/seed), pass cloneDir so that ../base references
+//     that stay within the clone are allowed.
+//   - entryPoint: where the walk starts — the exact directory krusty receives.
+//     For a subpath overlay, this is cloneDir/seed. The walk inspects the
+//     overlay's kustomization.yaml and follows local refs within isolationRoot.
+//   - requireSHAPinnedRemoteBases: enables the strict SHA-pin phase (Phase 2).
+//
 // The preflight has two phases:
 //
 //  1. Classification + tree-walk (ALWAYS runs, including permissive mode):
-//     treeWalkKustomize visits every locally reachable kustomization, classifying
-//     every resources/components/bases entry. Invalid forms (SSH URLs,
-//     embedded credentials, URL fragments, ambiguous paths, cycles, boundary
-//     escapes) cause an immediate error before any network/git call. This is
-//     a security invariant: even in permissive mode, DDO must not pass
-//     credential-bearing or SSH URLs through to krusty.
+//     treeWalkKustomizeFrom visits every locally reachable kustomization
+//     starting at entryPoint, classifying every resources/components/bases
+//     entry. Invalid forms (SSH URLs, embedded credentials, URL fragments,
+//     ambiguous paths, cycles, boundary escapes) cause an immediate error
+//     before any network/git call. This is a security invariant: even in
+//     permissive mode, DDO must not pass credential-bearing or SSH URLs
+//     through to krusty.
 //
 //  2. SHA-pin gate (only when requireSHAPinnedRemoteBases = true):
 //     Every discovered remote reference must be pinned to a full 40-hex SHA.
@@ -646,17 +684,17 @@ func isSHAPinned(ref string) bool {
 //     network or git call is made before this check succeeds.
 //
 // Error messages are sanitized: the raw URL and ref value are never included.
-func preflightSHAGate(rootDir string, requireSHAPinnedRemoteBases bool) error {
+func preflightSHAGate(isolationRoot, entryPoint string, requireSHAPinnedRemoteBases bool) error {
 	// Phase 1: classify + tree-walk — always runs to catch disallowed forms.
-	// treeWalkKustomize classifies every reference and fails immediately on
-	// SSH refs, embedded credentials, URL fragments, ambiguous paths, cycles,
-	// and boundary escapes. No network or git calls are made here.
-	remotes, err := treeWalkKustomize(rootDir)
+	// treeWalkKustomizeFrom classifies every reference starting at entryPoint
+	// and fails immediately on SSH refs, embedded credentials, URL fragments,
+	// ambiguous paths, cycles, and boundary escapes. No network or git calls.
+	remotes, err := treeWalkKustomizeFrom(isolationRoot, entryPoint)
 	if err != nil {
-		// Do NOT wrap with %w: treeWalkKustomize errors are already sanitized
+		// Do NOT wrap with %w: treeWalkKustomizeFrom errors are already sanitized
 		// fixed-text messages, but using %w here would allow a future change to
 		// accidentally propagate a raw underlying error (e.g. a YAML parser
-		// message that echoes back a credential-bearing URL key).  Use %v so
+		// message that echoes back a credential-bearing URL key). Use %v so
 		// the message is included as text but no error wrapping chain is exposed.
 		return fmt.Errorf("preflight: tree walk failed: %v", err)
 	}

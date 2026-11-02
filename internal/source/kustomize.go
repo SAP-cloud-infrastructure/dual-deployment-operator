@@ -55,18 +55,24 @@ func (k *kustomizeSource) Render(ctx context.Context, mode Mode, namespace strin
 	}
 	defer cleanup()
 
-	// Compute the preflight isolation root: the clone root from which krusty
-	// will read. The resolver returns filepath.Join(cloneDir, subPath) so we
-	// strip the subPath suffix to recover cloneDir. This allows kustomize
-	// overlays that reference sibling directories (../base) to pass the
-	// boundary check — those references stay within the clone root, which is
-	// the correct isolation boundary.
-	// When subPath is empty, preflightRoot == root (no stripping needed).
-	preflightRoot := preflightIsolationRoot(root, subPath)
+	// Compute the preflight isolation root (boundary for local path/symlink
+	// checks) separately from the entry point (where the walk starts).
+	//
+	// The resolver returns filepath.Join(cloneDir, subPath). krusty receives
+	// `root` (= cloneDir/subPath) as its entry point. The correct isolation
+	// boundary is cloneDir — not the overlay subdir — because kustomize overlays
+	// legitimately reference sibling directories (../base) that are within the
+	// clone but outside the overlay subdir.
+	//
+	// The walk STARTS at root (so the overlay's refs are actually inspected),
+	// but local path boundary checks use isolationRoot (so ../base is allowed
+	// as long as it stays inside the clone).
+	isolationRoot := preflightIsolationRoot(root, subPath)
 
 	// SHA-pin preflight: classify → tree-walk → SHA-gate, strictly before any
 	// network/git fetch. Errors here are already sanitized (no raw URLs/creds).
-	if err := preflightSHAGate(preflightRoot, k.requireSHAPinnedRemoteBases); err != nil {
+	// Pass isolationRoot as boundary and root as the walk entry point.
+	if err := preflightSHAGate(isolationRoot, root, k.requireSHAPinnedRemoteBases); err != nil {
 		return nil, err
 	}
 
@@ -116,16 +122,18 @@ func runKrusty(kust *krusty.Kustomizer, root string) (resmap.ResMap, error) {
 // resolved root and the subPath that was appended to reach it.
 //
 // The RootResolver returns filepath.Join(cloneDir, subPath) for a given subPath.
-// When walking for classification/preflight, we want to use cloneDir as the
-// boundary — not the overlay subPath — because kustomize overlays legitimately
-// reference sibling directories (../base) that are within the clone but outside
-// the overlay subPath directory.
+// The isolation root for the preflight boundary check is cloneDir — not the
+// overlay subPath directory — because kustomize overlays legitimately reference
+// sibling directories (../base) that are within the clone but outside the overlay.
+//
+// This function is used by Render() to compute the `isolationRoot` argument for
+// preflightSHAGate. The `entryPoint` passed to preflightSHAGate remains the
+// original `root` (= cloneDir/subPath) so the walk actually inspects the overlay.
 //
 // If subPath is empty, root itself is the isolation root (no stripping needed).
 // If the root doesn't end with the expected subPath suffix (e.g. because the
 // resolver is a fake or uses a different layout), we fall back to root itself
-// so the preflight still runs safely (potentially rejecting valid ../refs, but
-// that only affects misconfigured test resolvers, not production).
+// so the preflight still runs correctly (entryPoint == isolationRoot in that case).
 func preflightIsolationRoot(root, subPath string) string {
 	if subPath == "" {
 		return root

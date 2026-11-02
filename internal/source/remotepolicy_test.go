@@ -336,9 +336,9 @@ func TestClassifyKustomizeReference_GitHubShorthand_ExactRef(t *testing.T) {
 
 func TestClassifyKustomizeReference_GitHubShorthand_MissingRef(t *testing.T) {
 	cases := []string{
-		"github.com/org/repo",                 // no query at all
-		"github.com/org/repo?version=v1",      // version= not accepted (only ref=)
-		"github.com/org/repo?ref=",            // empty ref=
+		"github.com/org/repo",            // no query at all
+		"github.com/org/repo?version=v1", // version= not accepted (only ref=)
+		"github.com/org/repo?ref=",       // empty ref=
 	}
 	for _, raw := range cases {
 		t.Run(raw, func(t *testing.T) {
@@ -1003,9 +1003,9 @@ func TestExtractRef_GenericURL_QueryParam(t *testing.T) {
 // TestExtractRef_NoRef tests that extractRef returns "" when no ref is present.
 func TestExtractRef_NoRef(t *testing.T) {
 	cases := []string{
-		"https://github.com/org/repo",         // no ref at all
-		"./local/path",                         // local path
-		"https://example.com/file.yaml",        // remote file, no ref
+		"https://github.com/org/repo",   // no ref at all
+		"./local/path",                  // local path
+		"https://example.com/file.yaml", // remote file, no ref
 	}
 	for _, raw := range cases {
 		t.Run(raw, func(t *testing.T) {
@@ -1034,15 +1034,15 @@ func TestIsSHAPinned(t *testing.T) {
 	}
 
 	invalid := []string{
-		"v1.2.3",                                   // semver tag
-		"main",                                      // branch name
-		"HEAD",                                      // symbolic ref
-		"abc123",                                    // short SHA (not 40 chars)
+		"v1.2.3", // semver tag
+		"main",   // branch name
+		"HEAD",   // symbolic ref
+		"abc123", // short SHA (not 40 chars)
 		"0123456789ABCDEF0123456789ABCDEF01234567",  // uppercase hex
 		"0123456789abcdef0123456789abcdef0123456",   // 39 chars
 		"0123456789abcdef0123456789abcdef012345678", // 41 chars
-		"",                                          // empty
-		"ghijklmnopqrstuvwxyz0123456789abcdef1234",  // non-hex chars
+		"", // empty
+		"ghijklmnopqrstuvwxyz0123456789abcdef1234", // non-hex chars
 	}
 	for _, sha := range invalid {
 		t.Run("invalid_"+sha, func(t *testing.T) {
@@ -1069,7 +1069,7 @@ resources:
 		t.Fatal(err)
 	}
 
-	err := preflightSHAGate(root, true /* requireSHAPinnedRemoteBases */)
+	err := preflightSHAGate(root, root, true /* requireSHAPinnedRemoteBases */)
 	if err == nil {
 		t.Fatal("preflightSHAGate: expected rejection for tag ref in strict mode, got nil")
 	}
@@ -1090,7 +1090,7 @@ resources:
 		t.Fatal(err)
 	}
 
-	err := preflightSHAGate(root, true)
+	err := preflightSHAGate(root, root, true)
 	if err == nil {
 		t.Fatal("preflightSHAGate: expected rejection for branch ref in strict mode, got nil")
 	}
@@ -1111,7 +1111,7 @@ resources:
 		t.Fatal(err)
 	}
 
-	err := preflightSHAGate(root, true)
+	err := preflightSHAGate(root, root, true)
 	if err != nil {
 		t.Fatalf("preflightSHAGate: unexpected rejection for SHA ref in strict mode: %v", err)
 	}
@@ -1129,7 +1129,7 @@ resources:
 		t.Fatal(err)
 	}
 
-	err := preflightSHAGate(root, false /* permissive */)
+	err := preflightSHAGate(root, root, false /* permissive */)
 	if err != nil {
 		t.Fatalf("preflightSHAGate: unexpected rejection in permissive mode: %v", err)
 	}
@@ -1272,7 +1272,7 @@ resources:
 		t.Fatal(err)
 	}
 
-	err := preflightSHAGate(root, true)
+	err := preflightSHAGate(root, root, true)
 	if err == nil {
 		t.Fatal("preflightSHAGate: expected rejection for non-SHA ref in raw.githubusercontent.com URL, got nil")
 	}
@@ -1293,7 +1293,7 @@ resources:
 		t.Fatal(err)
 	}
 
-	err := preflightSHAGate(root, true)
+	err := preflightSHAGate(root, root, true)
 	if err != nil {
 		t.Fatalf("preflightSHAGate: unexpected rejection for SHA-pinned raw.githubusercontent.com ref: %v", err)
 	}
@@ -1312,7 +1312,7 @@ resources:
 		t.Fatal(err)
 	}
 
-	err := preflightSHAGate(root, true)
+	err := preflightSHAGate(root, root, true)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
