@@ -30,7 +30,7 @@ SPDX-License-Identifier: Apache-2.0
 
 ## 5. Operator flag + manager wiring
 
-- [ ] 5.1 Add operator-level flag `--kustomize-require-sha-pinned-remote-bases` (default `false`) in `cmd/main.go`; thread it into the kustomize source constructor. Unit-test the default and the plumb-through.
+- [x] 5.1 Add operator-level flag `--kustomize-require-sha-pinned-remote-bases` (default `false`) in `cmd/main.go`; thread it into the kustomize source constructor. Unit-test the default and the plumb-through.
 
 ## 6. Git binary in the operator image
 

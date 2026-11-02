@@ -162,7 +162,7 @@ binding authority. `proposal.md` has the why/what-changes summary.
   `false` and constructor wiring → FAIL; GREEN: implement → PASS).
 - Commit: `feat(cmd): add --kustomize-require-sha-pinned-remote-bases flag`
 
-- [ ] Task 5 complete
+- [x] Task 5 complete
 
 ---
 
