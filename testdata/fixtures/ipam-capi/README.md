@@ -1,78 +1,82 @@
 # ipam-capi equivalence fixture
 
 This is the fifth equivalence fixture in the suite. It proves that the operator's
-kustomize render for the **ipam-capi shoot overlay** (`managedresources/`) produces
-output equivalent to today's **ipam-capi-remote Helm chart** (`system/ipam-capi-remote/`)
-at the same pinned `sapcc/helm-charts` commit SHA — the same golden baseline pattern
-used by all four existing operator fixtures.
+new kustomize render for the **ipam-capi-remote DDO overlay** (`system/kustomize/ipam-capi-remote-ddo/`)
+produces identity-equivalent output to today's **ipam-capi-remote Helm chart**
+(`system/ipam-capi-remote/`) for the shoot/resource kinds that are not subject to
+intentional r7 migration deltas.
 
 Golden side: `git clone` + `helm dependency build` + `helm template system/ipam-capi-remote/`,
 then unwrap ManagedResources → shoot object set.
 
-Operator side: `source.From` → `Render` (KustomizeSource, shoot mode only) →
-`transform.Build` pipeline, captured before the delivery layer.
+Operator side: `source.From` → `Render` (KustomizeSource, shoot mode only via
+`CaptureShootOnly`) → `transform.Build` pipeline.
+
+## About the DDO overlay (PR #13218)
+
+The operator-side kustomize source is `system/kustomize/ipam-capi-remote-ddo/`,
+the real DDO migration overlay from **sapcc/helm-charts PR #13218**
+(`feat/ipam-capi-remote-ddo-m-qa-de-200` branch, SHA `726f6ccee8eef46152f8abc7cc0b107e6e7f9596`).
+
+**PR #13218 is currently a DRAFT (as of 2026-11-02).** The overlay exists on the PR
+branch but NOT on `master`. Both `system/ipam-capi-remote/` (Helm golden) and
+`system/kustomize/ipam-capi-remote-ddo/` (DDO overlay) coexist at the PR branch SHA,
+which is why both fixture sides use the same pinned commit.
+
+**Once PR #13218 is merged**, update `sha:` in `fixture.yaml` and `url ?ref=` in
+`cr.yaml` to a post-merge commit on `main` where both paths are present.
 
 ## Scope: shoot overlay only
 
-**Only the `managedresources/` (shoot) overlay is covered.** The `seed/manager` overlay
-is deliberately **NOT** tested here.
+**Only the `shoot/` overlay is tested.** The `seed/` overlay is NOT covered by this fixture.
 
-### Why the seed overlay is excluded
+Unlike the original ipam-capi-remote source (deferred in `docs/implementation.md`),
+the new DDO overlay's `seed/` overlay IS buildable with `KustomizeSource` — it uses only
+`../base` and `../additions/seed`, both vendored, with no repo-root-relative patches.
+The original deferral reason no longer applies to `ipam-capi-remote-ddo`.
 
-ipam-capi's `manager` overlay references patch files by **repo-root-relative paths**:
+The shoot-only scope matches the task-8 brief. A follow-up fixture can add seed coverage.
 
-```yaml
-# system/kustomize/ipam-capi-remote/manager/kustomization.yaml
-patches:
-  - path: kustomize/ipam-capi-remote/manager/some-patch.yaml
-    ...
-```
+## Migration deltas: what the fixture does and does not check
 
-These paths only resolve when kustomize builds from the **repository root** (the default
-for `make build-ipam-capi-remote` in `sapcc/helm-charts`). The operator's `KustomizeSource`
-resolves the build directory to the **overlay subdir** (`system/kustomize/ipam-capi-remote/seed`),
-so the relative patch paths escape to a location that does not exist under that subdir,
-and the build fails with `no such file`.
+This fixture compares the new DDO overlay's output against the legacy Helm chart.
+The DDO overlay intentionally changes some fields as part of the r7 migration:
 
-Closing the seed overlay equivalence requires extending `KustomizeSource` so the clone
-root and the kustomize-build directory can differ (i.e. clone the full repo but build from
-the overlay subdir, keeping relative paths resolvable relative to the clone root). This is
-a **CRD + source change** (design §9.4) explicitly out of scope for the current change.
+| Object | Change | Handling |
+|--------|--------|----------|
+| Pool CRDs (4x) | `spec.conversion`: `service`→`null`, explicit webhook URL | `migrationExclusions` (not compared) |
+| Core CRDs (3x) | `spec.conversion`: `{strategy: None}` patch added | `migrationExclusions` (not compared) |
+| Webhook configurations | `dual-deployment-operator.cc.sap/webhook-injector` label added | `ignoreLabels` (stripped before compare) |
+| Pool CRDs | Same webhook-injector label | `ignoreLabels` |
+| `ipam-capi-remote-webhook-injector` ClusterRole | RBAC rules updated for r7 injector | `migrationExclusions` (not compared) |
+| Leader-election RBAC (4 objects) | Dropped (manager runs `--leader-elect=false`) | `knownDivergences` (golden-only, expected missing) |
 
-See **`docs/implementation.md`** → *"`ipam-capi` equivalence is DEFERRED to a standalone
-future follow-up (not tied to any phase)"* for the full deferral rationale and the two
-ipam-capi-specific blockers. The relevant excerpt:
+Everything else (CRD schemas, remaining RBAC, ServiceAccounts, WebhookConfiguration
+policies other than labels) is compared normally and must match.
 
-> *Deferred:* ipam-capi's kustomize overlays reference patch files by **repo-root-relative**
-> paths (`patches[].path: kustomize/ipam-capi-remote/manager/…`), so today's `make build-`
-> runs kustomize from the repo root. The operator's `KustomizeSource` (`url` + `seedPath`/`shootPath`)
-> resolves the build dir to the overlay **subdir**, so those relative patch paths double and
-> the seed/`manager` overlay fails to build (`no such file`). Closing ipam-capi equivalence
-> requires extending `KustomizeSource` so the clone root and the kustomize-build dir can differ
-> (build from the repo root, target the overlay) — a CRD + source change (design §9.4),
-> hence its own follow-up rather than part of the equivalence-tests change.
-
-When that `KustomizeSource` extension ships, a second test covering the seed/manager overlay
-can be added alongside this fixture. The `cr.yaml` here already has a `seedPath: seed` field
-that will be exercised once the seed render is unblocked.
+`migrationExclusions` objects are NOT regression-guarded by this fixture. The PR's own
+test suite (`tests/crd_diff_test.sh`, `tests/migration_contract.py`) covers those fields
+independently.
 
 ## Network requirements
 
 This test is gated on `RUN_EQUIVALENCE=1` because it requires outbound network access:
 
 - **Golden side (Helm)**: git clone of `github.com/sapcc/helm-charts` + `helm dependency build`
-  pulling subcharts from the internal keppel OCI registry (`keppel.global.cloud.sap/ccloud-helm/…`).
-  Same requirement as the other four Helm fixtures.
+  pulling subcharts from the internal keppel OCI registry. Same requirement as the other
+  four Helm fixtures.
 - **Operator side (kustomize)**: git clone of `github.com/sapcc/helm-charts` (same SHA) +
-  krusty fetching transitive remote bases (`cluster-api-ipam-provider-in-cluster ?ref=v1.1.0`,
-  cluster-api CRD bases `v1.13.4`) from `github.com` and `raw.githubusercontent.com`.
-  All kustomize sources are public/anonymous (no OCI registry credentials needed for this side).
+  krusty fetching the provider directory base
+  (`cluster-api-ipam-provider-in-cluster//config/crd?ref=<SHA>`, a git directory base)
+  and three core CRDs via SHA-pinned `raw.githubusercontent.com` HTTP file URLs.
+  The DDO operator code handles both `refKindRemoteGitDir` and `refKindRemoteFile`
+  correctly per `internal/source/remotepolicy.go`. All kustomize sources are public/anonymous.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `fixture.yaml` | Pinned SHA, Helm chart path, overlay values file, kustomize overlay path, comparison scope config |
-| `cr.yaml` | Representative `DualDeploymentOperator` CR for the operator-side kustomize render |
-| `overlay-values.yaml` | Per-cluster Helm overlay values for the golden `ipam-capi-remote` chart render |
-| `README.md` | This file — scope rationale and network requirements |
+| `fixture.yaml` | Pinned SHA (PR branch), chart path, kustomize overlay path, scope config, migration exclusions |
+| `cr.yaml` | `DualDeploymentOperator` CR targeting the real DDO kustomize overlay |
+| `overlay-values.yaml` | Per-cluster Helm overlay values for the golden render |
+| `README.md` | This file |

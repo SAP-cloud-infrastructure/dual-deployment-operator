@@ -47,8 +47,8 @@ func TestLoadFixtureIPAMCAPI(t *testing.T) {
 		t.Errorf("fullname = %q, want ipam-capi-remote", f.ChartFullname)
 	}
 	// kustomizePath documents the operator-side overlay; set alongside chartPath.
-	if f.KustomizePath != "system/kustomize/ipam-capi-remote/managedresources" {
-		t.Errorf("kustomizePath = %q, want system/kustomize/ipam-capi-remote/managedresources", f.KustomizePath)
+	if f.KustomizePath != "system/kustomize/ipam-capi-remote-ddo" {
+		t.Errorf("kustomizePath = %q, want system/kustomize/ipam-capi-remote-ddo", f.KustomizePath)
 	}
 	if f.CR == nil || f.CR.Spec.Source.Kustomize == nil {
 		t.Error("ipam-capi fixture CR must have a kustomize source")

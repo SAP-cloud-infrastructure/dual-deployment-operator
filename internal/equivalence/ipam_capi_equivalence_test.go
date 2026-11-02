@@ -106,6 +106,24 @@ func TestEquivalenceIPAMCAPI(t *testing.T) {
 	goldenShoot := scope.Apply(golden.Shoot)
 	opShootScoped := scope.Apply(opShoot)
 
+	// Drop migration exclusions from both sides. These are objects that exist on
+	// both sides but with intentional field-level differences (e.g. CRD conversion
+	// fields deliberately changed as part of the Helm→kustomize migration). They
+	// cannot be handled by knownDivergences (which only suppresses single-sided
+	// missing/extra) — they must be excluded from comparison entirely.
+	for _, ex := range f.MigrationExclusions {
+		for k, u := range goldenShoot {
+			if u.GetKind() == ex.Kind && u.GetName() == ex.Name {
+				delete(goldenShoot, k)
+			}
+		}
+		for k, u := range opShootScoped {
+			if u.GetKind() == ex.Kind && u.GetName() == ex.Name {
+				delete(opShootScoped, k)
+			}
+		}
+	}
+
 	// Non-vacuity floor: ipam-capi's shoot overlay delivers CRDs + RBAC,
 	// so neither scoped set may be empty. A fixture typo (bad comparedKinds,
 	// over-broad suppression) that empties both sides would pass a vacuous

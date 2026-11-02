@@ -27,11 +27,21 @@ type Fixture struct {
 	CRFile        string           `json:"cr"`
 	Exclusions    []ExclusionEntry `json:"exclusions"`
 
-	// KustomizePath, when non-empty, selects the kustomize-based golden render
-	// path instead of the Helm path. Set this to the subpath within the repo to
-	// build (e.g. system/kustomize/ipam-capi-remote/managedresources). When set,
-	// ChartPath, ChartFullname and OverlayValues are ignored for golden rendering.
+	// KustomizePath, when non-empty, documents the kustomize overlay path used by
+	// the operator-side CR's source.kustomize.url (for documentation purposes; the
+	// golden render always uses the Helm chart path in ChartPath).
 	KustomizePath string `json:"kustomizePath,omitempty"`
+
+	// MigrationExclusions lists objects to drop from BOTH the golden and operator
+	// sets before comparison. Use for objects that exist on both sides but with
+	// intentional field-level differences that are part of a deliberate migration
+	// delta (e.g. CRD conversion field changes during a Helm→kustomize migration).
+	// Unlike Exclusions (golden-side only) and KnownDivergences (single-sided
+	// missing/extra only), MigrationExclusions suppress both-sided field mismatches.
+	// Justify each entry: these objects are NOT compared, so any unintentional drift
+	// in them will go undetected. Use sparingly; prefer knownDivergences for
+	// single-sided objects.
+	MigrationExclusions []ExclusionEntry `json:"migrationExclusions,omitempty"`
 
 	ComparedKinds      []string         `json:"comparedKinds"`
 	KnownDivergences   []ExclusionEntry `json:"knownDivergences"`
@@ -43,8 +53,8 @@ type Fixture struct {
 	Dir        string                           `json:"-"`
 }
 
-// IsKustomize reports whether this fixture uses kustomize-based golden rendering
-// instead of Helm.
+// IsKustomize reports whether this fixture documents a kustomize-based operator
+// source (KustomizePath is set). The golden render always uses Helm (ChartPath).
 func (f *Fixture) IsKustomize() bool { return f.KustomizePath != "" }
 
 // LoadFixture reads fixture.yaml plus the referenced CR and overlay-values file.
