@@ -189,3 +189,31 @@ binding authority. `proposal.md` has the why/what-changes summary.
 - 8.6 `code-reviewer` subagent review (model `openai/gpt-6-astra`), address findings.
 
 - [ ] Task 8 complete
+
+---
+
+## Task 9: ipam-capi equivalence fixture (partial — shoot overlay only)
+
+- 9.1 Add a fifth `RUN_EQUIVALENCE=1`-gated fixture under
+  `testdata/fixtures/ipam-capi/` (golden: `sapcc/helm-charts` at a pinned
+  SHA via `git clone` + `helm dependency build` + `helm template` of
+  `system/ipam-capi-remote/`; operator side:
+  `source.From → Render → transform.Build → Apply` against
+  `system/kustomize/ipam-capi-remote/` at the same SHA), scoped to the
+  `managedresources`/shoot overlay only — it is self-contained and renders
+  today, unlike the `manager`/seed overlay.
+- 9.2 Do NOT attempt the seed overlay fixture: it is blocked by
+  `kustomize/ipam-capi-remote/manager`'s repo-root-relative `patches[].path`
+  values, which only resolve when kustomize builds from the repo root —
+  `KustomizeSource` builds from the overlay subdir instead. Closing it
+  requires extending `KustomizeSource` so the clone root and the
+  kustomize-build dir can differ (CRD + source change, design.md §9.4);
+  that is explicitly out of scope for this change (Global Constraints — no
+  `RootResolver`/CRD/API changes) and stays a standalone future follow-up
+  per `docs/implementation.md`'s existing deferral note.
+- 9.3 Record in the fixture's README/comment why the seed overlay is
+  skipped and link back to `docs/implementation.md`'s ipam-capi deferral
+  note, so the follow-up change has a ready pointer.
+- Commit: `test(equivalence): add ipam-capi shoot-overlay fixture (seed overlay deferred)`
+
+- [ ] Task 9 complete
