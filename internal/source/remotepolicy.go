@@ -125,9 +125,30 @@ func classifyKustomizeReference(raw string) (refKind, string, error) {
 		return classifyGitHubShorthand(stripped)
 	}
 
-	// Anything else is unrecognised — treated as local by krusty but DDO
-	// cannot confidently classify it; fall through to local.
-	return refKindLocal, "", nil
+	// P1-3: Anything that reaches here is a URL-like or remote-looking string
+	// that the classifier does not fully understand. Reject explicitly rather than
+	// silently treating as local (which would let krusty fetch it unchecked).
+	//
+	// This catches forms such as:
+	//   - file:///path/to/repo?ref=main  (file:// scheme — not a relative local path)
+	//   - github.com:org/repo?ref=main   (SCP-without-@ — superficially looks local
+	//     but contains a colon before the first slash, resembling a host:path form)
+	//   - any other unrecognized scheme (e.g. ftp://, s3://)
+	//
+	// A genuine local path (relative or absolute) was already caught above by
+	// isLocalPath; anything reaching here has scheme-like characteristics that
+	// indicate it is not a plain relative filesystem path.
+	if strings.Contains(stripped, "://") {
+		// Unknown scheme (not https, http, or ssh which are handled/rejected above)
+		return 0, "", errors.New("remote reference: unsupported URL scheme; only HTTPS remote bases are allowed")
+	}
+	// SCP-without-@: hostname:path where colon precedes any slash (looks like a
+	// remote address but no git@ prefix). These are not valid local paths.
+	if isSCPWithoutAt(stripped) {
+		return 0, "", errors.New("remote reference: SCP-style references without 'user@' prefix are not supported; use HTTPS with authSecretRef for private repositories")
+	}
+	// Any remaining unrecognized form: fail closed.
+	return 0, "", errors.New("remote reference: unrecognized reference form; only HTTPS remote bases and relative local paths are supported")
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +172,26 @@ func isSCPStyle(raw string) bool {
 	return colonIdx >= 0 && (slashIdx < 0 || colonIdx < slashIdx)
 }
 
+// isSCPWithoutAt detects SCP-like host:path references without a user@ prefix.
+// These look like "hostname:org/repo" or "github.com:org/repo" — no scheme,
+// no @, but a colon appears before the first slash (host:path separator).
+// Such forms are unrecognized by DDO's classifier and must be explicitly rejected
+// rather than silently falling through to "local" (they are not local paths).
+func isSCPWithoutAt(raw string) bool {
+	// Must not have a scheme (those are handled separately)
+	if strings.Contains(raw, "://") {
+		return false
+	}
+	// Must not have @ (git@host:path is caught by isSCPStyle above)
+	if strings.Contains(raw, "@") {
+		return false
+	}
+	// A colon must appear before the first slash
+	colonIdx := strings.Index(raw, ":")
+	slashIdx := strings.Index(raw, "/")
+	return colonIdx > 0 && (slashIdx < 0 || colonIdx < slashIdx)
+}
+
 func startsWithIgnoreCase(s, prefix string) bool {
 	if len(s) < len(prefix) {
 		return false
@@ -159,17 +200,27 @@ func startsWithIgnoreCase(s, prefix string) bool {
 }
 
 // isLocalPath returns true if raw is a local filesystem path: starts with
-// ./, ../, is just ".", or contains no "://" and does not start with
-// "github.com/".
+// ./, ../, is just ".", or is a bare relative name without a scheme or
+// colon-before-slash (which would indicate an SCP-style remote reference).
 func isLocalPath(raw string) bool {
 	if strings.HasPrefix(raw, "./") || strings.HasPrefix(raw, "../") || raw == "." || raw == ".." {
 		return true
 	}
-	// No scheme, not github.com shorthand → local
-	if !strings.Contains(raw, "://") && !startsWithIgnoreCase(raw, "github.com/") {
-		return true
+	// Has a scheme → not a local path (handled by other classifiers or rejected)
+	if strings.Contains(raw, "://") {
+		return false
 	}
-	return false
+	// github.com/ shorthand → not local
+	if startsWithIgnoreCase(raw, "github.com/") {
+		return false
+	}
+	// SCP-without-@ (e.g. "host:path") → not local; will be rejected downstream.
+	// A colon before the first slash is the SCP host:path separator.
+	if isSCPWithoutAt(raw) {
+		return false
+	}
+	// No scheme, not github.com, not SCP-like → treat as local relative path.
+	return true
 }
 
 func isHTTPURL(raw string) bool {
@@ -214,7 +265,20 @@ func classifyHTTPURL(raw string) (refKind, string, error) {
 	}
 
 	// Remote git directory: requires ?ref=
-	ref := u.Query().Get("ref")
+	// P1-2: use url.ParseQuery explicitly so a malformed query string (e.g.
+	// "?ref=sha&bad=%zz") is rejected rather than silently returning partial
+	// results. url.URL.Query() calls url.ParseQuery internally but discards
+	// the error — a malformed query could extract a valid ?ref= and pass the
+	// SHA gate even though krusty/git would see the WHOLE unparseable query
+	// string and default to HEAD (bypassing the pinned SHA entirely).
+	var ref string
+	if u.RawQuery != "" {
+		vals, qErr := url.ParseQuery(u.RawQuery)
+		if qErr != nil {
+			return 0, "", errors.New("remote reference: malformed query string in URL")
+		}
+		ref = vals.Get("ref")
+	}
 	if ref == "" {
 		return 0, "", errors.New("remote reference: remote git directory references require a pinned ?ref= query parameter")
 	}
@@ -444,6 +508,17 @@ func walkDir(absRoot, dir string, visited, seen map[string]bool, remotes *[]Remo
 
 		switch kind {
 		case refKindLocal:
+			// P1-4: Reject absolute local paths outright. There is no legitimate
+			// reason for a kustomize overlay's resources/components/bases field to
+			// reference an absolute filesystem path in the context of a remote-base
+			// policy check. More importantly, filepath.Join(absDir, rawAbsPath)
+			// returns absDir+rawAbsPath (a path inside the root that passes the
+			// boundary check), while krusty's LoadRestrictionsNone loader interprets
+			// the kustomization's original raw absolute path directly — completely
+			// bypassing the DDO isolation boundary. Fail closed.
+			if filepath.IsAbs(raw) {
+				return errors.New("tree walk: absolute path references are not permitted in kustomize overlays")
+			}
 			// Local path: compute the child path and boundary-check before deciding
 			// whether to recurse (directory) or skip (file).
 			childPath := filepath.Join(absDir, raw)
@@ -494,7 +569,10 @@ func resolveAndCheckBoundary(absRoot, path string) (string, error) {
 			// and check the boundary.
 			approx, aErr := filepath.Abs(path)
 			if aErr != nil {
-				return "", fmt.Errorf("tree walk: resolve path: %w", aErr) // fail-closed: can't determine boundary
+				// P1-5: do NOT include aErr.Error() — it may contain the raw path
+				// (which can be a credential-bearing reference). Return a fixed message.
+				_ = aErr // discarded intentionally to prevent credential leakage
+				return "", errors.New("tree walk: resolve path: could not determine absolute path (fail-closed)")
 			}
 			approx = filepath.Clean(approx)
 			if !isUnderRoot(absRoot, approx) {
@@ -502,7 +580,10 @@ func resolveAndCheckBoundary(absRoot, path string) (string, error) {
 			}
 			return "", nil // non-existent, in-bounds
 		}
-		return "", fmt.Errorf("tree walk: resolve path: %w", err)
+		// P1-5: do NOT include err.Error() — it may contain the raw path (which
+		// can be a credential-bearing reference). Return a fixed message.
+		_ = err // discarded intentionally to prevent credential leakage
+		return "", errors.New("tree walk: resolve path: could not resolve filesystem path (fail-closed)")
 	}
 	abs = filepath.Clean(abs)
 	if !isUnderRoot(absRoot, abs) {

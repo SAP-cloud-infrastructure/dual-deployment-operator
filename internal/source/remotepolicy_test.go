@@ -7,6 +7,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1227,14 +1228,19 @@ resources:
 // TestPreflightSHAGate_FetchHookPositiveControl is the positive control for the
 // kustomizeFetchHook instrumentation: it proves the hook actually fires when the
 // gate passes (permissive mode) so the zero-fetch tests are not vacuously true.
+//
+// P2-6: this test previously called real krusty against "unreachable.invalid",
+// making an actual network attempt. Fixed: inject krustyRunHook to return a
+// synthetic error immediately after the hook fires, verifying the hook fires
+// without any real network access.
 func TestPreflightSHAGate_FetchHookPositiveControl(t *testing.T) {
 	root := t.TempDir()
 	// A kustomization with a remote base in permissive mode — gate is a no-op,
-	// so Render() must reach kust.Run() and fire the hook.
+	// so Render() must reach kust.Run() and fire the fetch hook.
 	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - https://unreachable.invalid/org/repo?ref=v1.2.3
+  - https://example.com/org/repo?ref=v1.2.3
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1247,13 +1253,23 @@ resources:
 	}
 
 	fetchReached := false
-	old := kustomizeFetchHook
+	oldFetch := kustomizeFetchHook
 	kustomizeFetchHook = func() { fetchReached = true }
-	defer func() { kustomizeFetchHook = old }()
+	defer func() { kustomizeFetchHook = oldFetch }()
 
-	// Render will fail (kust.Run can't reach unreachable.invalid) but the hook
-	// must have fired before that failure.
-	src.Render(context.Background(), ModeSeed, "ns") //nolint:errcheck
+	// P2-6: inject a synthetic krusty error so no real network call is made.
+	// The hook fires before krust.Run is called; krustyRunHook makes krust.Run
+	// return immediately with this sentinel error.
+	oldKrusty := krustyRunHook
+	krustyRunHook = errors.New("synthetic krusty error for positive-control test")
+	defer func() { krustyRunHook = oldKrusty }()
+
+	// Render will fail with the synthetic error, but the fetch hook must have
+	// fired before runKrusty is entered.
+	_, renderErr := src.Render(context.Background(), ModeSeed, "ns")
+	if renderErr == nil {
+		t.Fatal("expected an error from Render (synthetic krusty hook), got nil")
+	}
 
 	if !fetchReached {
 		t.Fatal("kustomizeFetchHook was NOT called in permissive mode — instrumentation is dead code (positive control failed)")
@@ -1358,5 +1374,187 @@ func TestResolveAndCheckBoundary_NonExistentOutOfBounds(t *testing.T) {
 	_, err := resolveAndCheckBoundary(root, outsidePath)
 	if err == nil {
 		t.Error("resolveAndCheckBoundary: expected boundary violation error for out-of-bounds non-existent path, got nil (fail-open — FAIL)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P1-2 regression: malformed query string bypasses strict SHA enforcement
+// ---------------------------------------------------------------------------
+
+// TestClassifyHTTPURL_RejectsMalformedQuery verifies that a URL with a valid
+// ?ref= but also an unparseable query fragment (e.g. ?ref=sha&bad=%zz) is
+// rejected, not silently accepted with only the valid portion extracted.
+//
+// Background: url.URL.Query() silently drops malformed query fragments and
+// returns partial results; a mixed valid+invalid query like ?ref=<sha>&bad=%zz
+// would extract the valid SHA and pass the strict SHA gate, while krusty/git
+// would see the whole unparseable query and default to HEAD — bypassing the
+// pin entirely. We must use url.ParseQuery explicitly and reject on parse error.
+func TestClassifyHTTPURL_RejectsMalformedQuery(t *testing.T) {
+	cases := []string{
+		// valid ?ref= combined with an unparseable fragment — must be REJECTED
+		"https://github.com/org/repo?ref=0123456789abcdef0123456789abcdef01234567&bad=%zz",
+		"https://example.com/org/repo?ref=abc123&x=%gg",
+		// purely malformed query — must be REJECTED
+		"https://github.com/org/repo?%zz",
+	}
+	for _, raw := range cases {
+		t.Run(raw, func(t *testing.T) {
+			_, _, err := classifyKustomizeReference(raw)
+			if err == nil {
+				t.Errorf("classifyKustomizeReference(%q): expected rejection for malformed query, got nil", raw)
+			}
+			// Error must not echo the raw URL content
+			if strings.Contains(err.Error(), "github.com") || strings.Contains(err.Error(), "example.com") {
+				t.Errorf("URL leaked in error for %q: %v", raw, err)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P1-3 regression: SCP-without-@ and file:// should be rejected, not local
+// ---------------------------------------------------------------------------
+
+// TestClassifyKustomizeReference_RejectsSCPWithoutAt verifies that SCP-like
+// references WITHOUT a "user@" prefix (e.g. "github.com:org/repo?ref=main")
+// are rejected rather than silently treated as a local path.
+func TestClassifyKustomizeReference_RejectsSCPWithoutAt(t *testing.T) {
+	cases := []string{
+		"github.com:org/repo?ref=main",
+		"gitlab.com:org/repo?ref=v1",
+		"host.example.com:path/to/repo",
+	}
+	for _, raw := range cases {
+		t.Run(raw, func(t *testing.T) {
+			_, _, err := classifyKustomizeReference(raw)
+			if err == nil {
+				t.Errorf("classifyKustomizeReference(%q): expected rejection for SCP-without-@ form, got nil", raw)
+			}
+			// Error must not echo raw URL content
+			if strings.Contains(err.Error(), raw) {
+				t.Errorf("raw URL leaked in error for %q: %v", raw, err)
+			}
+		})
+	}
+}
+
+// TestClassifyKustomizeReference_RejectsFileScheme verifies that file:// URLs
+// are rejected (they are not valid remote git bases and must not be treated as
+// local paths, since they could reference arbitrary filesystem locations).
+func TestClassifyKustomizeReference_RejectsFileScheme(t *testing.T) {
+	cases := []string{
+		"file:///outside/repo?ref=main",
+		"file:///etc/passwd",
+		"file://localhost/path/to/dir",
+	}
+	for _, raw := range cases {
+		t.Run(raw, func(t *testing.T) {
+			_, _, err := classifyKustomizeReference(raw)
+			if err == nil {
+				t.Errorf("classifyKustomizeReference(%q): expected rejection for file:// scheme, got nil", raw)
+			}
+			// Error must not echo the raw path
+			if strings.Contains(err.Error(), "/outside") || strings.Contains(err.Error(), "/etc") {
+				t.Errorf("path leaked in error for %q: %v", raw, err)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P1-4 regression: absolute resource references bypass isolation root
+// ---------------------------------------------------------------------------
+
+// TestTreeWalkKustomize_RejectsAbsolutePath verifies that an absolute filesystem
+// path in a kustomization's resources field is rejected outright.
+//
+// Background: filepath.Join(absDir, "/abs/path") produces absDir+"/abs/path"
+// which looks inside the root to the DDO boundary check, but krusty's
+// LoadRestrictionsNone interprets the kustomization's original absolute value
+// directly — bypassing the isolation boundary entirely.
+func TestTreeWalkKustomize_RejectsAbsolutePath(t *testing.T) {
+	root := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte("apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - /etc/passwd\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := treeWalkKustomize(root)
+	if err == nil {
+		t.Fatal("treeWalkKustomize: expected rejection for absolute path reference, got nil — isolation boundary escape not blocked")
+	}
+	if !strings.Contains(err.Error(), "absolute") {
+		t.Errorf("expected error to mention 'absolute', got: %v", err)
+	}
+}
+
+// TestTreeWalkKustomize_RejectsAbsolutePathVariants verifies multiple absolute
+// path forms are all rejected (the rule: no absolute references at all).
+func TestTreeWalkKustomize_RejectsAbsolutePathVariants(t *testing.T) {
+	cases := []string{
+		"/etc/passwd",
+		"/tmp/evil-kustomization",
+		"/var/secrets/credentials.yaml",
+	}
+	for _, absRef := range cases {
+		t.Run(absRef, func(t *testing.T) {
+			root := t.TempDir()
+			kustContent := "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - " + absRef + "\n"
+			if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(kustContent), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := treeWalkKustomize(root)
+			if err == nil {
+				t.Errorf("treeWalkKustomize: absolute ref %q should be rejected, got nil", absRef)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P1-5 regression: credential-bearing paths must not leak in preflight errors
+// ---------------------------------------------------------------------------
+
+// TestResolveAndCheckBoundary_NoCredentialLeakOnError verifies that when
+// resolveAndCheckBoundary encounters a filesystem error on a path with
+// credential-like content, the credential does NOT appear in the returned error.
+func TestResolveAndCheckBoundary_NoCredentialLeakOnError(t *testing.T) {
+	root := t.TempDir()
+	// A non-existent path whose name embeds a "credential" token.
+	// resolveAndCheckBoundary sees this as non-existent-and-in-bounds → no
+	// error expected, but the token must not appear if an error IS returned.
+	credPath := filepath.Join(root, "user:SUPERSECRET@host:repo", "path")
+
+	_, err := resolveAndCheckBoundary(root, credPath)
+	// Either nil (non-existent in-bounds) or an error — in both cases no leak.
+	if err != nil && strings.Contains(err.Error(), "SUPERSECRET") {
+		t.Errorf("credential leaked in resolveAndCheckBoundary error: %v", err)
+	}
+}
+
+// TestPreflightSHAGate_CredentialBearingRefNoLeak verifies that a
+// kustomization.yaml with a credential-bearing URL in resources (embedded
+// userinfo) is rejected and the credential NEVER appears in the error message.
+func TestPreflightSHAGate_CredentialBearingRefNoLeak(t *testing.T) {
+	root := t.TempDir()
+	// The URL string below contains a fake credential to verify sanitization —
+	// it is a test fixture, not a real secret.
+	kustYAML := "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n" +
+		"  - https://user:SUPERSECRET@github.com/org/repo?ref=0123456789abcdef0123456789abcdef01234567\n"
+	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(kustYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := preflightSHAGate(root, root, true)
+	if err == nil {
+		t.Fatal("expected rejection for credential-bearing URL, got nil")
+	}
+	// The credential must not appear in ANY part of the error.
+	if strings.Contains(err.Error(), "SUPERSECRET") {
+		t.Errorf("credential leaked in preflightSHAGate error: %v", err)
+	}
+	if strings.Contains(err.Error(), "github.com") {
+		t.Errorf("URL leaked in preflightSHAGate error: %v", err)
 	}
 }

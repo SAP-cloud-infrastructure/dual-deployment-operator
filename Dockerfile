@@ -50,15 +50,38 @@ RUN apt-get update && \
 # the helpers is essential: git-remote-https links against libcurl-gnutls which
 # /usr/bin/git itself does not, and omitting it would break HTTPS remote bases.
 #
+# Path normalisation: on Debian trixie /lib is a symlink → usr/lib.  The ldd
+# output therefore contains paths like /lib/aarch64-linux-gnu/… which, when
+# collected with --parents into /git-libs, create a /git-libs/lib/ directory.
+# In the distroless final stage /lib is ALSO a symlink → usr/lib; Docker
+# refuses to COPY a plain directory over a symlink, aborting the build.
+#
+# Fix strategy:
+#  1. Rewrite /lib/ → /usr/lib/ in every ldd-reported path (both are the same
+#     filesystem location; /lib is a symlink to usr/lib on Debian trixie).
+#  2. For each collected path, preserve the soname symlink (cp -a) AND also
+#     copy the symlink's real-file target (readlink -f + cp -a --parents).
+#     Without this second step, ldd symlinks like libpcre2-8.so.0 (→
+#     libpcre2-8.so.0.14.0) are staged as dangling symlinks because cp -a
+#     copies the symlink entry but not the file it points to.
+#
 # Fail-closed build-time guards (both must pass or the build aborts):
 #   1. At least one library was collected (guards against a silent empty closure).
 #   2. libcurl-gnutls is present (guards the HTTPS transport chain specifically).
 RUN mkdir -p /git-libs && \
-    find /usr/bin/git /usr/lib/git-core/ -type f -executable -print | \
+    paths=$(find /usr/bin/git /usr/lib/git-core/ -type f -executable -print | \
       xargs -I '{}' sh -c 'ldd "$1" 2>/dev/null || true' _ {} | \
       awk '/=>/ { print $3 } /^\// { print $1 }' | \
       grep -E '^/' | sort -u | \
-      xargs -I '{}' cp --parents '{}' /git-libs && \
+      sed 's|^/lib/|/usr/lib/|' | sort -u) && \
+    echo "$paths" | while read p; do \
+      cp -a --parents "$p" /git-libs 2>/dev/null || true; \
+      if [ -L "$p" ]; then \
+        real=$(readlink -f "$p"); \
+        real=$(echo "$real" | sed 's|^/lib/|/usr/lib/|'); \
+        cp -a --parents "$real" /git-libs 2>/dev/null || true; \
+      fi; \
+    done && \
     lib_count=$(find /git-libs -name '*.so*' | wc -l) && \
     [ "$lib_count" -gt 0 ] || { echo "ERROR: git shared-lib collection produced 0 libraries"; exit 1; } && \
     find /git-libs -name 'libcurl-gnutls*' | grep -q . || \
@@ -81,10 +104,14 @@ WORKDIR /
 # Manager binary (statically linked Go binary — unchanged from before)
 COPY --from=builder /workspace/manager .
 
-# git binary, git-core helpers, and shared-library closure
+# git binary, git-core helpers, and shared-library closure.
+# The realpath-normalised staging dir (/git-libs) only contains paths under
+# /usr/ (the symlink /lib → usr/lib is followed at collection time), so we
+# copy /git-libs/usr into /usr — avoiding the /lib symlink conflict that
+# distroless exposes when a plain /lib directory is COPY'd over a symlink.
 COPY --from=git-provider /usr/bin/git /usr/bin/git
 COPY --from=git-provider /usr/lib/git-core /usr/lib/git-core
-COPY --from=git-provider /git-libs /
+COPY --from=git-provider /git-libs/usr /usr
 
 USER 65532:65532
 
