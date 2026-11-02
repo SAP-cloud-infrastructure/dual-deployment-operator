@@ -9,6 +9,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
 
 	"sigs.k8s.io/kustomize/api/krusty"
 	"sigs.k8s.io/kustomize/api/resmap"
@@ -53,9 +55,18 @@ func (k *kustomizeSource) Render(ctx context.Context, mode Mode, namespace strin
 	}
 	defer cleanup()
 
+	// Compute the preflight isolation root: the clone root from which krusty
+	// will read. The resolver returns filepath.Join(cloneDir, subPath) so we
+	// strip the subPath suffix to recover cloneDir. This allows kustomize
+	// overlays that reference sibling directories (../base) to pass the
+	// boundary check — those references stay within the clone root, which is
+	// the correct isolation boundary.
+	// When subPath is empty, preflightRoot == root (no stripping needed).
+	preflightRoot := preflightIsolationRoot(root, subPath)
+
 	// SHA-pin preflight: classify → tree-walk → SHA-gate, strictly before any
 	// network/git fetch. Errors here are already sanitized (no raw URLs/creds).
-	if err := preflightSHAGate(root, k.requireSHAPinnedRemoteBases); err != nil {
+	if err := preflightSHAGate(preflightRoot, k.requireSHAPinnedRemoteBases); err != nil {
 		return nil, err
 	}
 
@@ -99,6 +110,37 @@ func runKrusty(kust *krusty.Kustomizer, root string) (resmap.ResMap, error) {
 		return nil, krustyRunHook
 	}
 	return kust.Run(filesys.MakeFsOnDisk(), root)
+}
+
+// preflightIsolationRoot computes the tree-walk isolation boundary from the
+// resolved root and the subPath that was appended to reach it.
+//
+// The RootResolver returns filepath.Join(cloneDir, subPath) for a given subPath.
+// When walking for classification/preflight, we want to use cloneDir as the
+// boundary — not the overlay subPath — because kustomize overlays legitimately
+// reference sibling directories (../base) that are within the clone but outside
+// the overlay subPath directory.
+//
+// If subPath is empty, root itself is the isolation root (no stripping needed).
+// If the root doesn't end with the expected subPath suffix (e.g. because the
+// resolver is a fake or uses a different layout), we fall back to root itself
+// so the preflight still runs safely (potentially rejecting valid ../refs, but
+// that only affects misconfigured test resolvers, not production).
+func preflightIsolationRoot(root, subPath string) string {
+	if subPath == "" {
+		return root
+	}
+	// filepath.Clean normalizes the subPath (removes trailing separators, etc.)
+	cleanSub := filepath.Clean(subPath)
+	cleanRoot := filepath.Clean(root)
+	// Check if root ends with the subPath segment.
+	sep := string(filepath.Separator)
+	suffix := sep + cleanSub
+	if strings.HasSuffix(cleanRoot, suffix) {
+		return cleanRoot[:len(cleanRoot)-len(suffix)]
+	}
+	// Fallback: subPath layout doesn't match — use root as-is.
+	return root
 }
 
 // sanitizeKrustyError maps a raw error from krusty.Run to a stable, sanitized

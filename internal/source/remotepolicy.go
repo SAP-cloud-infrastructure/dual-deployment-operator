@@ -628,23 +628,29 @@ func isSHAPinned(ref string) bool {
 // ---------------------------------------------------------------------------
 
 // preflightSHAGate runs the classify → tree-walk → SHA-gate preflight sequence
-// for a resolved kustomize root directory. When requireSHAPinnedRemoteBases is
-// true, every discovered remote reference must be pinned to a full 40-hex SHA;
-// any tag, branch, or undeterminable ref causes an immediate error and no
-// network/git call is made.
+// for a resolved kustomize root directory.
 //
-// In permissive mode (requireSHAPinnedRemoteBases = false) the gate is a no-op
-// and always returns nil.
+// The preflight has two phases:
+//
+//  1. Classification + tree-walk (ALWAYS runs, including permissive mode):
+//     treeWalkKustomize visits every locally reachable kustomization, classifying
+//     every resources/components/bases entry. Invalid forms (SSH URLs,
+//     embedded credentials, URL fragments, ambiguous paths, cycles, boundary
+//     escapes) cause an immediate error before any network/git call. This is
+//     a security invariant: even in permissive mode, DDO must not pass
+//     credential-bearing or SSH URLs through to krusty.
+//
+//  2. SHA-pin gate (only when requireSHAPinnedRemoteBases = true):
+//     Every discovered remote reference must be pinned to a full 40-hex SHA.
+//     Any tag, branch, or undeterminable ref causes an immediate error. No
+//     network or git call is made before this check succeeds.
 //
 // Error messages are sanitized: the raw URL and ref value are never included.
 func preflightSHAGate(rootDir string, requireSHAPinnedRemoteBases bool) error {
-	if !requireSHAPinnedRemoteBases {
-		return nil
-	}
-
-	// Tree-walk discovers all remote references reachable from rootDir.
-	// This itself classifies every reference (fail-closed on invalid forms)
-	// and does not make any network or git calls.
+	// Phase 1: classify + tree-walk — always runs to catch disallowed forms.
+	// treeWalkKustomize classifies every reference and fails immediately on
+	// SSH refs, embedded credentials, URL fragments, ambiguous paths, cycles,
+	// and boundary escapes. No network or git calls are made here.
 	remotes, err := treeWalkKustomize(rootDir)
 	if err != nil {
 		// Do NOT wrap with %w: treeWalkKustomize errors are already sanitized
@@ -653,6 +659,11 @@ func preflightSHAGate(rootDir string, requireSHAPinnedRemoteBases bool) error {
 		// message that echoes back a credential-bearing URL key).  Use %v so
 		// the message is included as text but no error wrapping chain is exposed.
 		return fmt.Errorf("preflight: tree walk failed: %v", err)
+	}
+
+	// Phase 2: SHA-pin gate — only in strict mode.
+	if !requireSHAPinnedRemoteBases {
+		return nil
 	}
 
 	for _, r := range remotes {
