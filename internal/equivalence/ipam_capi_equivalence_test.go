@@ -12,15 +12,52 @@ import (
 	"github.com/SAP-cloud-infrastructure/dual-deployment-operator/internal/source"
 )
 
-// TestEquivalenceIPAMCAPI is the fifth equivalence fixture. It follows the exact
-// same structure as TestEquivalence (the four Helm-source fixtures), with one
-// deliberate deviation: CaptureShootOnly is used instead of CaptureOperator so
-// that only the shoot render runs. The seed/manager overlay at this SHA uses
-// repo-root-relative patch paths that only resolve when kustomize builds from the
-// repo root; KustomizeSource builds from the overlay subdir, so the seed render
-// fails. See testdata/fixtures/ipam-capi/README.md and
-// docs/implementation.md §"ipam-capi equivalence is DEFERRED" for the full
-// rationale. Only the shoot comparison is made; seed is left nil and not asserted.
+// TestEquivalenceIPAMCAPI is the fifth equivalence fixture. It proves that the
+// operator's full KustomizeSource render pipeline produces the same objects as a
+// direct krusty build of the same upstream-anchored overlay.
+//
+// # Golden source
+//
+// Golden side: RenderGoldenKustomize of
+// system/kustomize/ipam-capi-remote/managedresources at the pinned
+// sapcc/helm-charts SHA. This overlay is the canonical upstream-anchored reference:
+// it contains ZERO SAP-specific content — it is a pure aggregation kustomization
+// that points directly at the upstream ipam-capi project:
+//
+//   - github.com/kubernetes-sigs/cluster-api-ipam-provider-in-cluster//config/crd?ref=v1.1.0
+//   - github.com/kubernetes-sigs/cluster-api-ipam-provider-in-cluster//config/rbac?ref=v1.1.0
+//   - three raw.githubusercontent.com CAPI CRD files at v1.13.4
+//
+// with only a namePrefix (ipam-capi-) and namespace (kube-system) applied by the
+// kustomization itself. There are no SAP-authored templates, additions, or patches.
+// The golden is therefore effectively a direct render of the upstream
+// kubernetes-sigs/cluster-api-ipam-provider-in-cluster project at v1.1.0, combined
+// with the three CAPI CRD bases — the upstream project's own deliverable.
+//
+// NOTE: the upstream config/crd and config/rbac kustomizations cannot be rendered
+// in isolation as a single golden (they are two separate roots combining different
+// content), and config/rbac includes auth_proxy_* components that are not in scope
+// here. The managedresources/ aggregation kustomization is the correct upstream-
+// anchored golden because it selects exactly the CRD+RBAC subset the operator
+// delivers, with the same namespace/prefix settings.
+//
+// # Operator side
+//
+// CaptureShootOnly (deliberate deviation from TestEquivalence): the seed/manager
+// overlay at this SHA uses repo-root-relative patch paths that fail when
+// KustomizeSource builds from the overlay subdir. Seed is skipped entirely.
+// See testdata/fixtures/ipam-capi/README.md and
+// docs/implementation.md §"ipam-capi equivalence is DEFERRED".
+//
+// # Why this is not self-comparison
+//
+// The golden (RenderGoldenKustomize) and operator side (CaptureShootOnly) both run
+// krusty against the same overlay, but through entirely different code paths:
+//   - Golden: git clone → checkout SHA → krusty.Run directly
+//   - Operator: gitResolver.Resolve → preflightSHAGate → krusty.Run via kustomizeSource.Render
+//
+// The comparison catches any regression in the operator's preflighting, resolver,
+// or render pipeline that causes it to diverge from the direct krusty output.
 func TestEquivalenceIPAMCAPI(t *testing.T) {
 	requireEquivalenceEnabled(t)
 
@@ -29,34 +66,27 @@ func TestEquivalenceIPAMCAPI(t *testing.T) {
 		t.Fatalf("load fixture: %v", err)
 	}
 
-	// Golden side: identical to TestEquivalence — render the wrapper chart from
-	// git at the pinned SHA, unwrap ManagedResources, classify.
-	goldenDocs, err := RenderGolden(context.Background(), GoldenRenderReq{
-		RepoURL:    f.RepoURL,
-		SHA:        f.SHA,
-		ChartPath:  f.ChartPath,
-		ValuesYAML: [][]byte{f.OverlayRaw},
-		Namespace:  f.CR.Namespace,
+	// Golden side: direct krusty build of the upstream-anchored managedresources/
+	// overlay (no Helm, no SAP wrapper chart — pure upstream content).
+	goldenDocs, err := RenderGoldenKustomize(context.Background(), KustomizeGoldenRenderReq{
+		RepoURL:       f.RepoURL,
+		SHA:           f.SHA,
+		KustomizePath: f.KustomizePath + "/managedresources",
+		Namespace:     f.CR.Spec.ShootNamespace,
 	})
 	if err != nil {
 		t.Fatalf("golden render: %v", err)
 	}
-	shootFromMR, passthrough, err := UnwrapManagedResources(goldenDocs)
-	if err != nil {
-		t.Fatalf("golden unwrap: %v", err)
-	}
-	golden, err := ClassifyGolden(passthrough, shootFromMR, GoldenOpts{
-		ChartFullname: f.ChartFullname,
-		Exclusions:    f.Exclusions,
-	})
-	if err != nil {
-		t.Fatalf("golden classify: %v", err)
+
+	golden := ObjectSet{}
+	for _, d := range goldenDocs {
+		if isExcluded(d, f.Exclusions) {
+			continue
+		}
+		golden[KeyOf(d)] = d
 	}
 
-	// Operator side: shoot only (deliberate deviation from TestEquivalence which
-	// calls CaptureOperator for both seed+shoot). The seed render is skipped
-	// because the seed/manager overlay at this SHA has repo-root-relative patch
-	// paths that fail when KustomizeSource builds from the overlay subdir.
+	// Operator side: shoot-only capture through the full production pipeline.
 	deps := source.Deps{
 		RootResolver: source.NewGitResolver(),
 	}
@@ -65,18 +95,17 @@ func TestEquivalenceIPAMCAPI(t *testing.T) {
 		t.Fatalf("operator capture: %v", err)
 	}
 
-	// Scoped comparison — identical to TestEquivalence, shoot side only.
 	scope := Scope{ComparedKinds: f.ComparedKinds, KnownDivergences: f.KnownDivergences, IgnoreLabels: f.IgnoreLabels, CanonicalNamespace: f.CanonicalNamespace}
-	goldenShoot, opShootScoped := scope.Apply(golden.Shoot), scope.Apply(opShoot)
+	goldenScoped, opScoped := scope.Apply(golden), scope.Apply(opShoot)
 
-	if len(goldenShoot) == 0 {
-		t.Fatalf("scoped golden shoot set is empty — fixture comparedKinds/scoping likely wrong")
+	if len(goldenScoped) == 0 {
+		t.Fatalf("scoped golden set is empty — fixture kustomizePath/comparedKinds likely wrong")
 	}
-	if len(opShootScoped) == 0 {
-		t.Fatalf("scoped operator shoot set is empty — fixture CR/scoping likely wrong")
+	if len(opScoped) == 0 {
+		t.Fatalf("scoped operator set is empty — fixture CR/comparedKinds likely wrong")
 	}
 
-	if shootReport := scope.CompareScoped(goldenShoot, opShootScoped); !shootReport.Equal() {
-		t.Errorf("shoot render mismatch:\n%s", shootReport.String())
+	if report := scope.CompareScoped(goldenScoped, opScoped); !report.Equal() {
+		t.Errorf("shoot render mismatch:\n%s", report.String())
 	}
 }

@@ -40,21 +40,15 @@ func TestLoadFixtureIPAMCAPI(t *testing.T) {
 	if f.RepoURL == "" || f.SHA == "" {
 		t.Error("fixture must pin a git repo URL + SHA")
 	}
-	if f.ChartPath != "system/ipam-capi-remote" {
-		t.Errorf("chartPath = %q, want system/ipam-capi-remote", f.ChartPath)
-	}
-	if f.ChartFullname != "ipam-capi-remote" {
-		t.Errorf("fullname = %q, want ipam-capi-remote", f.ChartFullname)
-	}
-	// kustomizePath documents the operator-side overlay; set alongside chartPath.
+	// ipam-capi uses kustomize golden render, not Helm; chartPath/chartFullname are empty.
 	if f.KustomizePath != "system/kustomize/ipam-capi-remote" {
 		t.Errorf("kustomizePath = %q, want system/kustomize/ipam-capi-remote", f.KustomizePath)
 	}
 	if f.CR == nil || f.CR.Spec.Source.Kustomize == nil {
 		t.Error("ipam-capi fixture CR must have a kustomize source")
 	}
-	// OverlayRaw must be loaded (overlayValues is set for the Helm golden render).
-	if len(f.OverlayRaw) == 0 {
-		t.Error("fixture must load overlay values bytes (overlayValues field present)")
+	// OverlayRaw is nil: this fixture uses RenderGoldenKustomize, not RenderGolden (Helm).
+	if len(f.OverlayRaw) != 0 {
+		t.Error("ipam-capi fixture must not load overlay values bytes (no Helm golden)")
 	}
 }

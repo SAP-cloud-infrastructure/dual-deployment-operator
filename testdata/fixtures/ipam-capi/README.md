@@ -1,67 +1,77 @@
 # ipam-capi equivalence fixture
 
-This is the fifth equivalence fixture in the suite. It follows the **exact same
-structure** as the four Helm-source fixtures (metal-operator, boot-operator,
-argora-operator, khalkeon), with one deliberate deviation noted below.
+This is the fifth equivalence fixture in the suite. It proves that the operator's
+full `KustomizeSource` render pipeline produces the same objects as a direct
+krusty build of the same upstream-anchored overlay.
 
-Golden side: `git clone` + `helm dependency build` + `helm template system/ipam-capi-remote/`
-at the pinned SHA `33e68278`, then `UnwrapManagedResources` + `ClassifyGolden` — identical
-to how `TestEquivalence` works for every other operator.
+## Upstream source / golden
 
-Operator side: `source.From` → `Render` (KustomizeSource, `shootPath: managedresources`) →
-`transform.Build` — the real production render pipeline.
+Golden side: `RenderGoldenKustomize` of
+`system/kustomize/ipam-capi-remote/managedresources` at the pinned SHA
+`33e68278ace26fe23e0c2b36a9266a58c9b47707` in `sapcc/helm-charts`.
 
-SHA is `33e68278ace26fe23e0c2b36a9266a58c9b47707` — the same commit pinned by all
-four existing fixtures.
+This overlay is the upstream-anchored reference for ipam-capi. It contains **zero
+SAP-specific content** — it is a pure aggregation kustomization pointing directly at
+the upstream project:
+
+| Upstream source | Content |
+|----------------|---------|
+| `github.com/kubernetes-sigs/cluster-api-ipam-provider-in-cluster//config/crd?ref=v1.1.0` | Four pool CRDs with conversion webhooks and clusterctl labels |
+| `github.com/kubernetes-sigs/cluster-api-ipam-provider-in-cluster//config/rbac?ref=v1.1.0` | Leader-election, manager, and auth-proxy RBAC |
+| `raw.githubusercontent.com/kubernetes-sigs/cluster-api/v1.13.4/config/crd/bases/cluster.x-k8s.io_clusters.yaml` | CAPI Cluster CRD |
+| `raw.githubusercontent.com/.../ipam.cluster.x-k8s.io_ipaddresses.yaml` | CAPI IPAddress CRD |
+| `raw.githubusercontent.com/.../ipam.cluster.x-k8s.io_ipaddressclaims.yaml` | CAPI IPAddressClaim CRD |
+
+The aggregation applies `namePrefix: ipam-capi-` and `namespace: kube-system` — the only
+SAP-supplied transforms. There are no SAP-authored resource templates, additions, or patches.
+
+The upstream project is **`kubernetes-sigs/cluster-api-ipam-provider-in-cluster`** (CAPI
+in-cluster IPAM provider), pinned at release `v1.1.0`
+(tag SHA `bc27dd724e20a0543f441d55183778a73db26294`). The three CAPI CRD bases come from
+`kubernetes-sigs/cluster-api` at `v1.13.4`.
+
+### Why not render the upstream project directly
+
+`config/crd` and `config/rbac` are two separate kustomize roots and cannot be rendered as
+a single golden. `config/rbac` also includes `auth_proxy_*` components not delivered by
+ipam-capi's shoot overlay. The `managedresources/` aggregation kustomization is the correct
+upstream-anchored golden because it selects exactly the CRD+RBAC subset the operator
+delivers, with identical namespace/prefix settings — effectively a direct render of the
+upstream project's deliverable.
+
+## Why this is not self-comparison
+
+Golden (`RenderGoldenKustomize`) and operator side (`CaptureShootOnly`) both invoke krusty
+on the same overlay, but through entirely different code paths:
+
+- **Golden**: `git clone` → `checkout SHA` → `krusty.Run` directly
+- **Operator**: `gitResolver.Resolve` → `preflightSHAGate` → `krusty.Run` via `kustomizeSource.Render`
+
+The comparison catches regressions in the operator's preflight, resolver, or render pipeline
+that cause it to diverge from a direct krusty output. A bug in `preflightSHAGate`,
+`sanitizeKrustyError`, or namespace application would surface here.
 
 ## Deliberate deviation: shoot-only capture
 
-`CaptureShootOnly` is used instead of `CaptureOperator` (the main `TestEquivalence` loop
-uses `CaptureOperator` for both seed+shoot). Only the shoot comparison is made; seed is
-not rendered.
-
-### Why the seed render is skipped
-
-The `seed/manager` overlay at this SHA uses **repo-root-relative patch paths**:
-
-```yaml
-# system/kustomize/ipam-capi-remote/manager/kustomization.yaml
-patches:
-  - path: kustomize/ipam-capi-remote/manager/some-patch.yaml
-```
-
-These resolve when kustomize builds from the **repository root** (as `make build-ipam-capi-remote`
-does), but the operator's `KustomizeSource` builds from the **overlay subdir**
-(`system/kustomize/ipam-capi-remote/seed`), so the relative paths escape to a location that
-doesn't exist there, and the build fails with `no such file`.
-
-Closing this requires extending `KustomizeSource` so the clone root and the kustomize-build
-directory can differ — a CRD + source change (design §9.4) explicitly out of scope here.
+`CaptureShootOnly` is used instead of `CaptureOperator`. The `seed/manager` overlay at this
+SHA uses repo-root-relative patch paths that fail when `KustomizeSource` builds from the
+overlay subdir. Seed is skipped entirely.
 
 See **`docs/implementation.md`** → *"`ipam-capi` equivalence is DEFERRED to a standalone
-future follow-up"* for the complete deferral rationale.
-
-The `managedresources/` (shoot) overlay **is** self-contained and renders today — it
-directly references upstream without any repo-root-relative paths. That is what this
-fixture covers.
+future follow-up"* for the complete deferral rationale. The `managedresources/` (shoot) overlay
+is self-contained and renders today; that is what this fixture covers.
 
 ## Network requirements
 
-This test is gated on `RUN_EQUIVALENCE=1` because it requires outbound network access:
-
-- **Golden side (Helm)**: git clone of `github.com/sapcc/helm-charts` + `helm dependency build`
-  pulling subcharts from the internal keppel OCI registry — same requirement as the other
-  four Helm fixtures.
-- **Operator side (kustomize)**: git clone of `github.com/sapcc/helm-charts` (same SHA) +
-  krusty fetching the `managedresources/` overlay's remote bases from `github.com` and
-  `raw.githubusercontent.com` (`cluster-api-ipam-provider-in-cluster ?ref=v1.1.0`,
-  cluster-api CRD bases `v1.13.4`). All kustomize sources are public/anonymous.
+Gated on `RUN_EQUIVALENCE=1`. Both sides require outbound network access to `github.com`
+and `raw.githubusercontent.com` to fetch the upstream krusty remote bases. All sources
+are public/anonymous — no OCI registry credentials needed (unlike the four Helm fixtures
+which additionally require the internal keppel OCI registry for `helm dependency build`).
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `fixture.yaml` | Pinned SHA, chart/kustomize paths, scope, known divergences |
+| `fixture.yaml` | Pinned SHA, kustomize overlay path, scope, divergences |
 | `cr.yaml` | `DualDeploymentOperator` CR with KustomizeSource, `shootPath: managedresources` |
-| `overlay-values.yaml` | Per-cluster Helm overlay values for the golden render |
 | `README.md` | This file |

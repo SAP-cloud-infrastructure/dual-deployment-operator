@@ -1,6 +1,0 @@
-# Representative per-cluster overlay for system/ipam-capi-remote/ golden render.
-# global.region is required by the wrapper chart's managedresources/*.yaml
-# templates (RBAC group selection); the deploy-time cc/kube-secrets overlay
-# always supplies it. Same shape as the other four operator fixtures.
-global:
-  region: qa-de-1
