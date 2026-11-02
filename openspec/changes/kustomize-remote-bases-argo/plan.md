@@ -177,7 +177,7 @@ binding authority. `proposal.md` has the why/what-changes summary.
   sanitized error.
 - Commit: `build: add git binary to operator image for krusty remote bases`
 
-- [ ] Task 6 complete
+- [x] Task 6 complete
 
 ---
 
