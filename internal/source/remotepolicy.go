@@ -544,22 +544,6 @@ func sanitizePath(path, root string) string {
 }
 
 // ---------------------------------------------------------------------------
-// Test-only hooks
-// ---------------------------------------------------------------------------
-
-// fetchAttemptHook is a test-only hook that is called if any code in this
-// package initiates a network or git fetch operation. In production code it is
-// always nil (no-op). Tests that need to assert zero-fetch semantics install a
-// non-nil function here and assert it was never called after the function under
-// test returns.
-//
-// This variable is intentionally unexported and placed at package scope so it
-// is accessible to both remotepolicy.go (which sets the call site) and
-// remotepolicy_test.go (which installs the hook during tests). It is only
-// ever non-nil in tests.
-var fetchAttemptHook func()
-
-// ---------------------------------------------------------------------------
 // Ref extraction
 // ---------------------------------------------------------------------------
 
@@ -687,12 +671,6 @@ func preflightSHAGate(rootDir string, requireSHAPinnedRemoteBases bool) error {
 				len(remotes),
 			)
 		}
-	}
-	// All remote refs are SHA-pinned — the gate passes. Any network/git fetch
-	// initiated after this point is recorded via fetchAttemptHook (non-nil in
-	// tests only) so tests can assert the gate fires before any fetch.
-	if fetchAttemptHook != nil {
-		fetchAttemptHook()
 	}
 	return nil
 }

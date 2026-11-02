@@ -6,10 +6,13 @@
 package source
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	v1alpha1 "github.com/SAP-cloud-infrastructure/dual-deployment-operator/api/v1alpha1"
 )
 
 // ---------------------------------------------------------------------------
@@ -1132,69 +1135,126 @@ resources:
 	}
 }
 
+// fakeKustomizeSpec returns a KustomizeSource that, when used with a
+// fakeRootResolver{baseDir: root}, causes Resolve to return root itself
+// (SeedPath="" → filepath.Join(root, "") = root).
+func fakeKustomizeSpec(root string) v1alpha1.KustomizeSource {
+	return v1alpha1.KustomizeSource{URL: root, SeedPath: "", ShootPath: ""}
+}
+
 // TestPreflightSHAGate_StrictNoNetworkCalls verifies deterministically that strict
 // rejection happens with zero network/git calls.
 //
-// Strategy: we install a test-only fetch hook (fetchAttemptHook) in remotepolicy.go
-// that fires if any code in this package attempts a network/git fetch.  The test
-// asserts (a) the hook was NOT called, and (b) the returned error is the expected
-// SHA-gate rejection message — not a network error.
+// Strategy: we exercise the full kustomizeSource.Render() path (not just
+// preflightSHAGate in isolation) so the instrumentation is at the actual fetch
+// boundary (kustomizeFetchHook, placed immediately before krust.Run in
+// kustomize.go). Tests install the hook and assert it was NOT called — proving
+// the gate short-circuits before krusty ever attempts a remote fetch.
 //
-// Two sub-cases are covered:
-//   - a clearly-unpinned ref (named tag)
-//   - an "undeterminable" ref (empty ref= value, which extractRef returns "")
+// Sub-cases:
+//   - named-tag: a ?ref=my-tag reference — clearly not a SHA
+//   - undeterminable-ref: a remote file URL (https://example.com/file.yaml)
+//     where extractRef returns "" because there is no ?ref= query param and
+//     the URL is not a raw.githubusercontent.com path-segment form. An empty
+//     string fails isSHAPinned, so the gate rejects it before any fetch.
 func TestPreflightSHAGate_StrictNoNetworkCalls(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		yaml string
+		kust string // content of kustomization.yaml written into the root
 	}{
 		{
 			name: "named-tag",
-			yaml: `apiVersion: kustomize.config.k8s.io/v1beta1
+			kust: `apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - https://unreachable.invalid/org/repo?ref=my-tag
 `,
 		},
 		{
-			name: "undeterminable-ref",
-			// A ref that extractRef returns "" for — treated as non-SHA, must
-			// still be rejected before any fetch attempt.
-			yaml: `apiVersion: kustomize.config.k8s.io/v1beta1
+			// Remote file URL with no ?ref= parameter: extractRef returns ""
+			// (genuinely undeterminable — not a named branch, just absent).
+			// The gate must reject this before any fetch attempt.
+			name: "undeterminable-ref-no-query",
+			kust: `apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - https://raw.githubusercontent.com/org/repo/feature-branch/config.yaml
+  - https://example.com/upstream-manifests.yaml
 `,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
-			if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(tc.yaml), 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(tc.kust), 0o600); err != nil {
 				t.Fatal(err)
 			}
 
-			// Install the sentinel hook — it will call t.Fatal if invoked,
-			// proving a fetch was attempted before the SHA-gate fired.
-			fetchAttempted := false
-			old := fetchAttemptHook
-			fetchAttemptHook = func() { fetchAttempted = true }
-			defer func() { fetchAttemptHook = old }()
-
-			err := preflightSHAGate(root, true)
-
-			// The hook must never have fired.
-			if fetchAttempted {
-				t.Fatal("preflightSHAGate: fetch/git call was attempted before SHA-gate rejection (zero-fetch invariant violated)")
+			// Build a kustomizeSource that targets root directly (fakeRootResolver
+			// returns root for any subPath, so SeedPath="" resolves to root).
+			spec := fakeKustomizeSpec(root)
+			src := &kustomizeSource{
+				spec:                        &spec,
+				resolver:                    fakeRootResolver{baseDir: root},
+				requireSHAPinnedRemoteBases: true,
 			}
-			// Must return an error (SHA-gate rejection).
+
+			// Install the sentinel hook at the actual fetch boundary.
+			// If Render() reaches kust.Run() the hook fires — proving the gate
+			// failed to stop the fetch.
+			fetchReached := false
+			old := kustomizeFetchHook
+			kustomizeFetchHook = func() { fetchReached = true }
+			defer func() { kustomizeFetchHook = old }()
+
+			_, err := src.Render(context.Background(), ModeSeed, "ns")
+
+			// The hook must NOT have fired — the gate must have rejected first.
+			if fetchReached {
+				t.Fatal("kust.Run was reached before SHA-gate rejection (zero-fetch invariant violated)")
+			}
+			// Must return an error (SHA-gate rejection, not a network error).
 			if err == nil {
-				t.Fatal("preflightSHAGate: expected rejection for non-SHA ref, got nil")
+				t.Fatal("expected SHA-gate rejection, got nil")
 			}
-			// The error must be the SHA-gate message, not a network/dial error.
 			if !strings.Contains(err.Error(), "SHA") && !strings.Contains(err.Error(), "pin") {
-				t.Errorf("expected SHA-pin rejection error, got: %v", err)
+				t.Errorf("expected SHA-pin error, got: %v", err)
 			}
 		})
+	}
+}
+
+// TestPreflightSHAGate_FetchHookPositiveControl is the positive control for the
+// kustomizeFetchHook instrumentation: it proves the hook actually fires when the
+// gate passes (permissive mode) so the zero-fetch tests are not vacuously true.
+func TestPreflightSHAGate_FetchHookPositiveControl(t *testing.T) {
+	root := t.TempDir()
+	// A kustomization with a remote base in permissive mode — gate is a no-op,
+	// so Render() must reach kust.Run() and fire the hook.
+	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://unreachable.invalid/org/repo?ref=v1.2.3
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	spec2 := fakeKustomizeSpec(root)
+	src := &kustomizeSource{
+		spec:                        &spec2,
+		resolver:                    fakeRootResolver{baseDir: root},
+		requireSHAPinnedRemoteBases: false, // permissive — gate is a no-op
+	}
+
+	fetchReached := false
+	old := kustomizeFetchHook
+	kustomizeFetchHook = func() { fetchReached = true }
+	defer func() { kustomizeFetchHook = old }()
+
+	// Render will fail (kust.Run can't reach unreachable.invalid) but the hook
+	// must have fired before that failure.
+	src.Render(context.Background(), ModeSeed, "ns") //nolint:errcheck
+
+	if !fetchReached {
+		t.Fatal("kustomizeFetchHook was NOT called in permissive mode — instrumentation is dead code (positive control failed)")
 	}
 }
 
