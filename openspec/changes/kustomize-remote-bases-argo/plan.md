@@ -194,7 +194,7 @@ binding authority. `proposal.md` has the why/what-changes summary.
   reproducibility caveat (cite Argo Best Practices).
 - Commit: `docs: document Argo/Flux-aligned kustomize remote-base model`
 
-- [ ] Task 7 complete
+- [x] Task 7 complete
 
 ---
 

@@ -39,8 +39,8 @@ SPDX-License-Identifier: Apache-2.0
 
 ## 7. Docs
 
-- [ ] 7.1 Add a new phase (after the last existing phase) in `docs/implementation.md` describing the Argo/Flux-aligned model; do NOT edit completed/ongoing phases. Cross-reference the egress NetworkPolicy prerequisite.
-- [ ] 7.2 Write/extend the kustomize remote-bases authoring guide for the aligned model: live fetch each reconcile, egress-gated, pinning recommended (enforced only under the flag), credentials ambient/process-global, no hermetic offline or SHA cache. State the reproducibility caveat (cite Argo Best Practices).
+- [x] 7.1 Add a new phase (after the last existing phase) in `docs/implementation.md` describing the Argo/Flux-aligned model; do NOT edit completed/ongoing phases. Cross-reference the egress NetworkPolicy prerequisite.
+- [x] 7.2 Write/extend the kustomize remote-bases authoring guide for the aligned model: live fetch each reconcile, egress-gated, pinning recommended (enforced only under the flag), credentials ambient/process-global, no hermetic offline or SHA cache. State the reproducibility caveat (cite Argo Best Practices).
 
 ## 8. ipam-capi equivalence fixture (partial — shoot overlay only)
 
