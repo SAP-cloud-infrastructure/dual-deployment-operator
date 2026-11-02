@@ -117,3 +117,29 @@ The key security property established by Task 4:
 **Before Task 4:** In permissive mode, an attacker who controls a kustomization.yaml could include an SSH ref (`git@github.com:org/repo`) or embedded-credential URL. These would pass through `preflightSHAGate` (which was a no-op) and reach krusty, which would attempt to contact the SSH endpoint or use the embedded credentials. The authSecretRef bypass would be complete.
 
 **After Task 4:** Both SSH refs and embedded-credential URLs are rejected by classification (Phase 1) in ALL modes, before krusty is ever invoked. The `kustomizeFetchHook` never fires for these cases, proving zero-fetch semantics.
+
+---
+
+## Fix Round 1 (commit e003944)
+
+Two findings from code review of commit 61aa386:
+
+### P1 — Preflight scanned isolation boundary instead of rendered overlay
+
+**Root cause:** `Render()` called `preflightSHAGate(preflightIsolationRoot(root, subPath), root, ...)` but `preflightSHAGate` passed its first argument (the isolation root / parent dir) as both the boundary AND the walk entry point to `treeWalkKustomize`. So the walk started at `cloneDir`, not `cloneDir/overlay`. Any SSH, embedded-credential, or unpinned refs inside the overlay were never inspected.
+
+**Fix:** Introduced `treeWalkKustomizeFrom(isolationRoot, entryPoint string)` as the core implementation. The existing `treeWalkKustomize(rootDir)` delegates to it with both args equal (all existing tests unchanged). `preflightSHAGate` now takes `(isolationRoot, entryPoint string, ...)` and calls `treeWalkKustomizeFrom`. `Render()` passes `isolationRoot=preflightIsolationRoot(root, subPath)` and `entryPoint=root` (the actual overlay path krusty receives).
+
+**Regression tests added (4):**
+- `TestTask4Fix_P1_SSHRefInOverlayRejectedWithSubPath` — SSH ref in overlay beneath a clone root
+- `TestTask4Fix_P1_StrictModeOverlayRefRejectedWithSubPath` — strict SHA gate catches overlay ref
+- `TestTask4Fix_P1_OverlayBeneathParentNoKustomization` — parent has no kustomization, overlay must still be inspected
+- `TestTask4Fix_P1_OverlayBeneathParentWithUnrelatedKustomization` — parent has valid local kustomization, overlay must render correctly
+
+### P2 — Positive-control test used unreachable.invalid
+
+**Root cause:** `TestTask4_PermissiveModeUnpinnedTagAllowed` checked only that `kustomizeFetchHook` fired. It contacted `unreachable.invalid` (network dependency), discarded the error, and didn't verify the render result.
+
+**Fix:** Replaced with `TestTask4_PermissiveModeAllowedTreePassesPreflight` — injects a synthetic krusty error via `krustyRunHook` (zero network), verifies both the fetch hook fires AND the resulting error is a krusty-level render error (not a preflight rejection). Also added `TestTask4Fix_P2_PermissiveModeAllowedTreeRendersSuccessfully` that uses a local fixture overlay and asserts real manifests are returned end-to-end.
+
+**Full `internal/source` suite: 100% pass.**
