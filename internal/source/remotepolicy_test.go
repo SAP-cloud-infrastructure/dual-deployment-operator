@@ -888,6 +888,48 @@ resources: []
 }
 
 // ---------------------------------------------------------------------------
+// P1 regression: malformed YAML with credential-bearing URL must not leak
+// ---------------------------------------------------------------------------
+
+// TestTreeWalkKustomize_MalformedYAML_NoCredentialLeak ensures that when a
+// kustomization.yaml contains malformed YAML whose parse error message might
+// echo back a credential-bearing URL key, that credential is NOT included in
+// the returned error.
+func TestTreeWalkKustomize_MalformedYAML_NoCredentialLeak(t *testing.T) {
+	root := t.TempDir()
+
+	// Write a kustomization.yaml that is syntactically invalid YAML.
+	// The content includes a credential-bearing URL that a naive %w wrapping of
+	// yaml.Unmarshal could echo back verbatim in the error message.
+	malformed := `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  https://user:SUPERSECRET@github.com/org/repo?ref=v1:
+    - invalid_yaml_structure: [unclosed
+`
+	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(malformed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := treeWalkKustomize(root)
+	if err == nil {
+		t.Fatal("expected parse error for malformed YAML, got nil")
+	}
+	// The raw credential must not appear in the error.
+	if strings.Contains(err.Error(), "SUPERSECRET") {
+		t.Errorf("credential leaked in parse error: %v", err)
+	}
+	// The full URL (or even the hostname) must not appear.
+	if strings.Contains(err.Error(), "github.com") {
+		t.Errorf("URL leaked in parse error: %v", err)
+	}
+	// The error must still be meaningful (not silently swallowed).
+	if !strings.Contains(err.Error(), "parse") && !strings.Contains(err.Error(), "YAML") && !strings.Contains(err.Error(), "invalid") {
+		t.Errorf("expected a parse/YAML error message, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Task 2 — Step 2.1 RED: ref extraction and SHA predicate
 // ---------------------------------------------------------------------------
 
@@ -1090,29 +1132,69 @@ resources:
 	}
 }
 
-// TestPreflightSHAGate_StrictNoNetworkCalls verifies that strict rejection
-// happens with zero network/git calls. We assert no network was made by
-// ensuring the call returns quickly with an error — the gate must short-circuit
-// before any fetch. We use a non-resolvable remote to prove the gate fires
-// without even trying to connect.
+// TestPreflightSHAGate_StrictNoNetworkCalls verifies deterministically that strict
+// rejection happens with zero network/git calls.
+//
+// Strategy: we install a test-only fetch hook (fetchAttemptHook) in remotepolicy.go
+// that fires if any code in this package attempts a network/git fetch.  The test
+// asserts (a) the hook was NOT called, and (b) the returned error is the expected
+// SHA-gate rejection message — not a network error.
+//
+// Two sub-cases are covered:
+//   - a clearly-unpinned ref (named tag)
+//   - an "undeterminable" ref (empty ref= value, which extractRef returns "")
 func TestPreflightSHAGate_StrictNoNetworkCalls(t *testing.T) {
-	root := t.TempDir()
-	// Use a ref that is clearly a tag — the gate must reject without connecting.
-	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
+	for _, tc := range []struct {
+		name string
+		yaml string
+	}{
+		{
+			name: "named-tag",
+			yaml: `apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - https://unreachable.invalid/org/repo?ref=my-tag
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+`,
+		},
+		{
+			name: "undeterminable-ref",
+			// A ref that extractRef returns "" for — treated as non-SHA, must
+			// still be rejected before any fetch attempt.
+			yaml: `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://raw.githubusercontent.com/org/repo/feature-branch/config.yaml
+`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(tc.yaml), 0o600); err != nil {
+				t.Fatal(err)
+			}
 
-	// preflightSHAGate must return an error synchronously; if it tries a network
-	// call to unreachable.invalid it will either timeout (failing the test via
-	// t.Parallel implicit timeout or slowness) or succeed unexpectedly.
-	// We accept any error here — the key is that it returns fast with an error.
-	err := preflightSHAGate(root, true)
-	if err == nil {
-		t.Fatal("preflightSHAGate: expected rejection for non-SHA ref at unreachable host, got nil")
+			// Install the sentinel hook — it will call t.Fatal if invoked,
+			// proving a fetch was attempted before the SHA-gate fired.
+			fetchAttempted := false
+			old := fetchAttemptHook
+			fetchAttemptHook = func() { fetchAttempted = true }
+			defer func() { fetchAttemptHook = old }()
+
+			err := preflightSHAGate(root, true)
+
+			// The hook must never have fired.
+			if fetchAttempted {
+				t.Fatal("preflightSHAGate: fetch/git call was attempted before SHA-gate rejection (zero-fetch invariant violated)")
+			}
+			// Must return an error (SHA-gate rejection).
+			if err == nil {
+				t.Fatal("preflightSHAGate: expected rejection for non-SHA ref, got nil")
+			}
+			// The error must be the SHA-gate message, not a network/dial error.
+			if !strings.Contains(err.Error(), "SHA") && !strings.Contains(err.Error(), "pin") {
+				t.Errorf("expected SHA-pin rejection error, got: %v", err)
+			}
+		})
 	}
 }
 

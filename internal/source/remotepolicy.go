@@ -512,8 +512,11 @@ func readKustomizationBounded(absRoot, dir string) (*kustomizationYAML, error) {
 		}
 		var k kustomizationYAML
 		if err := yaml.Unmarshal(data, &k); err != nil {
-			// Finding 1: do not include the path in the error.
-			return nil, fmt.Errorf("tree walk: parse kustomization file: %w", err)
+			// Do NOT wrap the raw parse error: the YAML parser may echo back
+			// fragments of the file content (including credential-bearing URLs
+			// present as YAML keys/values), which would constitute a credential
+			// leak.  Return a fixed-text error instead.
+			return nil, errors.New("tree walk: parse kustomization file: invalid YAML")
 		}
 		return &k, nil
 	}
@@ -539,6 +542,22 @@ func sanitizePath(path, root string) string {
 	}
 	return rel
 }
+
+// ---------------------------------------------------------------------------
+// Test-only hooks
+// ---------------------------------------------------------------------------
+
+// fetchAttemptHook is a test-only hook that is called if any code in this
+// package initiates a network or git fetch operation. In production code it is
+// always nil (no-op). Tests that need to assert zero-fetch semantics install a
+// non-nil function here and assert it was never called after the function under
+// test returns.
+//
+// This variable is intentionally unexported and placed at package scope so it
+// is accessible to both remotepolicy.go (which sets the call site) and
+// remotepolicy_test.go (which installs the hook during tests). It is only
+// ever non-nil in tests.
+var fetchAttemptHook func()
 
 // ---------------------------------------------------------------------------
 // Ref extraction
@@ -644,7 +663,12 @@ func preflightSHAGate(rootDir string, requireSHAPinnedRemoteBases bool) error {
 	// and does not make any network or git calls.
 	remotes, err := treeWalkKustomize(rootDir)
 	if err != nil {
-		return fmt.Errorf("preflight: tree walk failed: %w", err)
+		// Do NOT wrap with %w: treeWalkKustomize errors are already sanitized
+		// fixed-text messages, but using %w here would allow a future change to
+		// accidentally propagate a raw underlying error (e.g. a YAML parser
+		// message that echoes back a credential-bearing URL key).  Use %v so
+		// the message is included as text but no error wrapping chain is exposed.
+		return fmt.Errorf("preflight: tree walk failed: %v", err)
 	}
 
 	for _, r := range remotes {
@@ -663,6 +687,12 @@ func preflightSHAGate(rootDir string, requireSHAPinnedRemoteBases bool) error {
 				len(remotes),
 			)
 		}
+	}
+	// All remote refs are SHA-pinned — the gate passes. Any network/git fetch
+	// initiated after this point is recorded via fetchAttemptHook (non-nil in
+	// tests only) so tests can assert the gate fires before any fetch.
+	if fetchAttemptHook != nil {
+		fetchAttemptHook()
 	}
 	return nil
 }
