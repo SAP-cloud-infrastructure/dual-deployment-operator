@@ -33,11 +33,12 @@ in-cluster IPAM provider), pinned at release `v1.1.0`
 ### Why not render the upstream project directly
 
 `config/crd` and `config/rbac` are two separate kustomize roots and cannot be rendered as
-a single golden. `config/rbac` also includes `auth_proxy_*` components not delivered by
-ipam-capi's shoot overlay. The `managedresources/` aggregation kustomization is the correct
-upstream-anchored golden because it selects exactly the CRD+RBAC subset the operator
-delivers, with identical namespace/prefix settings — effectively a direct render of the
-upstream project's deliverable.
+a single golden on their own. The `managedresources/` aggregation kustomization is the
+correct upstream-anchored golden: it references both roots unfiltered (including the
+`auth_proxy_*` RBAC components from upstream `config/rbac`, which the operator does
+deliver — `comparedKinds` in `fixture.yaml` is not an exclusion filter, it only scopes
+which kinds this fixture asserts on) with identical namespace/prefix settings — effectively
+a direct render of the upstream project's deliverable.
 
 ## Why this is not self-comparison
 
@@ -48,8 +49,10 @@ on the same overlay, but through entirely different code paths:
 - **Operator**: `gitResolver.Resolve` → `preflightSHAGate` → `krusty.Run` via `kustomizeSource.Render`
 
 The comparison catches regressions in the operator's preflight, resolver, or render pipeline
-that cause it to diverge from a direct krusty output. A bug in `preflightSHAGate`,
-`sanitizeKrustyError`, or namespace application would surface here.
+that cause it to diverge from a direct krusty output — for example a bug in
+`preflightSHAGate` or in namespace application. Note this is a successful-render test only:
+it exercises the happy path through `sanitizeKrustyError`'s call site but cannot validate
+sanitization behavior itself (that is covered separately by Task 3's unit tests).
 
 ## Deliberate deviation: shoot-only capture
 
