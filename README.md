@@ -116,6 +116,16 @@ spec:
     server: https://api.shoot.example.com
 ```
 
+Remote **bases** referenced from inside a kustomization (Argo CD/Flux-style
+`resources:`/`components:`/`bases:` entries pointing at a git URL) are fetched
+live by kustomize on every reconcile. Pinning them to a 40-char git SHA is
+recommended for reproducibility; to enforce it operator-wide, start the
+controller with `--kustomize-require-sha-pinned-remote-bases` (default
+`false`). The flag is **operator-level and applies only to kustomize sources** —
+Helm sources and the kustomize *root* URL above (which is resolved by the
+operator's own go-git resolver, not kustomize) are unaffected. See
+[`docs/kustomize-remote-bases.md`](docs/kustomize-remote-bases.md).
+
 ### Transformations (optional)
 
 Applied to each render independently, in declaration order. All are silent no-ops when they
