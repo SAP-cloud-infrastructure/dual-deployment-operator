@@ -1,0 +1,26 @@
+apiVersion: dual-deployment-operator.cc.sap/v1alpha1
+kind: DualDeploymentOperator
+metadata:
+  name: ipam-capi-remote
+  namespace: shoot--cp--m-qa-de-1
+spec:
+  shootNamespace: kube-system
+  source:
+    kustomize:
+      # Pin to the same sapcc/helm-charts commit SHA used by all other equivalence
+      # fixtures. The ref is the full 40-character commit SHA so the gitResolver
+      # takes the fetchSHA code path (full-depth fetch + arbitrary-SHA checkout).
+      # system/kustomize/ipam-capi-remote/managedresources is the self-contained
+      # upstream CRDs+RBAC overlay (no repo-root-relative patches; renders standalone).
+      url: "https://github.com/sapcc/helm-charts//system/kustomize/ipam-capi-remote?ref=33e68278ace26fe23e0c2b36a9266a58c9b47707"
+      # seedPath is set but never exercised in this fixture: the seed/manager
+      # overlay uses repo-root-relative patches that only resolve from the repo
+      # root, not from the overlay subdir. CaptureShootOnly skips the seed render.
+      # See testdata/fixtures/ipam-capi/README.md and
+      # docs/implementation.md §"ipam-capi equivalence is DEFERRED".
+      seedPath: seed
+      shootPath: managedresources
+  shootAccess:
+    secretName: ipam-capi-remote-kubeconfig
+    server: https://api.m-qa-de-1.internal
+  transformations: []
