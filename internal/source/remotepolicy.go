@@ -341,12 +341,17 @@ func classifyGitHubShorthand(raw string) (refKind, string, error) {
 	}
 
 	// Finding 5: only ?ref= is mandatory; do NOT fall back to ?version=.
+	// Mirror classifyHTTPURL: reject a malformed query string explicitly rather
+	// than silently swallowing the ParseQuery error. A malformed query could let
+	// a valid-looking ?ref= pass the SHA gate while krusty/git sees the whole
+	// unparsable query and defaults to HEAD (bypassing the pinned SHA).
 	ref := ""
 	if query != "" {
 		vals, err := url.ParseQuery(query)
-		if err == nil {
-			ref = vals.Get("ref")
+		if err != nil {
+			return 0, "", errors.New("remote reference: malformed query string in GitHub shorthand reference")
 		}
+		ref = vals.Get("ref")
 	}
 
 	if ref == "" {
@@ -509,8 +514,15 @@ func walkDir(absRoot, dir string, visited, seen map[string]bool, remotes *[]Remo
 		return nil
 	}
 
-	// Collect all reference fields
-	allRefs := append(append(kust.Resources, kust.Components...), kust.Bases...)
+	// Collect all reference fields into a freshly-allocated slice. Do NOT use
+	// append(append(kust.Resources, kust.Components...), ...): if kust.Resources
+	// has spare capacity (len < cap — not guaranteed either way by encoding/json
+	// under sigs.k8s.io/yaml), the first append would write into Resources'
+	// backing array, silently corrupting it for any later read.
+	allRefs := make([]string, 0, len(kust.Resources)+len(kust.Components)+len(kust.Bases))
+	allRefs = append(allRefs, kust.Resources...)
+	allRefs = append(allRefs, kust.Components...)
+	allRefs = append(allRefs, kust.Bases...)
 
 	for _, raw := range allRefs {
 		if raw == "" {

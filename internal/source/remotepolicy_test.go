@@ -770,6 +770,56 @@ func TestTreeWalkKustomize_VisitsBasesField(t *testing.T) {
 	}
 }
 
+// buildTreeWithAllThreeRefFields writes a kustomization.yaml that populates
+// resources, components, AND bases simultaneously. This exercises the slice
+// concatenation in walkDir and guards against the backing-array aliasing bug:
+// `append(append(kust.Resources, kust.Components...), kust.Bases...)` would,
+// when kust.Resources has spare capacity, write Components into Resources'
+// backing array and silently drop/duplicate entries. The fix allocates a
+// fresh slice, so all three fields must be discovered intact and in order.
+func buildTreeWithAllThreeRefFields(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://github.com/org/res-a?ref=v1.0.0
+  - https://github.com/org/res-b?ref=v1.1.0
+components:
+  - https://github.com/org/comp-a?ref=v2.0.0
+bases:
+  - https://github.com/org/base-a?ref=v3.0.0
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func TestTreeWalkKustomize_AllThreeFields_NoSliceAliasing(t *testing.T) {
+	root := buildTreeWithAllThreeRefFields(t)
+
+	remotes, err := treeWalkKustomize(root)
+	if err != nil {
+		t.Fatalf("treeWalkKustomize: %v", err)
+	}
+
+	// Expected in resources→components→bases order (DFS, first-occurrence).
+	want := []string{
+		"https://github.com/org/res-a?ref=v1.0.0",
+		"https://github.com/org/res-b?ref=v1.1.0",
+		"https://github.com/org/comp-a?ref=v2.0.0",
+		"https://github.com/org/base-a?ref=v3.0.0",
+	}
+	if len(remotes) != len(want) {
+		t.Fatalf("expected %d remotes, got %d: %v", len(want), len(remotes), remotes)
+	}
+	for i, w := range want {
+		if remotes[i].Raw != w {
+			t.Errorf("remote[%d].Raw = %q, want %q", i, remotes[i].Raw, w)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Round-2 review findings
 // ---------------------------------------------------------------------------
@@ -1407,6 +1457,37 @@ func TestClassifyHTTPURL_RejectsMalformedQuery(t *testing.T) {
 			// Error must not echo the raw URL content
 			if strings.Contains(err.Error(), "github.com") || strings.Contains(err.Error(), "example.com") {
 				t.Errorf("URL leaked in error for %q: %v", raw, err)
+			}
+		})
+	}
+}
+
+// TestClassifyGitHubShorthand_RejectsMalformedQuery mirrors
+// TestClassifyHTTPURL_RejectsMalformedQuery for the github.com/org/repo
+// shorthand classifier. The shorthand path previously swallowed the
+// url.ParseQuery error (if err == nil), so a mixed valid+invalid query like
+// ?ref=<sha>&bad=%zz extracted the valid SHA and passed the strict SHA gate,
+// while krusty/git would see the whole unparsable query and default to HEAD —
+// bypassing the pin. The classifier must reject on parse error, consistent
+// with the HTTPS classifier, and must not echo the raw reference.
+func TestClassifyGitHubShorthand_RejectsMalformedQuery(t *testing.T) {
+	cases := []string{
+		// valid ?ref= combined with an unparsable fragment — must be REJECTED
+		"github.com/org/repo?ref=0123456789abcdef0123456789abcdef01234567&bad=%zz",
+		"github.com/org/repo//path?ref=abc1234&x=%gg",
+		// purely malformed query — must be REJECTED
+		"github.com/org/repo?%zz",
+		"github.com/org/repo//path?%zz",
+	}
+	for _, raw := range cases {
+		t.Run(raw, func(t *testing.T) {
+			_, _, err := classifyKustomizeReference(raw)
+			if err == nil {
+				t.Errorf("classifyKustomizeReference(%q): expected rejection for malformed query, got nil", raw)
+			}
+			// Error must not echo the raw reference content
+			if strings.Contains(err.Error(), "github.com") {
+				t.Errorf("reference leaked in error for %q: %v", raw, err)
 			}
 		})
 	}
