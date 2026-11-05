@@ -29,7 +29,7 @@ type Fixture struct {
 
 	// KustomizePath, when non-empty, documents the kustomize overlay path used by
 	// the operator-side CR's source.kustomize.url. For kustomize-based fixtures
-	// (IsKustomize() true), the golden render also uses this path via
+	// (KustomizePath set), the golden render also uses this path via
 	// RenderGoldenKustomize instead of the Helm chart path in ChartPath.
 	KustomizePath string `json:"kustomizePath,omitempty"`
 
@@ -42,11 +42,6 @@ type Fixture struct {
 	OverlayRaw []byte                           `json:"-"`
 	Dir        string                           `json:"-"`
 }
-
-// IsKustomize reports whether this fixture documents a kustomize-based operator
-// source (KustomizePath is set). For these fixtures the golden render uses
-// RenderGoldenKustomize against KustomizePath rather than the Helm chart path.
-func (f *Fixture) IsKustomize() bool { return f.KustomizePath != "" }
 
 // LoadFixture reads fixture.yaml plus the referenced CR and overlay-values file.
 func LoadFixture(dir string) (*Fixture, error) {

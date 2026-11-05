@@ -5,10 +5,10 @@ SPDX-License-Identifier: Apache-2.0
 
 ## 1. Remote reference classification (TDD)
 
-- [ ] 1.1 RED: write table tests for a `classifyKustomizeReference(raw string)` classifier — local path, remote git directory (HTTPS + GitHub shorthand, mandatory `?ref=`), remote single-file (`.yaml`/`.yml`/`.json`), and rejected forms (SSH, `user:token@` userinfo, URL fragment, ambiguous no-`//` multi-segment path). Assert rejections are sanitized (no raw URL/credential echo).
-- [ ] 1.2 GREEN: implement the classifier in `internal/source` (new file, e.g. `remotepolicy.go`) returning a typed category + extracted ref; no behavior wired into Render yet.
-- [ ] 1.3 RED: write tests for a reachable-tree walk that visits every recognized kustomization under the resolved root, classifies each `resources`/`components`/`bases` entry, detects reference cycles, and stays within the root boundary (reject path/symlink escape).
-- [ ] 1.4 GREEN: implement the tree walk reusing the classifier; return the ordered set of remote references discovered.
+- [x] 1.1 RED: write table tests for a `classifyKustomizeReference(raw string)` classifier — local path, remote git directory (HTTPS + GitHub shorthand, mandatory `?ref=`), remote single-file (`.yaml`/`.yml`/`.json`), and rejected forms (SSH, `user:token@` userinfo, URL fragment, ambiguous no-`//` multi-segment path). Assert rejections are sanitized (no raw URL/credential echo).
+- [x] 1.2 GREEN: implement the classifier in `internal/source` (new file, e.g. `remotepolicy.go`) returning a typed category + extracted ref; no behavior wired into Render yet.
+- [x] 1.3 RED: write tests for a reachable-tree walk that visits every recognized kustomization under the resolved root, classifies each `resources`/`components`/`bases` entry, detects reference cycles, and stays within the root boundary (reject path/symlink escape).
+- [x] 1.4 GREEN: implement the tree walk reusing the classifier; return the ordered set of remote references discovered.
 
 ## 2. SHA-pin enforcement preflight (TDD)
 

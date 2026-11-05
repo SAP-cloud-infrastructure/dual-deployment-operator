@@ -9,8 +9,9 @@ SPDX-License-Identifier: Apache-2.0
 
 Issue #58 requires DDO to support Kustomize remote bases. This change implements
 the **Argo CD / Flux-aligned** posture: krusty fetches remote content live during
-`Run`. It is a deliberate alternative to the hermetic DDO-prefetch pipeline in the
-sibling change `kustomize-remote-bases`, so maintainers can compare.
+`Run`. It is a deliberate alternative to a hermetic DDO-prefetch pipeline (the
+stricter SHA-content-addressed posture discussed under issue #58; not implemented
+in this repository), so maintainers can compare.
 
 **Current state (`origin/main`).** `kustomizeSource.Render` resolves only the root
 via the go-git `RootResolver`, then calls

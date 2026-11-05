@@ -12,8 +12,9 @@ references and remote single-file manifests). This change delivers that in the
 **Argo CD / Flux-aligned** shape: let the embedded krusty engine fetch remote
 content live during `Run`, exactly as both industry controllers do, and layer on
 the guardrails that remain achievable without a krusty fetch hook. It is a
-deliberate alternative to the hermetic DDO-prefetch model (sibling change
-`kustomize-remote-bases`), offered so the maintainers can compare postures.
+deliberate alternative to a hermetic DDO-prefetch model (the stricter,
+SHA-content-addressed posture discussed under issue #58; not implemented in this
+repository), offered so the maintainers can compare postures.
 
 The `origin/main` baseline already renders with `krusty.MakeKustomizer(...).Run()`
 and `LoadRestrictionsNone` — krusty is already the transitive-base fetcher. Two
@@ -29,12 +30,15 @@ both gaps.
   `git` in their controller images for exactly this reason).
 - Add a **DDO-side pin-enforcement preflight**: before invoking krusty, walk the
   reachable kustomization tree and classify every remote reference. Under an
-  operator-level flag (default off), reject any remote ref whose pin is not a
-  40-hex commit SHA — a hardening lever stricter than either peer, independent of
-  krusty's (absent) fetch hooks.
+  operator-level flag (default off), reject any **top-level** remote ref the
+  operator parses whose pin is not a 40-hex commit SHA — a hardening lever
+  stricter than either peer, independent of krusty's (absent) fetch hooks.
+  Enforcement covers the references the operator can see up front; it does **not**
+  reach transitive bases nested inside remote repositories (krusty resolves those
+  internally, and — matching Flux and Argo CD — no tool pre-enforces them).
 - Add a **fail-closed error wrapper** around krusty remote fetches so an
   unreachable or non-2xx remote reference fails the render with a sanitized error
-  (never a silent partial render, never echoing credentials/URLs).
+  (never a silent partial render, never echoing credentials).
 - **Document the accepted posture**: live fetch each render, no hermetic offline
   render, no DDO SHA-content-addressed cache, ambient/process-global git
   credentials only, egress gated operationally by NetworkPolicy. Record the

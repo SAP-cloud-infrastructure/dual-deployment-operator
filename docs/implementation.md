@@ -1816,10 +1816,17 @@ into a hermetic render pipeline.
 
 Before krusty renders the exact seed or shoot overlay, the operator walks the
 reachable kustomization tree and classifies remote references. Unsupported forms
-(including SSH, embedded user information, URL fragments, and ambiguous
+(including SSH, embedded user information, URL fragments, `http://`, and ambiguous
 repository paths) are rejected with sanitized errors. With strict pin enforcement
-enabled, references without a 40-character lowercase hexadecimal commit SHA are
-rejected before any remote fetch.
+enabled, the top-level remote references the operator parses must be SHA-pinned:
+a remote git directory must use the scheme-less GitHub shorthand
+`github.com/<owner>/<repo>//<path>?ref=<40-hex-sha>` (which krusty resolves via
+git, honoring the SHA), or a single remote file must be a canonical
+`https://raw.githubusercontent.com/<owner>/<repo>/<40-hex-sha>/<path>` URL. An
+`https://` git directory in a file-first field (`resources`/`bases`) is rejected
+in strict mode, because krusty attempts an HTTP GET of that URL before falling
+back to a git clone, so the `?ref=` SHA is not guaranteed to be honored;
+`components` are exempt (krusty loads them via the git route directly).
 
 The operator-level flag is:
 
@@ -1828,15 +1835,20 @@ The operator-level flag is:
 ```
 
 It defaults to `false`, so tags and branches remain permitted unless an operator
-explicitly enables strict SHA enforcement. This flag applies to transitive remote
-bases; it does not change the existing source-root URL validation.
+explicitly enables strict SHA enforcement. Enforcement applies to the top-level
+remote references the operator parses from the kustomization tree it can walk; it
+does NOT reach transitive bases nested inside remote repositories (krusty resolves
+those internally, and — matching Flux and Argo CD — no tool pre-enforces them). It
+does not change the existing source-root URL validation.
 
 ### Runtime and deployment requirements
 
-- krusty fetches remote bases live during each `Render()`; seed and shoot are
-  rendered separately. There is no hermetic offline render or SHA-keyed cache for
-  this path. A fetch failure fails the render closed, and the surfaced error is
-  sanitized.
+- krusty fetches remote bases live when a `Render()` actually runs; seed and
+  shoot are rendered separately. The always-on render cache returns the prior
+  result and skips krusty on a cache hit, so a moved tag stays frozen until the
+  entry is evicted, the operator restarts, or the root SHA changes. There is no
+  hermetic offline render or SHA-keyed cache for this path. A fetch failure fails
+  the render closed, and the surfaced error is sanitized.
 - The operator image must include `git` on `PATH`: krusty's remote git cloner
   invokes the Git executable.
 - Remote-base credentials are ambient/process-global Git configuration only;
@@ -1846,7 +1858,7 @@ bases; it does not change the existing source-root URL validation.
   allowlist. If deployments need to constrain which hosts can be fetched, their
   NetworkPolicy must restrict operator Pod egress. The Gardener egress-label
   prerequisite for connectivity is described in
-  [Phase 9](#phase-9-deployment-charts) under “Gardener egress labels on the
+  [Phase 9](#phase-9-deployment-charts-2-days) under “Gardener egress labels on the
   operator Pod”; see also the [remote-bases authoring guide](kustomize-remote-bases.md).
 
 SHA pinning is recommended for reproducibility, even when strict enforcement is

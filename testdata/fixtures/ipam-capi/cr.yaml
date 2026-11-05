@@ -16,9 +16,9 @@ spec:
       # seedPath is set but never exercised in this fixture: the seed/manager
       # overlay uses repo-root-relative patches that only resolve from the repo
       # root, not from the overlay subdir. CaptureShootOnly skips the seed render.
-      # See testdata/fixtures/ipam-capi/README.md and
-      # docs/implementation.md §"ipam-capi equivalence is DEFERRED".
-      seedPath: seed
+      # "manager" is the real overlay directory at the pinned SHA ("seed" does
+      # not exist there). See testdata/fixtures/ipam-capi/README.md.
+      seedPath: manager
       shootPath: managedresources
   shootAccess:
     secretName: ipam-capi-remote-kubeconfig

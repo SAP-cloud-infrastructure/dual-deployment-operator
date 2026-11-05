@@ -23,7 +23,7 @@ local directories.
 #### Scenario: supported remote git base is classified and accepted
 
 - **WHEN** a reachable kustomization lists a `base` of the form
-  `https://github.com/org/repo//path?ref=<ref>`
+  `github.com/org/repo//path?ref=<ref>`
 - **THEN** the preflight classifies it as a remote git-directory base
 - **AND** the render proceeds to krusty without error from classification
 
@@ -47,12 +47,21 @@ The operator MUST expose an operator-level flag
 `--kustomize-require-sha-pinned-remote-bases` (default `false`). When the flag is
 `false`, remote references pinned by tag, branch, or SHA are all permitted (the
 tag-permissive default, matching krusty and peer controllers). When the flag is
-`true`, the preflight MUST reject — **before any remote fetch** — any remote
-reference whose embedded ref is not a 40-character lowercase hexadecimal commit
-SHA. Ref extraction MUST be: for a remote git base, the `?ref=` value; for a
-`raw.githubusercontent.com` single-file URL, the path segment after
-`<org>/<repo>`; for a generic single-file URL, the `?ref=` query value. A
-reference with no determinable ref MUST be rejected in strict mode.
+`true`, the preflight MUST reject — **before any remote fetch** — any top-level
+remote reference it parses that is not SHA-pinned in a form krusty actually
+honors. In strict mode only two SHA-pinned forms are accepted: (a) a scheme-less
+GitHub shorthand git directory `github.com/<owner>/<repo>//<path>?ref=<40-hex-sha>`
+(krusty resolves it via git, so the SHA is honored); and (b) a canonical single
+file `https://raw.githubusercontent.com/<owner>/<repo>/<40-hex-sha>/<path>`
+(immutable content addressed by SHA). An `https://` or `http://` git-directory
+reference in a file-first field (`resources`/`bases`) MUST be rejected in strict
+mode: krusty issues an HTTP GET for any `http(s)://` reference before falling back
+to a git clone, so the `?ref=` SHA is not guaranteed to be honored. The
+`components` field is exempt (krusty resolves it through the git route directly).
+A reference with no determinable ref MUST be rejected in strict mode. Enforcement
+covers the top-level references the operator parses, not transitive bases nested
+inside remote repositories (krusty resolves those internally, and — matching Flux
+and Argo CD — no tool pre-enforces them).
 
 #### Scenario: strict mode rejects a tag-pinned remote base
 
@@ -79,7 +88,8 @@ A remote reference that krusty cannot fetch (unreachable host, git fetch failure
 or a non-2xx remote single-file response) MUST fail the render closed. The
 operator MUST NOT emit a silent partial render that omits the unreachable
 reference, and the surfaced error MUST be sanitized so it never contains
-credential material or a full fetch URL.
+credential material. Non-credential diagnostic context (host, repository, path,
+exit code) MAY be preserved to aid debugging (redact-and-preserve).
 
 #### Scenario: unreachable remote base fails the render
 

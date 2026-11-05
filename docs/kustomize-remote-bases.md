@@ -23,13 +23,23 @@ For example, a GitHub remote directory may be referenced as:
 
 ```yaml
 resources:
-  - https://github.com/example/platform-config//base?ref=0123456789abcdef0123456789abcdef01234567
+  - github.com/example/platform-config//base?ref=0123456789abcdef0123456789abcdef01234567
 ```
+
+Use the **scheme-less** `github.com/<owner>/<repo>//<path>?ref=<sha>` shorthand
+for a remote git directory, not an `https://` URL. Krusty attempts an HTTP GET
+for any `http(s)://` reference *before* it tries a git clone, so an `https://`
+directory URL can be served as an arbitrary file by the host and the `?ref=` is
+never honored. The scheme-less shorthand goes straight to the git cloner, which
+honors the pinned commit. A single remote *file* is the one exception: it must be
+a canonical `https://raw.githubusercontent.com/<owner>/<repo>/<sha>/<path>` URL
+(immutable blob at a commit SHA).
 
 The operator runs a preflight over the reachable kustomization tree before
 krusty fetches remote content. It classifies remote references and rejects
-unsupported forms, including SSH URLs, embedded user information, URL fragments,
-and ambiguous repository paths. Errors are sanitized and do not echo full URLs or
+unsupported forms, including SSH URLs, `http://`, embedded user information, URL
+fragments, ambiguous repository paths, and (in strict mode) `https://` git
+directories outside the `components` field. Errors are sanitized and do not echo
 credentials.
 
 ## Pin refs for reproducibility
@@ -48,9 +58,13 @@ SHA enforcement is opt-in through the operator-level flag:
 ```
 
 The default is `false`, which permits tags and branches. When set to `true`, the
-preflight requires every reachable remote reference to use a 40-character
-lowercase hexadecimal commit SHA and rejects other refs before any remote fetch.
-The flag governs transitive remote bases, not the configured source-root URL.
+preflight requires each remote reference it parses from the **top-level**
+kustomization to use a 40-character lowercase hexadecimal commit SHA and rejects
+other refs before any remote fetch. This matches the Flux/Argo CD model: the
+operator enforces pinning on the references it can see up front, not on
+transitive bases nested inside remote repositories (which krusty resolves
+internally and which no tool pre-enforces). The flag governs remote bases only,
+not the configured source-root URL.
 
 > **Preflight scope:** The preflight walks the **locally reachable** kustomization
 > tree — the files that exist in the local clone at the time of the check. It does
@@ -74,8 +88,37 @@ fetches to succeed. If you need to constrain which hosts it can contact, apply a
 egress-restricting NetworkPolicy; this project does not enforce a host allowlist
 inside the process. In Gardener, the operator Pod also needs the applicable
 networking labels for egress to be enabled. See
-[Phase 9's Gardener egress prerequisite](implementation.md#phase-9-deployment-charts)
+[Phase 9's Gardener egress prerequisite](implementation.md#phase-9-deployment-charts-2-days)
 in the [implementation guide](implementation.md).
 
 The operator image includes `git` on `PATH` because krusty's remote git cloner
 shells out to the Git executable.
+
+## Runtime requirements
+
+### Submodules
+
+Krusty's git cloner runs `git submodule update --init --recursive` on every
+cloned base unless the reference opts out. If a base has submodules you do not
+need (or the submodule remote is unreachable from the operator Pod), append
+`submodules=false` to the reference so the clone does not attempt to fetch them:
+
+```yaml
+resources:
+  - github.com/example/platform-config//base?ref=0123456789abcdef0123456789abcdef01234567&submodules=false
+```
+
+Without `submodules=false`, a base whose submodules cannot be fetched fails the
+render.
+
+### Writable temp directory (`TMPDIR`)
+
+Krusty clones remote bases under the process temp directory
+(`os.MkdirTemp("", "kustomize-…")`, i.e. `/tmp`). The operator runs with
+`readOnlyRootFilesystem: true`, so `/tmp` is read-only and the clone would fail
+with `Read-only file system`. The deployment therefore sets
+`TMPDIR=/var/run/ddo-source` — the same writable scratch `emptyDir` used for the
+`--source-scratch-dir` Helm loader — in both `config/manager/manager.yaml` and
+`chart/values.yaml`. If you build your own manifests, set `TMPDIR` to a writable
+mounted path and size the volume to hold the largest clone (the stock
+`sizeLimit` is `256Mi`).

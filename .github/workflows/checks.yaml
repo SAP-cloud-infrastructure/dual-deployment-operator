@@ -13,7 +13,7 @@ name: Checks
       - main
   pull_request:
     branches:
-      - '*'
+      - '**'
   workflow_dispatch: {}
 permissions:
   checks: write

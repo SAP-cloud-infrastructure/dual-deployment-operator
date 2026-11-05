@@ -118,7 +118,10 @@ spec:
 
 Remote **bases** referenced from inside a kustomization (Argo CD/Flux-style
 `resources:`/`components:`/`bases:` entries pointing at a git URL) are fetched
-live by kustomize on every reconcile. Pinning them to a 40-char git SHA is
+live by kustomize when a reconcile actually renders (the render cache is
+always-on; a cache hit returns the prior result and skips krusty, so a moved tag
+stays frozen until the cache is evicted, the pod restarts, or the root SHA
+changes). Pinning them to a 40-char git SHA is
 recommended for reproducibility; to enforce it operator-wide, start the
 controller with `--kustomize-require-sha-pinned-remote-bases` (default
 `false`). The flag is **operator-level and applies only to kustomize sources** —
