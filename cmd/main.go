@@ -108,6 +108,13 @@ func main() {
 	clientconfig.RegisterFlags(flag.CommandLine)
 	flag.Parse()
 
+	// Harden http.DefaultTransport before any reconcile can fetch a remote
+	// kustomize base. kustomize's file loader builds a timeout-less
+	// &http.Client{} we cannot reach, so it falls back to http.DefaultTransport;
+	// bounding that global is the only way to stop an unresponsive remote from
+	// blocking a reconcile indefinitely. See source.HardenDefaultHTTPTransport.
+	source.HardenDefaultHTTPTransport()
+
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled

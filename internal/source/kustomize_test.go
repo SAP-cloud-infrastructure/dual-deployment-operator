@@ -95,10 +95,15 @@ func buildKustomizeRootWith(t *testing.T, kustContent string, strict bool) *kust
 // unpinned (tag) remote reference is rejected by the preflight before krusty ever
 // runs. The kustomizeFetchHook must NOT fire.
 func TestTask4_StrictModeUnpinnedFailsBeforeKrusty(t *testing.T) {
+	// Scheme-less github.com shorthand reaches git (not krusty's HTTP-first file
+	// loader), so in strict mode it flows to the SHA-pin loop and is rejected for
+	// the unpinned tag ref — exactly the assertion this test encodes. (An
+	// https:// spelling would instead be rejected earlier by the resource-like
+	// HTTPS rule, which is covered by the dedicated rejection tests.)
 	src := buildKustomizeRootWith(t, `apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - https://github.com/org/repo?ref=v1.2.3
+  - github.com/org/repo?ref=v1.2.3
 `, true /* strict */)
 
 	fetchReached := false
@@ -426,7 +431,11 @@ func TestTask4Fix_P1_SSHRefInOverlayRejectedWithSubPath(t *testing.T) {
 // mode, an unpinned remote ref inside an overlay (with subPath) is caught.
 // Bug: walking from isolationRoot instead of overlay misses the ref.
 func TestTask4Fix_P1_StrictModeOverlayRefRejectedWithSubPath(t *testing.T) {
-	src := buildOverlayTreeWithRemote(t, "https://github.com/org/repo?ref=v1.2.3")
+	// Scheme-less github shorthand reaches the git route (not krusty's HTTP-first
+	// file loader), so it flows to the SHA-pin loop; an unpinned tag is then
+	// rejected for being non-SHA-pinned (the assertion below). An https:// form
+	// here would instead be rejected earlier by the resource-like-HTTPS rule.
+	src := buildOverlayTreeWithRemote(t, "github.com/org/repo?ref=v1.2.3")
 	src.requireSHAPinnedRemoteBases = true // strict
 
 	fetchReached := false
@@ -626,5 +635,125 @@ func TestPreflightIsolationRoot(t *testing.T) {
 				t.Errorf("preflightIsolationRoot(%q, %q) = %q, want %q", tc.root, tc.subPath, got, tc.wantRoot)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Boundary isolation with an in-repo //root subpath (finding #4)
+// ---------------------------------------------------------------------------
+//
+// When the source URL carries a `//root` subpath (e.g.
+// github.com/org/repo//stacks/app?ref=<sha>), the RootResolver returns
+// cloneDir/<rootSubPath>/<subPath>. krusty receives that as its entry point,
+// but the isolation boundary for local path/symlink checks must be the CLONE
+// root (cloneDir) — NOT cloneDir/<rootSubPath> and NOT the overlay dir —
+// because a kustomize overlay legitimately references sibling directories that
+// live anywhere within the clone (../base, ../../common).
+//
+// These two tests exercise the full Render() preflight with
+// requireSHAPinnedRemoteBases=false (so only the boundary logic runs, not the
+// SHA gate). The sibling-reach refs are LOCAL, so classification is
+// refKindLocal and only the boundary checks fire. fakeRootResolver parses the
+// URL's //root via splitRef, so the resolved root matches the on-disk layout
+// cloneDir/stacks/app/overlay.
+
+// buildRootSubPathTree writes a clone tree rooted at cloneDir with an in-repo
+// //root of "stacks/app" and a per-mode subPath of "overlay", plus a sibling
+// "common" directory at the clone root. The overlay's single local ref is
+// overlayRef. It returns a kustomizeSource whose URL encodes the //root so the
+// resolver reproduces the production layout.
+func buildRootSubPathTree(t *testing.T, overlayRef string) *kustomizeSource {
+	t.Helper()
+	cloneDir := t.TempDir()
+
+	write := func(path, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Sibling base at the CLONE root (above the in-repo //root "stacks/app").
+	write(filepath.Join(cloneDir, "common", "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cm.yaml
+`)
+	write(filepath.Join(cloneDir, "common", "cm.yaml"), `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: common-cm
+`)
+
+	// The overlay lives at cloneDir/stacks/app/overlay (rootSubPath=stacks/app,
+	// subPath=overlay). Its single ref is overlayRef (a local relative path).
+	write(filepath.Join(cloneDir, "stacks", "app", "overlay", "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - `+overlayRef+`
+`)
+
+	// URL encodes the in-repo //root so splitRef yields rootSubPath="stacks/app".
+	// The SHA in ?ref= only needs to be present for splitRef to parse the root;
+	// it is not SHA-gated here because requireSHAPinnedRemoteBases is false and
+	// the overlay ref is local.
+	url := "github.com/org/repo//stacks/app?ref=0123456789abcdef0123456789abcdef01234567"
+	spec := v1alpha1.KustomizeSource{URL: url, SeedPath: "overlay", ShootPath: "overlay"}
+	return &kustomizeSource{
+		spec:                        &spec,
+		resolver:                    fakeRootResolver{baseDir: cloneDir},
+		requireSHAPinnedRemoteBases: false,
+	}
+}
+
+// TestBoundaryIsolation_InCloneSiblingReachAccepted verifies that an overlay
+// beneath an in-repo //root can reach a sibling directory that lives at the
+// clone root (../../../common from cloneDir/stacks/app/overlay == cloneDir/common)
+// without tripping the path-boundary check. The isolation root is stripped back
+// to cloneDir, so this reference stays inside the clone and the render succeeds.
+func TestBoundaryIsolation_InCloneSiblingReachAccepted(t *testing.T) {
+	// From cloneDir/stacks/app/overlay: ../=app, ../../=stacks, ../../../=cloneDir.
+	src := buildRootSubPathTree(t, "../../../common")
+
+	ms, err := src.Render(context.Background(), ModeSeed, "ns")
+	if err != nil {
+		t.Fatalf("expected in-clone sibling reach (../../../common) to be accepted, got: %v", err)
+	}
+	found := false
+	for _, m := range ms {
+		if m.Unstructured.GetKind() == "ConfigMap" && m.Unstructured.GetName() == "common-cm" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected ConfigMap/common-cm in rendered manifests, not found")
+	}
+}
+
+// TestBoundaryIsolation_GenuineEscapeRejected verifies that an overlay beneath
+// an in-repo //root that references a path genuinely ESCAPING above the clone
+// root is still rejected by the preflight boundary check. ../../../../escape
+// from cloneDir/stacks/app/overlay resolves to the PARENT of cloneDir — outside
+// the clone — and must be refused before any fetch/build.
+func TestBoundaryIsolation_GenuineEscapeRejected(t *testing.T) {
+	// ../../../../ from cloneDir/stacks/app/overlay == parent-of-cloneDir.
+	src := buildRootSubPathTree(t, "../../../../escape")
+
+	fetchReached := false
+	old := kustomizeFetchHook
+	kustomizeFetchHook = func() { fetchReached = true }
+	defer func() { kustomizeFetchHook = old }()
+
+	_, err := src.Render(context.Background(), ModeSeed, "ns")
+
+	if fetchReached {
+		t.Fatal("kust.Run reached despite a path escaping the clone root")
+	}
+	if err == nil {
+		t.Fatal("expected rejection of a path escaping the clone root, got nil")
 	}
 }

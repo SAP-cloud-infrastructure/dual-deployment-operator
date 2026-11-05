@@ -7,9 +7,9 @@ package source
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"sigs.k8s.io/kustomize/api/krusty"
@@ -58,16 +58,28 @@ func (k *kustomizeSource) Render(ctx context.Context, mode Mode, namespace strin
 	// Compute the preflight isolation root (boundary for local path/symlink
 	// checks) separately from the entry point (where the walk starts).
 	//
-	// The resolver returns filepath.Join(cloneDir, subPath). krusty receives
-	// `root` (= cloneDir/subPath) as its entry point. The correct isolation
-	// boundary is cloneDir — not the overlay subdir — because kustomize overlays
-	// legitimately reference sibling directories (../base) that are within the
+	// The resolver returns filepath.Join(cloneDir, rootSubPath, subPath), where
+	// rootSubPath is the in-repo root taken from the URL's `//root` separator
+	// (splitRef) and subPath is the per-mode seed/shoot path. krusty receives
+	// `root` (= cloneDir/rootSubPath/subPath) as its entry point. The correct
+	// isolation boundary is cloneDir — NOT the overlay subdir and NOT
+	// cloneDir/rootSubPath — because a kustomize overlay legitimately references
+	// sibling directories (../base, ../../common) that live anywhere within the
 	// clone but outside the overlay subdir.
+	//
+	// We therefore strip the FULL filepath.Join(rootSubPath, subPath) suffix
+	// from root to recover cloneDir. rootSubPath is parsed from k.spec.URL with
+	// the same splitRef the resolver uses; if it cannot be parsed we fall back to
+	// an empty rootSubPath (stripping subPath only), matching prior behavior.
 	//
 	// The walk STARTS at root (so the overlay's refs are actually inspected),
 	// but local path boundary checks use isolationRoot (so ../base is allowed
 	// as long as it stays inside the clone).
-	isolationRoot := preflightIsolationRoot(root, subPath)
+	var rootSubPath string
+	if _, sub, _, splitErr := splitRef(k.spec.URL); splitErr == nil {
+		rootSubPath = sub
+	}
+	isolationRoot := preflightIsolationRoot(root, filepath.Join(rootSubPath, subPath))
 
 	// SHA-pin preflight: classify → tree-walk → SHA-gate, strictly before any
 	// network/git fetch. Errors here are already sanitized (no raw URLs/creds).
@@ -118,58 +130,119 @@ func runKrusty(kust *krusty.Kustomizer, root string) (resmap.ResMap, error) {
 	return kust.Run(filesys.MakeFsOnDisk(), root)
 }
 
-// preflightIsolationRoot computes the tree-walk isolation boundary from the
-// resolved root and the subPath that was appended to reach it.
+// preflightIsolationRoot computes the tree-walk isolation boundary by stripping
+// a trailing path suffix from the resolved root.
 //
-// The RootResolver returns filepath.Join(cloneDir, subPath) for a given subPath.
-// The isolation root for the preflight boundary check is cloneDir — not the
-// overlay subPath directory — because kustomize overlays legitimately reference
-// sibling directories (../base) that are within the clone but outside the overlay.
+// The RootResolver returns filepath.Join(cloneDir, rootSubPath, subPath). The
+// isolation root for the preflight boundary check is cloneDir — not the overlay
+// directory and not cloneDir/rootSubPath — because kustomize overlays
+// legitimately reference sibling directories (../base, ../../common) that live
+// anywhere within the clone. Render() therefore passes the FULL
+// filepath.Join(rootSubPath, subPath) as suffix so the whole in-clone prefix is
+// stripped back to cloneDir.
 //
 // This function is used by Render() to compute the `isolationRoot` argument for
 // preflightSHAGate. The `entryPoint` passed to preflightSHAGate remains the
-// original `root` (= cloneDir/subPath) so the walk actually inspects the overlay.
+// original `root` so the walk actually inspects the overlay.
 //
-// If subPath is empty, root itself is the isolation root (no stripping needed).
-// If the root doesn't end with the expected subPath suffix (e.g. because the
-// resolver is a fake or uses a different layout), we fall back to root itself
-// so the preflight still runs correctly (entryPoint == isolationRoot in that case).
-func preflightIsolationRoot(root, subPath string) string {
-	if subPath == "" {
+// If suffix is empty (or cleans to "."), root itself is the isolation root (no
+// stripping needed). If root doesn't end with the expected suffix (e.g. a fake
+// resolver or a different layout), we fall back to root itself so the preflight
+// still runs correctly (entryPoint == isolationRoot in that case).
+func preflightIsolationRoot(root, suffix string) string {
+	if suffix == "" {
 		return root
 	}
-	// filepath.Clean normalizes the subPath (removes trailing separators, etc.)
-	cleanSub := filepath.Clean(subPath)
-	cleanRoot := filepath.Clean(root)
-	// Check if root ends with the subPath segment.
-	sep := string(filepath.Separator)
-	suffix := sep + cleanSub
-	if strings.HasSuffix(cleanRoot, suffix) {
-		return cleanRoot[:len(cleanRoot)-len(suffix)]
+	// filepath.Clean normalizes the suffix (removes trailing separators, "."
+	// segments, etc.). An all-empty rootSubPath+subPath join cleans to ".".
+	cleanSuffix := filepath.Clean(suffix)
+	if cleanSuffix == "." {
+		return root
 	}
-	// Fallback: subPath layout doesn't match — use root as-is.
+	cleanRoot := filepath.Clean(root)
+	sep := string(filepath.Separator)
+	wantSuffix := sep + cleanSuffix
+	if strings.HasSuffix(cleanRoot, wantSuffix) {
+		return cleanRoot[:len(cleanRoot)-len(wantSuffix)]
+	}
+	// Fallback: layout doesn't match — use root as-is.
 	return root
 }
 
-// sanitizeKrustyError maps a raw error from krusty.Run to a stable, sanitized
-// render error. krusty errors can contain repository URLs, embedded credentials
-// (if the caller mis-configured an authSecretRef), full git command strings, or
-// HTTP status lines — none of which should be surfaced to the operator's
-// reconciliation log or status conditions.
+// redactCredentials removes credential substrings from a diagnostic string
+// while leaving the rest of the message intact. It targets the two forms in
+// which a secret can appear in a krusty / git / HTTP error:
 //
-// Design: we apply uniform sanitization — never forward the raw error message,
-// always substitute a fixed descriptive string. This is strictly safer than
-// trying to classify and partially sanitize: any partial approach risks missing
-// a new krusty error format that leaks a URL.
+//  1. URL userinfo: scheme://user:password@host/... → scheme://host/...
+//     (both the "user:password@" and bare "user@" forms are stripped).
+//  2. git ask-pass / credential echoes of the form "https://user:token@host"
+//     embedded mid-sentence without a surrounding URL structure.
 //
-// The returned error:
-//   - Is nil iff err == nil (success path is completely unaffected).
-//   - Uses errors.New (not fmt.Errorf with %w) so the raw error is never
-//     accessible via errors.Unwrap or errors.As — preventing callers from
-//     accidentally logging the sanitized-away detail.
+// Everything else (hostnames, repo paths, exit codes, git subcommands, HTTP
+// status lines) is preserved so the operator keeps an actionable diagnostic.
+// This is the OWASP-aligned "redact the secret, keep the context" approach
+// rather than discarding the entire message.
+var reURLUserinfo = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]*@`)
+
+func redactCredentials(s string) string {
+	// Replace "scheme://userinfo@" with "scheme://" + a redaction marker so the
+	// reader can see a credential was present without seeing its value.
+	return reURLUserinfo.ReplaceAllString(s, "${1}[REDACTED]@")
+}
+
+// krustyReason classifies a raw krusty / git error into a stable, machine-
+// readable reason code. The code is safe to surface in a status condition
+// Reason field and never contains any portion of the raw error text.
+func krustyReason(raw string) string {
+	l := strings.ToLower(raw)
+	switch {
+	case strings.Contains(l, "authentication") || strings.Contains(l, "authorization") ||
+		strings.Contains(l, "403") || strings.Contains(l, "401") ||
+		strings.Contains(l, "could not read username") || strings.Contains(l, "terminal prompts disabled"):
+		return "RemoteAuthenticationFailed"
+	case strings.Contains(l, "submodule"):
+		return "SubmoduleFetchFailed"
+	case strings.Contains(l, "could not resolve host") || strings.Contains(l, "connection refused") ||
+		strings.Contains(l, "timeout") || strings.Contains(l, "timed out") ||
+		strings.Contains(l, "no such host") || strings.Contains(l, "i/o timeout"):
+		return "RemoteUnreachable"
+	case strings.Contains(l, "not found") || strings.Contains(l, "404") ||
+		strings.Contains(l, "couldn't find remote ref") || strings.Contains(l, "did not match any file"):
+		return "RemoteNotFound"
+	case strings.Contains(l, "exec") && strings.Contains(l, "git"):
+		return "GitExecFailed"
+	default:
+		return "KustomizeBuildFailed"
+	}
+}
+
+// sanitizeKrustyError maps a raw error from krusty.Run to a sanitized render
+// error that follows the REDACT-AND-PRESERVE policy (design decision: OWASP /
+// Kubernetes norm — keep actionable diagnostics, strip only secrets).
+//
+// krusty errors can contain repository URLs, embedded credentials (if the
+// caller mis-configured a URL), full git command strings, or HTTP status lines.
+// Of these, only embedded credentials are sensitive. Rather than discard the
+// whole message (which also hides purely-local overlay errors such as a bad
+// patch target or invalid YAML, and would regress diagnostics vs. main), we:
+//
+//   - Prefix a stable machine reason code (krustyReason) so callers can branch
+//     on the failure class without parsing free text.
+//   - Forward the raw message with credential substrings redacted
+//     (redactCredentials) — hostnames, repo paths, exit codes and git
+//     subcommands are preserved.
+//
+// The returned error uses errors.New (not fmt.Errorf with %w) so the ORIGINAL
+// unredacted error is never reachable via errors.Unwrap / errors.As — a caller
+// cannot accidentally re-log the pre-redaction text. The redacted text is still
+// embedded in the returned error's message, which is intentional: it is safe by
+// construction and is what the operator needs to debug.
+//
+// Returns nil iff err == nil (success path unaffected).
 func sanitizeKrustyError(err error) error {
 	if err == nil {
 		return nil
 	}
-	return errors.New("remote fetch or build failed: krusty encountered an error building the kustomization (details omitted to prevent credential/URL leakage; check git access and remote base availability)")
+	redacted := redactCredentials(err.Error())
+	return fmt.Errorf("%s: %s", krustyReason(err.Error()), redacted) //nolint:err113 // dynamic sanitized message by design; no sentinel needed
 }

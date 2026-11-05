@@ -3,23 +3,24 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Task 6 — fail-closed assertion: missing git binary produces a sanitized error
+// Missing-git-binary: Render surfaces a reason-coded, credential-safe error
 //
 // krusty (sigs.k8s.io/kustomize/api) resolves remote kustomize bases by calling
 // ClonerUsingGitExec, which shells out to a `git` binary on PATH. When the binary
 // is absent, krusty emits an error message like "no 'git' program on path".
 //
-// These tests verify that the existing sanitizeKrustyError wrapper (Task 3) covers
-// the git-missing case:
+// Under the redact-and-preserve error policy, sanitizeKrustyError does NOT
+// discard this message: a git-missing diagnostic carries no credentials and is
+// exactly the actionable detail an operator needs. These tests verify that:
 //
-//   1. A "no 'git' program on path" error is mapped to a fixed sanitized message.
-//   2. The sanitized error must not echo the raw krusty message (no path details).
-//   3. The error must not be nil (fail-closed invariant).
-//   4. Full end-to-end path: Render() returns a sanitized error when git is absent.
+//   1. The sanitized error carries a stable machine reason-code prefix.
+//   2. The actionable diagnostic ("no 'git' program on path") is PRESERVED.
+//   3. The error is non-nil (fail-closed invariant).
+//   4. Full end-to-end path: Render() propagates the reason-coded error.
 //
-// This is a pure-Go unit test; it does not build or run containers.
-// See .superpowers/sdd/plan/task-6-report.md for the manual container verification
-// procedure that must be run before promoting a new image to production.
+// This is a pure-Go unit test; it does not build or run containers. The manual
+// container verification procedure for a new image is documented in the
+// deployment guide under docs/ (see PR #63).
 
 package source
 
@@ -29,12 +30,12 @@ import (
 	"testing"
 )
 
-// TestGitMissingError_SanitizedFailClosed verifies that a "git not on PATH"
-// error from krusty is mapped to a sanitized render error (fail-closed). This is
-// the primary assertion for Task 6: even if the git binary is accidentally absent
-// from the operator image, the operator surfaces a clean error rather than a raw
-// krusty stack trace that might leak file paths or command details.
-func TestGitMissingError_SanitizedFailClosed(t *testing.T) {
+// TestGitMissingError_ReasonCodedFailClosed verifies that a "git not on PATH"
+// error from krusty is mapped to a reason-coded render error (fail-closed) while
+// preserving the actionable, credential-free diagnostic. Even if the git binary
+// is accidentally absent from the operator image, the operator surfaces a clean,
+// classifiable error that still tells the operator what went wrong.
+func TestGitMissingError_ReasonCodedFailClosed(t *testing.T) {
 	// This is the exact error message krusty emits when it cannot find git:
 	// see sigs.k8s.io/kustomize/pkg/git.ClonerUsingGitExec
 	gitNotFoundErr := &gitNotFoundSimulatorError{msg: "no 'git' program on path"}
@@ -48,23 +49,21 @@ func TestGitMissingError_SanitizedFailClosed(t *testing.T) {
 
 	msg := sanitized.Error()
 
-	// Must not echo any path or command details from the raw error.
-	if strings.Contains(msg, "no 'git'") {
-		t.Errorf("sanitized error leaks raw krusty message: %q", msg)
-	}
-	if strings.Contains(msg, "program on path") {
-		t.Errorf("sanitized error leaks path detail: %q", msg)
+	// Must carry a stable machine reason-code prefix so callers can branch on
+	// the failure class without parsing free text.
+	if !strings.Contains(msg, ":") {
+		t.Errorf("sanitized error should carry a reason-code prefix, got: %q", msg)
 	}
 
-	// Must be human-readable and describe the failure at a high level.
-	if !strings.Contains(msg, "remote") && !strings.Contains(msg, "fetch") && !strings.Contains(msg, "build") {
-		t.Errorf("sanitized error should describe the failure kind, got: %q", msg)
+	// The credential-free diagnostic is PRESERVED (redact-and-preserve policy).
+	if !strings.Contains(msg, "no 'git' program on path") {
+		t.Errorf("sanitized error should preserve the actionable git-missing detail, got: %q", msg)
 	}
 }
 
-// TestGitMissingError_EndToEndSanitized verifies that Render() propagates the
-// sanitized error through the full krustyRunHook path when git is absent.
-func TestGitMissingError_EndToEndSanitized(t *testing.T) {
+// TestGitMissingError_EndToEndReasonCoded verifies that Render() propagates the
+// reason-coded error through the full krustyRunHook path when git is absent.
+func TestGitMissingError_EndToEndReasonCoded(t *testing.T) {
 	root := buildMinimalKustomizeRoot(t)
 	src := buildKustomizeSourceForRoot(t, root)
 
@@ -81,13 +80,10 @@ func TestGitMissingError_EndToEndSanitized(t *testing.T) {
 	if ms != nil {
 		t.Errorf("Render: expected nil manifests when git is missing, got %d", len(ms))
 	}
-	// Error message must not echo raw krusty detail.
+	// The actionable git-missing detail is preserved (it carries no credentials).
 	msg := err.Error()
-	if strings.Contains(msg, "no 'git'") {
-		t.Errorf("Render error leaks raw git-missing message: %q", msg)
-	}
-	if strings.Contains(msg, "program on path") {
-		t.Errorf("Render error leaks path detail: %q", msg)
+	if !strings.Contains(msg, "no 'git' program on path") {
+		t.Errorf("Render error should preserve the actionable git-missing detail, got: %q", msg)
 	}
 }
 

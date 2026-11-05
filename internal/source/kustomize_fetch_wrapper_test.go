@@ -86,13 +86,15 @@ func TestSanitizeKrustyError_NilPassthrough(t *testing.T) {
 	}
 }
 
-// TestSanitizeKrustyError_GitExecURLNotEchoed verifies that a git-exec error
-// containing a raw repository URL is returned as a sanitized fixed-text error.
-// The raw URL must not appear in the sanitized error message.
-func TestSanitizeKrustyError_GitExecURLNotEchoed(t *testing.T) {
-	// Simulate a krusty git-exec failure: "failed to run 'git fetch --depth=1
-	// https://secret-internal.corp.example/infra/repo HEAD': ..."
-	rawErr := errors.New("failed to run 'git fetch --depth=1 https://secret-internal.corp.example/infra/repo HEAD': exit status 128\nfatal: unable to access 'https://secret-internal.corp.example/infra/repo/': Could not resolve host: secret-internal.corp.example")
+// TestSanitizeKrustyError_GitExecCredentialsRedactedContextPreserved verifies
+// the REDACT-AND-PRESERVE contract: a git-exec error is returned with a stable
+// machine reason-code prefix, embedded credentials stripped, but safe
+// diagnostic context (hostname, repo path, exit code) PRESERVED so the operator
+// can act on it. This is the OWASP/K8s-aligned policy: redact the secret, keep
+// the context — not the old blanket "discard everything" behavior.
+func TestSanitizeKrustyError_GitExecCredentialsRedactedContextPreserved(t *testing.T) {
+	// Simulate a krusty git-exec failure WITHOUT credentials: only safe context.
+	rawErr := errors.New("failed to run 'git fetch --depth=1 https://internal.corp.example/infra/repo HEAD': exit status 128\nfatal: unable to access 'https://internal.corp.example/infra/repo/': Could not resolve host: internal.corp.example")
 
 	sanitized := sanitizeKrustyError(rawErr)
 	if sanitized == nil {
@@ -101,25 +103,27 @@ func TestSanitizeKrustyError_GitExecURLNotEchoed(t *testing.T) {
 
 	msg := sanitized.Error()
 
-	// The sanitized error must not echo the raw URL.
-	if strings.Contains(msg, "secret-internal.corp.example") {
-		t.Errorf("sanitized error leaks hostname: %q", msg)
+	// Safe context MUST be preserved (redact-and-preserve, not blanket discard).
+	if !strings.Contains(msg, "internal.corp.example") {
+		t.Errorf("redact-and-preserve must keep the hostname for diagnostics, got: %q", msg)
 	}
-	if strings.Contains(msg, "infra/repo") {
-		t.Errorf("sanitized error leaks repo path: %q", msg)
+	if !strings.Contains(msg, "infra/repo") {
+		t.Errorf("redact-and-preserve must keep the repo path for diagnostics, got: %q", msg)
 	}
-	// The error must still be recognisable as a remote-fetch failure.
-	if !strings.Contains(msg, "remote") && !strings.Contains(msg, "fetch") && !strings.Contains(msg, "build") {
-		t.Errorf("sanitized error should describe the failure kind, got: %q", msg)
+	if !strings.Contains(msg, "128") {
+		t.Errorf("redact-and-preserve must keep the exit code for diagnostics, got: %q", msg)
+	}
+	// A stable machine reason-code prefix must be present. "Could not resolve
+	// host" classifies as RemoteUnreachable.
+	if !strings.HasPrefix(msg, "RemoteUnreachable:") {
+		t.Errorf("expected RemoteUnreachable reason-code prefix, got: %q", msg)
 	}
 }
 
-// TestSanitizeKrustyError_CredentialBearingURLNotEchoed verifies that a raw
-// error message containing an embedded credential (user:token@host pattern)
-// is sanitized so no credential appears in the output.
-func TestSanitizeKrustyError_CredentialBearingURLNotEchoed(t *testing.T) {
-	// Simulate a scenario where the raw error somehow carries embedded creds
-	// (e.g. from a mis-configured authSecretRef that ended up in a URL).
+// TestSanitizeKrustyError_CredentialBearingURLRedacted verifies that an error
+// carrying an embedded credential (user:token@host) has ONLY the credential
+// redacted — the hostname and repo path survive for diagnostics.
+func TestSanitizeKrustyError_CredentialBearingURLRedacted(t *testing.T) {
 	rawErr := errors.New("failed to run 'git fetch --depth=1 https://myuser:SUPERSECRET@github.com/org/repo HEAD': exit status 128\nfatal: repository not found")
 
 	sanitized := sanitizeKrustyError(rawErr)
@@ -128,25 +132,30 @@ func TestSanitizeKrustyError_CredentialBearingURLNotEchoed(t *testing.T) {
 	}
 
 	msg := sanitized.Error()
+	// Credential material MUST be gone.
 	if strings.Contains(msg, "SUPERSECRET") {
-		t.Errorf("sanitized error leaks credential: %q", msg)
+		t.Errorf("sanitized error leaks credential token: %q", msg)
 	}
 	if strings.Contains(msg, "myuser") {
-		t.Errorf("sanitized error leaks username: %q", msg)
+		t.Errorf("sanitized error leaks credential username: %q", msg)
 	}
-	if strings.Contains(msg, "github.com") {
-		t.Errorf("sanitized error leaks hostname: %q", msg)
+	// The redaction marker must be present where the userinfo was.
+	if !strings.Contains(msg, "[REDACTED]") {
+		t.Errorf("expected [REDACTED] marker where credentials were stripped, got: %q", msg)
+	}
+	// Safe context (host, repo) MUST survive — the credential sat between
+	// "https://" and "@github.com", so the host is preserved.
+	if !strings.Contains(msg, "github.com/org/repo") {
+		t.Errorf("redact-and-preserve must keep host/repo after stripping creds, got: %q", msg)
 	}
 }
 
-// TestSanitizeKrustyError_HTTPErrorSanitized verifies that an HTTP loader error
-// (non-2xx response) is mapped to a stable sanitized message. The raw URL and
-// status-code details that might reveal internal routing are not echoed.
-func TestSanitizeKrustyError_HTTPErrorSanitized(t *testing.T) {
-	// Simulate the ErrHTTP format from krusty's internal loader:
-	// "HTTP Error: status code 403 (Forbidden)" — this doesn't contain a URL
-	// directly but the wrapping chain might. We verify sanitization still applies.
-	rawErr := errors.New("HTTP Error: status code 403 (Forbidden) fetching https://internal-registry.corp.example/manifests/secret.yaml")
+// TestSanitizeKrustyError_HTTPErrorContextPreserved verifies that an HTTP loader
+// error keeps its safe context (status code, host, path) under redact-and-
+// preserve — there are no credentials to strip here, so the message is forwarded
+// with only a reason-code prefix added.
+func TestSanitizeKrustyError_HTTPErrorContextPreserved(t *testing.T) {
+	rawErr := errors.New("HTTP Error: status code 403 (Forbidden) fetching https://internal-registry.corp.example/manifests/base.yaml")
 
 	sanitized := sanitizeKrustyError(rawErr)
 	if sanitized == nil {
@@ -154,26 +163,39 @@ func TestSanitizeKrustyError_HTTPErrorSanitized(t *testing.T) {
 	}
 
 	msg := sanitized.Error()
-	if strings.Contains(msg, "internal-registry.corp.example") {
-		t.Errorf("sanitized error leaks hostname: %q", msg)
+	// No credentials present → full context preserved.
+	if !strings.Contains(msg, "internal-registry.corp.example") {
+		t.Errorf("redact-and-preserve must keep hostname for diagnostics, got: %q", msg)
 	}
-	if strings.Contains(msg, "secret.yaml") {
-		t.Errorf("sanitized error leaks file path: %q", msg)
+	if !strings.Contains(msg, "base.yaml") {
+		t.Errorf("redact-and-preserve must keep file path for diagnostics, got: %q", msg)
+	}
+	// "403" / "Forbidden" classifies as RemoteAuthenticationFailed.
+	if !strings.HasPrefix(msg, "RemoteAuthenticationFailed:") {
+		t.Errorf("expected RemoteAuthenticationFailed reason-code prefix, got: %q", msg)
 	}
 }
 
-// TestSanitizeKrustyError_NonFetchErrorPassedThrough verifies that a krusty
-// error that is NOT a remote-fetch failure (e.g. a local YAML parse error, a
-// missing resource file) is also sanitized — we apply a uniform sanitization
-// policy so that any krusty error is safe to surface.
-func TestSanitizeKrustyError_NonFetchErrorPassedThrough(t *testing.T) {
-	// A local YAML error from krusty — should still be sanitized (no raw content)
-	// but the error must not be nil.
-	rawErr := errors.New("kustomization.yaml: error converting YAML to JSON: yaml: unmarshal errors")
+// TestSanitizeKrustyError_LocalBuildErrorPreserved verifies that a purely-local
+// krusty build error (e.g. a YAML parse failure — no remote involved) is
+// forwarded with its diagnostic text intact under a reason-code prefix. This is
+// the key regression the old blanket-redaction policy caused: it hid local
+// overlay errors behind a generic string, degrading diagnostics vs. main.
+func TestSanitizeKrustyError_LocalBuildErrorPreserved(t *testing.T) {
+	rawErr := errors.New("kustomization.yaml: error converting YAML to JSON: yaml: line 7: mapping values are not allowed in this context")
 
 	sanitized := sanitizeKrustyError(rawErr)
 	if sanitized == nil {
-		t.Fatal("sanitizeKrustyError: expected non-nil error for krusty build error, got nil")
+		t.Fatal("sanitizeKrustyError: expected non-nil error for local build error, got nil")
+	}
+	msg := sanitized.Error()
+	// The actionable local detail MUST survive (no credentials to redact).
+	if !strings.Contains(msg, "mapping values are not allowed") {
+		t.Errorf("redact-and-preserve must keep local build diagnostic, got: %q", msg)
+	}
+	// A local error with no remote keyword classifies as the default reason.
+	if !strings.HasPrefix(msg, "KustomizeBuildFailed:") {
+		t.Errorf("expected KustomizeBuildFailed reason-code prefix for local error, got: %q", msg)
 	}
 }
 
@@ -182,13 +204,14 @@ func TestSanitizeKrustyError_NonFetchErrorPassedThrough(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestKrustyRunWrapper_FetchFailureProducesRenderError verifies that when
-// krust.Run returns a raw git-exec error containing a URL, Render() propagates
-// a render error (not nil) and the URL is not present in the error message.
+// krust.Run returns a raw git-exec error containing a URL (no credentials),
+// Render() propagates a render error (not nil) and PRESERVES the actionable
+// diagnostic under a reason-code prefix (redact-and-preserve policy).
 func TestKrustyRunWrapper_FetchFailureProducesRenderError(t *testing.T) {
 	root := buildMinimalKustomizeRoot(t)
 	src := buildKustomizeSourceForRoot(t, root)
 
-	// Inject a raw git-exec error containing a URL.
+	// Inject a raw git-exec error containing a (credential-free) URL.
 	syntheticErr := errors.New("failed to run 'git fetch --depth=1 https://private.corp.example/sensitive/repo HEAD': exit status 128\nfatal: unable to access 'https://private.corp.example/sensitive/repo/': Could not resolve host")
 	withKrustyRunHook(t, syntheticErr)
 
@@ -202,18 +225,21 @@ func TestKrustyRunWrapper_FetchFailureProducesRenderError(t *testing.T) {
 	if ms != nil {
 		t.Errorf("Render: expected nil manifests on failure, got %d manifests", len(ms))
 	}
-	// The error message must not echo the raw URL.
 	msg := err.Error()
-	if strings.Contains(msg, "private.corp.example") {
-		t.Errorf("Render error leaks hostname in message: %q", msg)
+	// The diagnostic carries no credentials, so host/repo context is PRESERVED
+	// (it is exactly what an operator needs to debug an unreachable host).
+	if !strings.Contains(msg, "private.corp.example") {
+		t.Errorf("redact-and-preserve must keep the (credential-free) host context, got: %q", msg)
 	}
-	if strings.Contains(msg, "sensitive/repo") {
-		t.Errorf("Render error leaks repo path in message: %q", msg)
+	// Classified as unreachable ("Could not resolve host").
+	if !strings.Contains(msg, "RemoteUnreachable:") {
+		t.Errorf("expected RemoteUnreachable reason-code prefix, got: %q", msg)
 	}
 }
 
 // TestKrustyRunWrapper_CredentialBearingFetchError verifies that a fetch error
-// containing embedded credentials is sanitized end-to-end through Render().
+// containing embedded credentials has ONLY the credentials redacted end-to-end
+// through Render(), while the host/repo context is preserved.
 func TestKrustyRunWrapper_CredentialBearingFetchError(t *testing.T) {
 	root := buildMinimalKustomizeRoot(t)
 	src := buildKustomizeSourceForRoot(t, root)
@@ -227,19 +253,26 @@ func TestKrustyRunWrapper_CredentialBearingFetchError(t *testing.T) {
 		t.Fatal("Render: expected error for krusty failure, got nil")
 	}
 	msg := err.Error()
+	// The credential substrings MUST be gone.
 	if strings.Contains(msg, "ghp_TOKENSECRET123") {
 		t.Errorf("Render error leaks token: %q", msg)
 	}
 	if strings.Contains(msg, "deploy-token") {
 		t.Errorf("Render error leaks username: %q", msg)
 	}
-	if strings.Contains(msg, "private-repo") {
-		t.Errorf("Render error leaks repo name: %q", msg)
+	// A redaction marker signals a credential was present.
+	if !strings.Contains(msg, "[REDACTED]") {
+		t.Errorf("expected [REDACTED] marker where credentials were stripped, got: %q", msg)
+	}
+	// The non-sensitive host/repo context IS preserved.
+	if !strings.Contains(msg, "github.com/org/private-repo") {
+		t.Errorf("redact-and-preserve must keep the host/repo context, got: %q", msg)
 	}
 }
 
 // TestKrustyRunWrapper_HTTPNon2xxProducesRenderError verifies that an HTTP
-// non-2xx error from krusty's file loader produces a render error (fail-closed).
+// non-2xx error from krusty's file loader produces a render error (fail-closed)
+// that preserves the (credential-free) URL context under a reason-code prefix.
 func TestKrustyRunWrapper_HTTPNon2xxProducesRenderError(t *testing.T) {
 	root := buildMinimalKustomizeRoot(t)
 	src := buildKustomizeSourceForRoot(t, root)
@@ -254,11 +287,13 @@ func TestKrustyRunWrapper_HTTPNon2xxProducesRenderError(t *testing.T) {
 		t.Fatal("Render: expected error for HTTP 404, got nil")
 	}
 	msg := err.Error()
-	if strings.Contains(msg, "cdn.internal.corp.example") {
-		t.Errorf("Render error leaks internal hostname: %q", msg)
+	// No credentials in this URL, so the context is PRESERVED for debugging.
+	if !strings.Contains(msg, "cdn.internal.corp.example") {
+		t.Errorf("redact-and-preserve must keep the (credential-free) host context, got: %q", msg)
 	}
-	if strings.Contains(msg, "bases/v2/kustomization.yaml") {
-		t.Errorf("Render error leaks internal path: %q", msg)
+	// Classified as not-found (404).
+	if !strings.Contains(msg, "RemoteNotFound:") {
+		t.Errorf("expected RemoteNotFound reason-code prefix, got: %q", msg)
 	}
 }
 

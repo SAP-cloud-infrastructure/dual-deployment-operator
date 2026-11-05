@@ -1117,7 +1117,7 @@ func TestPreflightSHAGate_StrictRejectsTag(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - https://github.com/org/repo?ref=v1.2.3
+  - github.com/org/repo//overlays/prod?ref=v1.2.3
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1138,7 +1138,7 @@ func TestPreflightSHAGate_StrictRejectsBranch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - https://github.com/org/repo?ref=main
+  - github.com/org/repo//overlays/prod?ref=main
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1159,7 +1159,7 @@ func TestPreflightSHAGate_StrictAcceptsSHA(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - https://github.com/org/repo?ref=0123456789abcdef0123456789abcdef01234567
+  - github.com/org/repo//overlays/prod?ref=0123456789abcdef0123456789abcdef01234567
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1220,7 +1220,7 @@ func TestPreflightSHAGate_StrictNoNetworkCalls(t *testing.T) {
 			kust: `apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - https://unreachable.invalid/org/repo?ref=my-tag
+  - github.com/org/repo?ref=my-tag
 `,
 		},
 		{
@@ -1749,5 +1749,214 @@ func TestReadKustomizationBounded_NoCredentialLeakOnEvalSymlinksError(t *testing
 	}
 	if err != nil && strings.Contains(err.Error(), "ANOTHER_SECRET") {
 		t.Errorf("symlink target credential leaked in readKustomizationBounded error: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Strict-mode acceptance matrix (D2'): krusty v0.21.1 dispatches any http(s)
+// URL to its HTTP file loader FIRST (accumulateFile → IsRemoteFile checks only
+// the scheme), falling back to a git clone only on failure. So an https:// URL
+// in a resource-like field (resources/bases, and path-valued
+// generators/transformers/validators) can be served arbitrary content over
+// plain HTTP regardless of ?ref= — the pin is not honored. The components field
+// is the exception: upstream calls Loader.New directly, taking the git route.
+//
+// These tests lock the matrix: https:// git-dir refs are rejected in strict
+// mode outside components (regardless of // or .git), accepted inside
+// components; scheme-less github.com shorthand reaches git and is accepted
+// everywhere; raw.githubusercontent.com SHA-pinned files are accepted in
+// resource-like fields but rejected in components (which needs directories);
+// and a remote value in a local-only field is always rejected in strict mode.
+// ---------------------------------------------------------------------------
+
+// writeKust is a small helper: writes a kustomization.yaml with the given body
+// into a fresh temp dir and returns the dir.
+func writeKust(t *testing.T, body string) string {
+	t.Helper()
+	root := t.TempDir()
+	content := "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\n" + body
+	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// TestPreflightSHAGate_StrictRejectsHTTPSGitDirOutsideComponents asserts that an
+// https:// git-directory reference in resources/bases is rejected in strict
+// mode even when it carries a full 40-hex SHA, because krusty would HTTP-GET it
+// before ever consulting git (so ?ref= pins nothing). All three spellings
+// (repo-root, //subpath, .git/subpath) must be rejected.
+func TestPreflightSHAGate_StrictRejectsHTTPSGitDirOutsideComponents(t *testing.T) {
+	sha := "0123456789abcdef0123456789abcdef01234567"
+	cases := []struct {
+		name string
+		ref  string
+	}{
+		{"repo-root", "https://github.com/org/repo?ref=" + sha},
+		{"double-slash-subpath", "https://github.com/org/repo//overlays/prod?ref=" + sha},
+		{"dot-git-subpath", "https://github.com/org/repo.git/overlays/prod?ref=" + sha},
+	}
+	for _, field := range []string{"resources", "bases"} {
+		for _, tc := range cases {
+			t.Run(field+"/"+tc.name, func(t *testing.T) {
+				root := writeKust(t, field+":\n  - "+tc.ref+"\n")
+				err := preflightSHAGate(root, root, true)
+				if err == nil {
+					t.Fatalf("expected strict rejection of https:// git-dir ref %q in %s, got nil", tc.ref, field)
+				}
+				// Must not leak the raw URL.
+				if strings.Contains(err.Error(), "github.com/org/repo") {
+					t.Errorf("error leaks raw URL: %v", err)
+				}
+			})
+		}
+	}
+}
+
+// TestPreflightSHAGate_StrictAcceptsHTTPSGitDirInComponents asserts that the
+// same https:// git-directory ref that is rejected in resources is ACCEPTED in
+// the components field (upstream takes the git route there) when SHA-pinned.
+func TestPreflightSHAGate_StrictAcceptsHTTPSGitDirInComponents(t *testing.T) {
+	sha := "0123456789abcdef0123456789abcdef01234567"
+	cases := []string{
+		"https://github.com/org/repo//components/base?ref=" + sha,
+		"https://github.com/org/repo.git/components/base?ref=" + sha,
+	}
+	for _, ref := range cases {
+		t.Run(ref, func(t *testing.T) {
+			root := writeKust(t, "components:\n  - "+ref+"\n")
+			if err := preflightSHAGate(root, root, true); err != nil {
+				t.Fatalf("expected strict acceptance of SHA-pinned https:// git-dir ref in components, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestPreflightSHAGate_StrictRejectsUnpinnedHTTPSGitDirInComponents asserts that
+// even inside components, an https:// git-dir ref that is NOT SHA-pinned (tag or
+// branch) is rejected by the final SHA-pin loop.
+func TestPreflightSHAGate_StrictRejectsUnpinnedHTTPSGitDirInComponents(t *testing.T) {
+	root := writeKust(t, "components:\n  - https://github.com/org/repo//components/base?ref=v1.2.3\n")
+	err := preflightSHAGate(root, root, true)
+	if err == nil {
+		t.Fatal("expected strict rejection of unpinned https:// git-dir ref in components, got nil")
+	}
+	if !strings.Contains(err.Error(), "SHA") && !strings.Contains(err.Error(), "pin") {
+		t.Errorf("expected SHA-pin error, got: %v", err)
+	}
+}
+
+// TestPreflightSHAGate_StrictAcceptsSchemelessShorthandEverywhere asserts that a
+// scheme-less github.com shorthand ref pinned to a SHA is accepted in both
+// resources and components (it always reaches the git route).
+func TestPreflightSHAGate_StrictAcceptsSchemelessShorthandEverywhere(t *testing.T) {
+	sha := "0123456789abcdef0123456789abcdef01234567"
+	for _, field := range []string{"resources", "components", "bases"} {
+		t.Run(field, func(t *testing.T) {
+			root := writeKust(t, field+":\n  - github.com/org/repo//overlays/prod?ref="+sha+"\n")
+			if err := preflightSHAGate(root, root, true); err != nil {
+				t.Fatalf("expected strict acceptance of scheme-less shorthand in %s, got: %v", field, err)
+			}
+		})
+	}
+}
+
+// TestPreflightSHAGate_StrictRejectsRawGitHubFileInComponents asserts that a
+// raw.githubusercontent.com file URL is rejected in the components field: the
+// components field requires a directory/kustomization, not a single file. (It
+// is accepted in resources — covered by TestPreflightSHAGate_StrictAcceptsRemoteFileSHARef.)
+func TestPreflightSHAGate_StrictRejectsRawGitHubFileInComponents(t *testing.T) {
+	root := writeKust(t, "components:\n  - https://raw.githubusercontent.com/org/repo/0123456789abcdef0123456789abcdef01234567/config.yaml\n")
+	err := preflightSHAGate(root, root, true)
+	if err == nil {
+		t.Fatal("expected strict rejection of raw.githubusercontent.com file URL in components, got nil")
+	}
+}
+
+// TestPreflightSHAGate_StrictRejectsNonRawRemoteFile asserts that an https://
+// file URL (ending .yaml/.yml/.json) on a host other than
+// raw.githubusercontent.com is rejected in strict mode even with a ?ref=<sha>,
+// because the file is fetched over plain HTTP and the server can return anything.
+func TestPreflightSHAGate_StrictRejectsNonRawRemoteFile(t *testing.T) {
+	sha := "0123456789abcdef0123456789abcdef01234567"
+	cases := []string{
+		"https://example.com/manifests/config.yaml",
+		"https://cdn.internal.corp/config.yaml?ref=" + sha,
+		"https://raw.githubusercontent.com.evil.example/org/repo/" + sha + "/config.yaml",
+	}
+	for _, ref := range cases {
+		t.Run(ref, func(t *testing.T) {
+			root := writeKust(t, "resources:\n  - "+ref+"\n")
+			err := preflightSHAGate(root, root, true)
+			if err == nil {
+				t.Fatalf("expected strict rejection of non-raw remote file %q, got nil", ref)
+			}
+			if strings.Contains(err.Error(), "example.com") || strings.Contains(err.Error(), "corp") {
+				t.Errorf("error leaks host: %v", err)
+			}
+		})
+	}
+}
+
+// TestPreflightSHAGate_StrictRejectsRemoteInLocalOnlyField asserts that a remote
+// reference in a local-only field (one whose value is consumed as a local file
+// path: crds, configurations, openapi.path, patches[].path, replacements[].path,
+// generator/transformer/validator config, configMap/secretGenerator files/envs)
+// is rejected in strict mode, even if it is an otherwise-acceptable
+// SHA-pinned raw.githubusercontent.com URL.
+func TestPreflightSHAGate_StrictRejectsRemoteInLocalOnlyField(t *testing.T) {
+	sha := "0123456789abcdef0123456789abcdef01234567"
+	rawFile := "https://raw.githubusercontent.com/org/repo/" + sha + "/crd.yaml"
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"crds", "crds:\n  - " + rawFile + "\n"},
+		{"configurations", "configurations:\n  - " + rawFile + "\n"},
+		{"openapi", "openapi:\n  path: " + rawFile + "\n"},
+		{"patches-path", "patches:\n  - path: " + rawFile + "\n"},
+		{"replacements-path", "replacements:\n  - path: " + rawFile + "\n"},
+		{"configMapGenerator-files", "configMapGenerator:\n  - name: cm\n    files:\n      - " + rawFile + "\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := writeKust(t, tc.body)
+			err := preflightSHAGate(root, root, true)
+			if err == nil {
+				t.Fatalf("expected strict rejection of remote ref in local-only field %s, got nil", tc.name)
+			}
+			if !strings.Contains(err.Error(), "local-only") {
+				t.Errorf("expected a local-only-field rejection message, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestPreflightSHAGate_StrictRejectsSameURLWhenAlsoInResources asserts the
+// dedup fix (walkDir keys on raw+field): a URL that appears in BOTH components
+// (where it would be accepted) AND resources (where it must be rejected) is
+// rejected — the stricter resources occurrence is not dropped by dedup.
+func TestPreflightSHAGate_StrictRejectsSameURLWhenAlsoInResources(t *testing.T) {
+	sha := "0123456789abcdef0123456789abcdef01234567"
+	ref := "https://github.com/org/repo//base?ref=" + sha
+	root := writeKust(t, "components:\n  - "+ref+"\nresources:\n  - "+ref+"\n")
+	err := preflightSHAGate(root, root, true)
+	if err == nil {
+		t.Fatal("expected strict rejection because the same URL also appears in resources (dedup must not drop the stricter occurrence), got nil")
+	}
+	if strings.Contains(err.Error(), "github.com/org/repo") {
+		t.Errorf("error leaks raw URL: %v", err)
+	}
+}
+
+// TestPreflightSHAGate_PermissiveAllowsHTTPSGitDirInResources asserts the
+// flag-off invariant: the strict-only rules (local-only-field rejection,
+// raw-file canonicalization, HTTPS-git-dir rejection) do NOT apply in permissive
+// mode, so main's accepted inputs still render. An https:// git-dir ref in
+// resources passes the gate (no rejection) when requireSHAPinnedRemoteBases=false.
+func TestPreflightSHAGate_PermissiveAllowsHTTPSGitDirInResources(t *testing.T) {
+	root := writeKust(t, "resources:\n  - https://github.com/org/repo?ref=v1.2.3\n")
+	if err := preflightSHAGate(root, root, false); err != nil {
+		t.Fatalf("permissive mode must not apply strict rules; unexpected error: %v", err)
 	}
 }

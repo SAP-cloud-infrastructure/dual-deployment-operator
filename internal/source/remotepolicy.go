@@ -58,6 +58,44 @@ func (k refKind) String() string {
 	}
 }
 
+// kustField identifies which kustomization.yaml field a reference came from.
+// The strict-mode validation pass (D2') uses this because loader semantics
+// differ by field: upstream dispatches `resources` and `components` through
+// different code paths, and most other fetch-capable fields are local-only in
+// our strict contract.
+type kustField int
+
+const (
+	// fieldResources is the resources: field (accepts remote git dirs + files).
+	fieldResources kustField = iota
+	// fieldComponents is the components: field (upstream calls Loader.New
+	// directly; a validated HTTPS git ref here is not rejected for ambiguity).
+	fieldComponents
+	// fieldBases is the legacy bases: field (same acceptance as resources).
+	fieldBases
+	// fieldLocalOnly marks a reference drawn from a field that, under the strict
+	// contract, must resolve to a LOCAL path only (patches[].path,
+	// replacements[].path, crds, configurations, openapi.path,
+	// generator/transformer/validator config files, configMap/secret generator
+	// files/envs). A remote value in such a field is rejected in strict mode.
+	fieldLocalOnly
+)
+
+func (f kustField) String() string {
+	switch f {
+	case fieldResources:
+		return "resources"
+	case fieldComponents:
+		return "components"
+	case fieldBases:
+		return "bases"
+	case fieldLocalOnly:
+		return "local-only field"
+	default:
+		return fmt.Sprintf("kustField(%d)", int(f))
+	}
+}
+
 // RemoteRef is a classified remote reference discovered during tree walk.
 type RemoteRef struct {
 	// Raw is the original unmodified string from the kustomization field.
@@ -68,6 +106,10 @@ type RemoteRef struct {
 	// Ref is the extracted ?ref= value for refKindRemoteGitDir references;
 	// empty for refKindRemoteFile.
 	Ref string
+	// Field is the kustomization field this reference was drawn from. The
+	// strict-mode validation pass branches on it (loader semantics differ by
+	// field; most fields are local-only under the strict contract).
+	Field kustField
 }
 
 // classifyKustomizeReference classifies a single kustomize resource/component/
@@ -96,16 +138,30 @@ func classifyKustomizeReference(raw string) (refKind, string, error) {
 	// --- SSH rejection (before any URL parse so we never include the raw value) ---
 	// git@host:org/repo SCP style
 	if isSCPStyle(stripped) {
-		return 0, "", errors.New("remote reference: SCP-style SSH references are not supported; use HTTPS with authSecretRef for private repositories")
+		return 0, "", errors.New("remote reference: SCP-style SSH references are not supported; use anonymous public HTTPS, or vendor the base into the repository")
 	}
 	// ssh:// scheme
 	if startsWithIgnoreCase(stripped, "ssh://") {
-		return 0, "", errors.New("remote reference: SSH (ssh://) scheme is not supported; use HTTPS with authSecretRef for private repositories")
+		return 0, "", errors.New("remote reference: SSH (ssh://) scheme is not supported; use anonymous public HTTPS, or vendor the base into the repository")
 	}
 
 	// --- Fragment rejection ---
 	if strings.Contains(stripped, "#") {
 		return 0, "", errors.New("remote reference: URL fragments (#) are not supported in kustomize references")
+	}
+
+	// --- Username-prefixed SCP/SSH form WITHOUT a host:path colon ---
+	// krusty's repospec.go extractUsername matches a leading `user@` with the
+	// anchored pattern ^[a-zA-Z][a-zA-Z0-9-]*@ and then treats the remainder as
+	// a remote git target. A reference like "git@github.com/example/repo//base"
+	// has NO colon before the first slash, so neither isSCPStyle (needs a colon
+	// after the @) nor isSCPWithoutAt (needs a colon before the first slash)
+	// fires — isLocalPath would then classify it as a local path, the tree
+	// walker would skip it (the path does not exist on disk), and krusty would
+	// still fetch it over SSH, bypassing BOTH our SSH rejection and the SHA-pin
+	// gate. Reject any leading-username form here, before local classification.
+	if hasLeadingGitUsername(stripped) {
+		return 0, "", errors.New("remote reference: username-prefixed (user@…) git references are not supported; use anonymous public HTTPS, or vendor the base into the repository")
 	}
 
 	// --- Local path: no scheme, starts with ./ ../ a bare name, or absolute ---
@@ -145,7 +201,7 @@ func classifyKustomizeReference(raw string) (refKind, string, error) {
 	// SCP-without-@: hostname:path where colon precedes any slash (looks like a
 	// remote address but no git@ prefix). These are not valid local paths.
 	if isSCPWithoutAt(stripped) {
-		return 0, "", errors.New("remote reference: SCP-style references without 'user@' prefix are not supported; use HTTPS with authSecretRef for private repositories")
+		return 0, "", errors.New("remote reference: SCP-style references without 'user@' prefix are not supported; use anonymous public HTTPS, or vendor the base into the repository")
 	}
 	// Any remaining unrecognized form: fail closed.
 	return 0, "", errors.New("remote reference: unrecognized reference form; only HTTPS remote bases and relative local paths are supported")
@@ -154,6 +210,24 @@ func classifyKustomizeReference(raw string) (refKind, string, error) {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+// reGitUsername matches a leading git "username@" prefix using the same anchored
+// pattern krusty uses (api/internal/git/repospec.go extractUsername):
+// ^[A-Za-z][A-Za-z0-9-]*@ . A reference carrying such a prefix is a remote git
+// target to krusty regardless of whether a host:path colon is present.
+var reGitUsername = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]*@`)
+
+// hasLeadingGitUsername reports whether raw begins with a git "user@" prefix
+// (no URL scheme). It deliberately matches krusty's extractUsername so DDO
+// rejects exactly the forms krusty would otherwise fetch over SSH.
+func hasLeadingGitUsername(raw string) bool {
+	// A scheme-bearing URL (https://user@host) is handled by the URL parser,
+	// which rejects embedded userinfo separately.
+	if strings.Contains(raw, "://") {
+		return false
+	}
+	return reGitUsername.MatchString(raw)
+}
 
 // isSCPStyle detects git-style SCP URLs: user@host:path (no scheme).
 // We match the pattern: optional chars, then a '@', then a ':', no '://' present.
@@ -255,9 +329,18 @@ func classifyHTTPURL(raw string) (refKind, string, error) {
 		return 0, "", errors.New("remote reference: malformed URL")
 	}
 
+	// Reject plaintext http:// — only HTTPS remote bases are allowed. isHTTPURL
+	// matches both schemes so we gate here on the parsed scheme. krusty/git would
+	// otherwise fetch over cleartext; a Pod-level GIT_ALLOW_PROTOCOL=https covers
+	// git fetches for refs *inside* a remote base, but this check covers the
+	// top-level reference DDO classifies.
+	if strings.EqualFold(u.Scheme, "http") {
+		return 0, "", errors.New("remote reference: plaintext http:// is not supported; use HTTPS")
+	}
+
 	// Reject embedded userinfo (credentials in URL)
 	if u.User != nil {
-		return 0, "", errors.New("remote reference: URL must not embed credentials; use authSecretRef instead")
+		return 0, "", errors.New("remote reference: URL must not embed credentials; use anonymous public HTTPS, or vendor the base into the repository")
 	}
 
 	// Fragment already rejected above, but double-check via parsed form
@@ -407,12 +490,100 @@ func pathSegmentCount(path string) int {
 // Tree walk
 // ---------------------------------------------------------------------------
 
-// kustomizationYAML is a minimal typed struct for parsing kustomization.yaml.
-// We only need the fields that can contain references to other resources.
+// kustomizationYAML is a typed struct for parsing kustomization.yaml. We parse
+// every top-level field that can carry a reference to another resource, patch,
+// generator config, or data file — not only resources/components/bases. The
+// strict-mode policy (D1') enforces its contract on the TOP-LEVEL references
+// the operator parses here, before handing the root to krusty. Transitive refs
+// that krusty resolves internally are NOT pre-enforced (same model as Flux /
+// Argo CD): they are contained operationally (NetworkPolicy egress + least-
+// privilege credentials) plus the always-on HTTPS-only and transport-timeout
+// hardening.
+//
+// Field groups:
+//   - Resource-like (may legitimately be remote): resources, components, bases.
+//   - Local-only under the strict contract (a remote value is rejected in
+//     strict mode): patches[].path, patchesJson6902[].path,
+//     patchesStrategicMerge[] (file-path form), replacements[].path, crds,
+//     configurations, openapi.path, and the generator/transformer/validator
+//     config-file paths + configMapGenerator/secretGenerator files/envs.
 type kustomizationYAML struct {
+	// Resource-like fields: remote values permitted (subject to SHA-pin gate).
 	Resources  []string `json:"resources,omitempty"`
 	Components []string `json:"components,omitempty"`
 	Bases      []string `json:"bases,omitempty"`
+
+	// Plugin config references. Each entry is either a path to a config file or
+	// an inline config; built-in plugins may themselves embed remote paths, so
+	// in strict mode we reject any entry that classifies as remote and leave a
+	// documented note that inline configs are not deeply inspected.
+	Generators   []string `json:"generators,omitempty"`
+	Transformers []string `json:"transformers,omitempty"`
+	Validators   []string `json:"validators,omitempty"`
+
+	// Patch references. patches[].path and patchesJson6902[].path point to local
+	// patch files; patchesStrategicMerge entries may be an inline patch document
+	// OR a file path — we only treat the file-path form as a reference.
+	Patches               []patchEntry       `json:"patches,omitempty"`
+	PatchesJSON6902       []patchJSON6902    `json:"patchesJson6902,omitempty"`
+	PatchesStrategicMerge []string           `json:"patchesStrategicMerge,omitempty"`
+	Replacements          []replacementEntry `json:"replacements,omitempty"`
+
+	// Data-generator sources. files[] and envs[] entries use the upstream
+	// "key=path" / "path" syntax; the path portion is the reference.
+	ConfigMapGenerator []generatorArgs `json:"configMapGenerator,omitempty"`
+	SecretGenerator    []generatorArgs `json:"secretGenerator,omitempty"`
+
+	// Schema / openapi references (local-only in strict mode).
+	Crds           []string      `json:"crds,omitempty"`
+	Configurations []string      `json:"configurations,omitempty"`
+	OpenAPI        *openAPIField `json:"openapi,omitempty"`
+}
+
+// patchEntry mirrors the upstream patches[] element (we only need Path).
+type patchEntry struct {
+	Path string `json:"path,omitempty"`
+	// Patch is the inline patch body (ignored for reference extraction).
+	Patch string `json:"patch,omitempty"`
+}
+
+// patchJSON6902 mirrors the upstream patchesJson6902[] element (Path only).
+type patchJSON6902 struct {
+	Path string `json:"path,omitempty"`
+}
+
+// replacementEntry mirrors the upstream replacements[] element (Path only; the
+// inline `source`/`targets` form carries no external reference).
+type replacementEntry struct {
+	Path string `json:"path,omitempty"`
+}
+
+// generatorArgs mirrors the upstream configMapGenerator/secretGenerator element
+// insofar as we need the file/env source paths.
+type generatorArgs struct {
+	Files []string `json:"files,omitempty"`
+	Envs  []string `json:"envs,omitempty"`
+	// Env is the legacy singular form (older kustomization schema).
+	Env string `json:"env,omitempty"`
+}
+
+// openAPIField mirrors the upstream openapi: field (we only need Path).
+type openAPIField struct {
+	Path string `json:"path,omitempty"`
+}
+
+// generatorArgSourcePath extracts the path portion from a configMapGenerator /
+// secretGenerator files[]/envs[] entry, which uses the upstream "key=path"
+// syntax (an "=" separates an optional key from the source path). When no "="
+// is present the whole string is the path. We must NOT classify the entire
+// "key=path" string, or a key containing "://" would be misread.
+func generatorArgSourcePath(entry string) string {
+	// Upstream (kustomize api/types) treats the FIRST "=" as the key/path
+	// separator for files[]/envs[]. A path cannot contain "=" in this syntax.
+	if _, path, found := strings.Cut(entry, "="); found {
+		return path
+	}
+	return entry
 }
 
 // treeWalkKustomize walks the local kustomization tree rooted at rootDir,
@@ -514,20 +685,20 @@ func walkDir(absRoot, dir string, visited, seen map[string]bool, remotes *[]Remo
 		return nil
 	}
 
-	// Collect all reference fields into a freshly-allocated slice. Do NOT use
-	// append(append(kust.Resources, kust.Components...), ...): if kust.Resources
-	// has spare capacity (len < cap — not guaranteed either way by encoding/json
-	// under sigs.k8s.io/yaml), the first append would write into Resources'
-	// backing array, silently corrupting it for any later read.
-	allRefs := make([]string, 0, len(kust.Resources)+len(kust.Components)+len(kust.Bases))
-	allRefs = append(allRefs, kust.Resources...)
-	allRefs = append(allRefs, kust.Components...)
-	allRefs = append(allRefs, kust.Bases...)
+	// Collect every reference together with the field it came from. Field
+	// context is required by the strict-mode validation pass (D1'/D2'): remote
+	// values are only legitimate in resource-like fields, and loader semantics
+	// differ between resources and components. Using a freshly-allocated slice
+	// (never append-aliasing kust.Resources' backing array) is also required for
+	// correctness — see the original #r1 aliasing fix.
+	fieldRefs := collectFieldRefs(kust)
 
-	for _, raw := range allRefs {
+	for _, fr := range fieldRefs {
+		raw := fr.raw
 		if raw == "" {
 			continue
 		}
+		field := fr.field
 		kind, ref, err := classifyKustomizeReference(raw)
 		if err != nil {
 			// Finding 1: do NOT include raw in the error message.
@@ -570,19 +741,148 @@ func walkDir(absRoot, dir string, visited, seen map[string]bool, remotes *[]Remo
 				continue // file resource — boundary already checked above, skip recursion
 			}
 
+			// Only recurse into directories reached via resource-like fields.
+			// Local-only fields (patches, crds, generator configs, ...) never form
+			// a kustomization tree edge, so there is nothing to recurse into; the
+			// directory case is unreachable for them in practice, but guard anyway.
+			if field == fieldLocalOnly {
+				continue
+			}
 			if err := walkDir(absRoot, absChild, visited, seen, remotes); err != nil {
 				return err
 			}
 
 		case refKindRemoteGitDir, refKindRemoteFile:
-			// Finding 6: deduplicate by Raw value, preserving first-discovery order.
-			if !seen[raw] {
-				seen[raw] = true
-				*remotes = append(*remotes, RemoteRef{Raw: raw, Kind: kind, Ref: ref})
+			// Finding 6: deduplicate remote refs, preserving first-discovery order.
+			// Carry the field context so the strict pass can apply field-specific
+			// rules (remote values are only legitimate in resource-like fields, and
+			// an HTTPS git-dir ref is admissible under components but not under
+			// resources/bases).
+			//
+			// The dedup key is (raw + field), NOT raw alone: the same URL can
+			// appear in both a components field (strict-accept) and a
+			// resources/bases field (strict-reject). Keying on raw alone would keep
+			// only the first-discovered occurrence and could silently drop the
+			// stricter resources occurrence, letting an unsafe fetch through. Keying
+			// on (raw, field) keeps both so validateStrictRemoteRefs sees — and can
+			// reject — the resources occurrence.
+			key := raw + "\x00" + field.String()
+			if !seen[key] {
+				seen[key] = true
+				*remotes = append(*remotes, RemoteRef{Raw: raw, Kind: kind, Ref: ref, Field: field})
 			}
 		}
 	}
 	return nil
+}
+
+// fieldRef pairs a raw reference string with the kustomization field it came
+// from, so the strict-mode validation pass can apply field-specific rules.
+type fieldRef struct {
+	raw   string
+	field kustField
+}
+
+// collectFieldRefs gathers every reference string from a parsed kustomization,
+// tagged with its originating field. Resource-like fields (resources/
+// components/bases) may legitimately be remote; every other fetch-capable field
+// is marked fieldLocalOnly so the strict pass rejects a remote value there.
+//
+// Order is deterministic: resource-like fields first (resources, components,
+// bases) in their original slice order, then local-only fields. This preserves
+// the pre-existing DFS/first-discovery ordering for the common case and keeps
+// error messages stable.
+//
+// A freshly-allocated slice is returned; we never append into any input slice's
+// backing array (the #r1 aliasing invariant).
+func collectFieldRefs(kust *kustomizationYAML) []fieldRef {
+	refs := make([]fieldRef, 0,
+		len(kust.Resources)+len(kust.Components)+len(kust.Bases))
+
+	for _, r := range kust.Resources {
+		refs = append(refs, fieldRef{raw: r, field: fieldResources})
+	}
+	for _, c := range kust.Components {
+		refs = append(refs, fieldRef{raw: c, field: fieldComponents})
+	}
+	for _, b := range kust.Bases {
+		refs = append(refs, fieldRef{raw: b, field: fieldBases})
+	}
+
+	// Local-only fields. A remote value in any of these is rejected in strict
+	// mode (fieldLocalOnly). In permissive mode they are classified for the
+	// always-on security invariants (SSH/credential/fragment rejection) but a
+	// remote git-dir/file value is simply collected like any other remote ref.
+	addLocal := func(s string) {
+		refs = append(refs, fieldRef{raw: s, field: fieldLocalOnly})
+	}
+	for _, g := range kust.Generators {
+		addLocal(g)
+	}
+	for _, t := range kust.Transformers {
+		addLocal(t)
+	}
+	for _, v := range kust.Validators {
+		addLocal(v)
+	}
+	for _, p := range kust.Patches {
+		if p.Path != "" {
+			addLocal(p.Path)
+		}
+	}
+	for _, p := range kust.PatchesJSON6902 {
+		if p.Path != "" {
+			addLocal(p.Path)
+		}
+	}
+	for _, p := range kust.PatchesStrategicMerge {
+		// A patchesStrategicMerge entry is EITHER an inline patch document OR a
+		// file path. Inline patches contain YAML/newlines or a leading "apiVersion"
+		// etc.; a bare path does not. We only treat it as a reference when it looks
+		// like a single-line path (no newline). classifyKustomizeReference then
+		// decides local vs remote; inline multiline docs are skipped here.
+		if p != "" && !strings.ContainsAny(p, "\n") {
+			addLocal(p)
+		}
+	}
+	for _, r := range kust.Replacements {
+		if r.Path != "" {
+			addLocal(r.Path)
+		}
+	}
+	for _, g := range kust.ConfigMapGenerator {
+		for _, f := range g.Files {
+			addLocal(generatorArgSourcePath(f))
+		}
+		for _, e := range g.Envs {
+			addLocal(generatorArgSourcePath(e))
+		}
+		if g.Env != "" {
+			addLocal(generatorArgSourcePath(g.Env))
+		}
+	}
+	for _, g := range kust.SecretGenerator {
+		for _, f := range g.Files {
+			addLocal(generatorArgSourcePath(f))
+		}
+		for _, e := range g.Envs {
+			addLocal(generatorArgSourcePath(e))
+		}
+		if g.Env != "" {
+			addLocal(generatorArgSourcePath(g.Env))
+		}
+	}
+	for _, c := range kust.Crds {
+		addLocal(c)
+	}
+	for _, c := range kust.Configurations {
+		addLocal(c)
+	}
+	if kust.OpenAPI != nil && kust.OpenAPI.Path != "" {
+		addLocal(kust.OpenAPI.Path)
+	}
+
+	return refs
 }
 
 // resolveAndCheckBoundary resolves path (which may contain symlinks) to its
@@ -821,6 +1121,16 @@ func preflightSHAGate(isolationRoot, entryPoint string, requireSHAPinnedRemoteBa
 		return nil
 	}
 
+	// Phase 2a (D2'): strict-mode acceptance rules. Classification stays flag-
+	// agnostic (Phase 1), so these field/kind-specific rejections apply ONLY in
+	// strict mode — flag-off behavior is unchanged. This rejects remote values
+	// in local-only fields, closes the HTTP-first remote-file bypass (accepting
+	// only canonical raw.githubusercontent.com SHA-pinned file URLs), and
+	// rejects ambiguous HTTPS git-dir forms outside components.
+	if err := validateStrictRemoteRefs(remotes); err != nil {
+		return err
+	}
+
 	for _, r := range remotes {
 		ref := r.Ref // already extracted by classifyKustomizeReference for git-dir refs
 		if ref == "" {
@@ -839,4 +1149,142 @@ func preflightSHAGate(isolationRoot, entryPoint string, requireSHAPinnedRemoteBa
 		}
 	}
 	return nil
+}
+
+// validateStrictRemoteRefs applies the strict-mode (D2') acceptance rules to the
+// remote references discovered by the tree walk. It is called ONLY when
+// requireSHAPinnedRemoteBases is true, so permissive (flag-off) behavior is
+// completely unaffected.
+//
+// Rules (per the Flux/Argo-CD-aligned top-level model + oracle guidance):
+//
+//  1. A remote value in a local-only field (patches/replacements/crds/
+//     configurations/openapi/generator-transformer-validator configs/
+//     configMap+secretGenerator files/envs) is rejected: those fields must
+//     resolve to a local path under the strict contract.
+//
+//  2. A remote-FILE reference (refKindRemoteFile) is accepted only when it is a
+//     canonical raw.githubusercontent.com URL whose ref path segment is a full
+//     40-hex SHA. Every other remote-file URL is rejected. This closes the
+//     bypass where krusty's loader does an HTTP GET FIRST for any https URL
+//     ending .yaml/.yml/.json (or a git-looking https://host/org/repo?ref=<sha>),
+//     so a server could return arbitrary unpinned content.
+//
+//  3. An ambiguous HTTPS git-dir reference is rejected EXCEPT in the components
+//     field. Upstream dispatches components through Loader.New directly (not the
+//     HTTP-first file branch), so a validated HTTPS git ref there is not
+//     ambiguous; in resources/bases the same spelling can be served over HTTP.
+//
+// All messages are sanitized: the raw URL is never echoed.
+func validateStrictRemoteRefs(remotes []RemoteRef) error {
+	for _, r := range remotes {
+		// Rule 1: remote values are only legitimate in resource-like fields.
+		if r.Field == fieldLocalOnly {
+			return fmt.Errorf(
+				"preflight: remote reference found in a local-only field (%s); "+
+					"in strict mode patches, replacements, crds, configurations, openapi, "+
+					"generator/transformer/validator configs, and configMap/secretGenerator "+
+					"sources must reference local paths only — vendor the content into the repository",
+				r.Field,
+			)
+		}
+
+		switch r.Kind {
+		case refKindRemoteFile:
+			// Rule 2a: components must be directories (upstream dispatches them
+			// through Loader.New, which expects a kustomization root, not a
+			// single file). A raw.githubusercontent.com file URL — even a
+			// canonical SHA-pinned one — is therefore rejected in components.
+			if r.Field == fieldComponents {
+				return errors.New(
+					"preflight: remote file reference in a components field; " +
+						"components must reference a kustomization directory, not a single file — " +
+						"use a SHA-pinned git directory reference")
+			}
+			// Rule 2b: only canonical raw.githubusercontent.com SHA-pinned files.
+			if !isCanonicalRawGitHubFile(r.Raw) {
+				return errors.New(
+					"preflight: remote file reference is not an immutable raw.githubusercontent.com " +
+						"URL pinned to a 40-character commit SHA; in strict mode a remote file must be " +
+						"https://raw.githubusercontent.com/<owner>/<repo>/<40-hex-sha>/<path> " +
+						"(any other file URL is fetched over plain HTTP and cannot be pinned) — " +
+						"use a SHA-pinned git directory reference or vendor the file")
+			}
+		case refKindRemoteGitDir:
+			// Rule 3: reject ordinary HTTPS git-directory references outside
+			// components, regardless of a `//` or `.git` boundary.
+			//
+			// krusty v0.21.1 (kusttarget.go accumulateResources) tries
+			// accumulateFile FIRST for resources/bases/path-valued
+			// generators|transformers|validators. fileloader.IsRemoteFile
+			// returns true for ANY http/https scheme (no host/extension/.git/`//`
+			// check), so an https:// git-dir URL is HTTP-GET'd before git is ever
+			// consulted — a server can return arbitrary unpinned YAML and the
+			// ?ref=<sha> pins nothing. The `//` / `.git` markers only split
+			// repo/subpath AFTER the git route is already chosen; they do NOT
+			// select the git route.
+			//
+			// components is exempt: upstream dispatches it through Loader.New
+			// directly (skipping the file attempt), so an https:// git-dir ref
+			// there reaches git and a full-SHA ?ref= is honored.
+			//
+			// Accepted git-dir forms in resource-like fields are therefore only
+			// the scheme-less github.com/<owner>/<repo>[//<path>]?ref=<sha>
+			// shorthand (classifyKustomizeReference routes it here without the
+			// https HTTP-file branch) and the legacy git::https://… prefix
+			// (both make isHTTPURL(r.Raw) false). Those flow through to the
+			// SHA-pin loop below.
+			if r.Field != fieldComponents && isHTTPURL(r.Raw) {
+				return errors.New(
+					"preflight: HTTPS git-directory reference in a resources/bases field; " +
+						"in strict mode krusty fetches any https:// reference over plain HTTP before " +
+						"consulting git (so ?ref= pins nothing and a server may return arbitrary " +
+						"content) — use the scheme-less github.com/<owner>/<repo>//<path>?ref=<40-hex-sha> " +
+						"shorthand (which reaches git), a raw.githubusercontent.com/<owner>/<repo>/<40-hex-sha>/<file> " +
+						"URL for a single file, or place a git directory base under components")
+			}
+		case refKindLocal:
+			// Unreachable: local refs are not collected into remotes.
+		}
+	}
+	return nil
+}
+
+// isCanonicalRawGitHubFile reports whether raw is a canonical, SHA-pinned
+// raw.githubusercontent.com file URL of the exact form
+// https://raw.githubusercontent.com/<owner>/<repo>/<40-hex-sha>/<path...>.
+//
+// It fails closed on anything non-canonical: a non-HTTPS scheme, a wrong host,
+// a non-default port, userinfo, a query/fragment, a path that does not have the
+// owner/repo/<sha>/file shape, or a ref segment that is not a full 40-hex SHA.
+// raw.githubusercontent.com serves a fixed blob at a commit SHA, so a pinned
+// URL here is immutable even though the fetch is plain HTTP.
+func isCanonicalRawGitHubFile(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	if !strings.EqualFold(u.Scheme, "https") {
+		return false
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	// Host must be exactly raw.githubusercontent.com with no explicit port.
+	if !strings.EqualFold(u.Host, "raw.githubusercontent.com") {
+		return false
+	}
+	// Path layout: /<owner>/<repo>/<ref>/<file...> → at least 4 non-empty
+	// segments. Reject path-normalization tricks (., ..) and empty segments.
+	segs := strings.Split(strings.TrimPrefix(u.EscapedPath(), "/"), "/")
+	if len(segs) < 4 {
+		return false
+	}
+	for _, s := range segs {
+		if s == "" || s == "." || s == ".." {
+			return false
+		}
+	}
+	// The 3rd segment (index 2) is the ref; it must be a full 40-hex SHA.
+	return isSHAPinned(segs[2])
 }
