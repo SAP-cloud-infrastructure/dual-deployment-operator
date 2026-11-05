@@ -25,94 +25,69 @@ COPY . .
 # by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o manager cmd/main.go
 
-# ── git provider ──────────────────────────────────────────────────────────────
+# ── final image ───────────────────────────────────────────────────────────────
 # krusty (sigs.k8s.io/kustomize/api) resolves remote kustomize bases by shelling
 # out to `git` via ClonerUsingGitExec — a pure-Go git implementation is NOT used
-# for this code path. The operator therefore needs a real git binary at runtime.
+# for this code path. The operator therefore needs a real git binary at runtime,
+# AND a POSIX shell: git's `git submodule` is a /bin/sh script (git-submodule),
+# and krusty's cloner always runs `git submodule update --init --recursive`
+# unless the base ref carries `submodules=false`. A shell-less distroless image
+# cannot execute git-submodule and fails every default-form git base with
+# exit 128 (reported in PR #62 review).
 #
-# We install git from the same Debian 13 (trixie) base that distroless/base-debian13
-# is built from, so that glibc versions match exactly (no ABI mismatch at runtime).
-# The binary and its shared-library closure are collected here; only those files are
-# copied into the final distroless stage — no shell, no package manager, no apt.
+# We therefore ship git on a minimal, shell-bearing Debian base rather than a
+# distroless image — aligning with the industry norm for git-fetching Kubernetes
+# controllers (Argo CD ships git + a shell + Git LFS on a Debian/Ubuntu base;
+# Flux's source-controller likewise bundles a real git). A hand-assembled
+# shared-library closure copied into distroless was tried previously but could
+# not satisfy the git-submodule shell requirement without re-introducing a shell,
+# so the minimal-Debian base is both simpler and correct.
 #
-# Pattern reference: GoogleContainerTools/distroless README § "multi-stage builds"
-# (https://github.com/GoogleContainerTools/distroless) — copy binaries and their
-# shared-library closure from a builder stage into a distroless base image.
-FROM debian:trixie-slim AS git-provider
+# Using an apt-based final image also means the dpkg package database
+# (/var/lib/dpkg/status) natively records git, libcurl and gnutls, so container
+# CVE scanners can see and assess them (the previous distroless image copied the
+# binaries without any dpkg metadata, making them invisible to scanners —
+# PR #62 review finding).
+FROM debian:trixie-slim
+WORKDIR /
+
+# Install git (+ its /bin/sh git-submodule helper) and CA certificates for HTTPS
+# remote bases. --no-install-recommends keeps the image minimal; we drop the apt
+# lists afterwards to avoid shipping a stale package index.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends git ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Collect the shared-library closure of /usr/bin/git AND the git-core transport
-# helpers into /git-libs.  We enumerate every -executable file under git-core
-# and run ldd on each; ldd exits non-zero for non-ELF files (scripts) — we
-# suppress those errors with "|| true" so the pipeline keeps running.  Scanning
-# the helpers is essential: git-remote-https links against libcurl-gnutls which
-# /usr/bin/git itself does not, and omitting it would break HTTPS remote bases.
-#
-# Path normalisation: on Debian trixie /lib is a symlink → usr/lib.  The ldd
-# output therefore contains paths like /lib/aarch64-linux-gnu/… which, when
-# collected with --parents into /git-libs, create a /git-libs/lib/ directory.
-# In the distroless final stage /lib is ALSO a symlink → usr/lib; Docker
-# refuses to COPY a plain directory over a symlink, aborting the build.
-#
-# Fix strategy:
-#  1. Rewrite /lib/ → /usr/lib/ in every ldd-reported path (both are the same
-#     filesystem location; /lib is a symlink to usr/lib on Debian trixie).
-#  2. For each collected path, preserve the soname symlink (cp -a) AND also
-#     copy the symlink's real-file target (readlink -f + cp -a --parents).
-#     Without this second step, ldd symlinks like libpcre2-8.so.0 (→
-#     libpcre2-8.so.0.14.0) are staged as dangling symlinks because cp -a
-#     copies the symlink entry but not the file it points to.
-#
-# Fail-closed build-time guards (both must pass or the build aborts):
-#   1. At least one library was collected (guards against a silent empty closure).
-#   2. libcurl-gnutls is present (guards the HTTPS transport chain specifically).
-RUN mkdir -p /git-libs && \
-    paths=$(find /usr/bin/git /usr/lib/git-core/ -type f -executable -print | \
-      xargs -I '{}' sh -c 'ldd "$1" 2>/dev/null || true' _ {} | \
-      awk '/=>/ { print $3 } /^\// { print $1 }' | \
-      grep -E '^/' | sort -u | \
-      sed 's|^/lib/|/usr/lib/|' | sort -u) && \
-    echo "$paths" | while read p; do \
-      cp -a --parents "$p" /git-libs 2>/dev/null || true; \
-      if [ -L "$p" ]; then \
-        real=$(readlink -f "$p"); \
-        real=$(echo "$real" | sed 's|^/lib/|/usr/lib/|'); \
-        cp -a --parents "$real" /git-libs 2>/dev/null || true; \
-      fi; \
-    done && \
-    lib_count=$(find /git-libs -name '*.so*' | wc -l) && \
-    [ "$lib_count" -gt 0 ] || { echo "ERROR: git shared-lib collection produced 0 libraries"; exit 1; } && \
-    find /git-libs -name 'libcurl-gnutls*' | grep -q . || \
-      { echo "ERROR: libcurl-gnutls not found in git-libs — HTTPS transport will fail"; exit 1; }
+# Fail-closed build-time smoke tests (offline, no network required so the build
+# stays hermetic): abort the build if the git binary is missing/broken or if the
+# git-submodule /bin/sh helper cannot be executed. These turn the runtime
+# failures from PR #62 (exit 128 on `git submodule` in the shell-less image) into
+# build-time failures. The HTTPS-fetch path is exercised separately by the
+# combined-image render test (which needs network and therefore does not belong
+# in a hermetic image build).
+RUN ["git", "version"]
+# `git submodule` is the /bin/sh helper that the shell-less image could not run.
+# Running `git submodule status` inside an empty, freshly-initialized repository
+# executes that helper (and its `git submodule--helper` subprocess) without any
+# network; it exits 0 only if /bin/sh and the helper are present and runnable —
+# which is exactly what failed with exit 128 in the shell-less image. We init a
+# throwaway repo in a temp dir, run the helper, then remove the dir.
+RUN ["git", "-C", "/tmp", "init", "-q", "smoke-submodule-check"]
+RUN ["git", "-C", "/tmp/smoke-submodule-check", "submodule", "status"]
+RUN ["rm", "-rf", "/tmp/smoke-submodule-check"]
+# Confirm git-remote-https (the HTTPS transport helper, dynamically linked
+# against libcurl) is installed, without performing a network fetch.
+RUN ["test", "-x", "/usr/lib/git-core/git-remote-https"]
 
-# ── final image ───────────────────────────────────────────────────────────────
-# Use distroless/base (not static) as the final base image.
-# distroless/base-debian13 adds glibc, libssl, and related runtime libraries on
-# top of distroless/static-debian13; this is required because the Debian git
-# binary is dynamically linked against glibc.  We accept the slightly larger
-# image size (~20 MiB vs ~2 MiB) in exchange for a real git binary that krusty
-# can exec for remote kustomize-base resolution.
-#
-# distroless/base-debian13:nonroot runs as UID 65532 (nonroot) — same as the
-# previous distroless/static:nonroot tag — so the USER directive below is
-# unchanged and no Kubernetes securityContext changes are needed.
-FROM gcr.io/distroless/base-debian13:nonroot
-WORKDIR /
+# Manager binary (statically linked Go binary)
+COPY --from=builder /workspace/manager /manager
 
-# Manager binary (statically linked Go binary — unchanged from before)
-COPY --from=builder /workspace/manager .
-
-# git binary, git-core helpers, and shared-library closure.
-# The realpath-normalised staging dir (/git-libs) only contains paths under
-# /usr/ (the symlink /lib → usr/lib is followed at collection time), so we
-# copy /git-libs/usr into /usr — avoiding the /lib symlink conflict that
-# distroless exposes when a plain /lib directory is COPY'd over a symlink.
-COPY --from=git-provider /usr/bin/git /usr/bin/git
-COPY --from=git-provider /usr/lib/git-core /usr/lib/git-core
-COPY --from=git-provider /git-libs/usr /usr
-
+# Run as a non-root user. Debian's base image has no dedicated nonroot account at
+# a fixed UID like distroless does, so we create one at UID 65532 (the same UID
+# the previous distroless/base-debian13:nonroot image used) to keep the
+# Kubernetes securityContext (runAsUser: 65532) unchanged.
+RUN groupadd --gid 65532 nonroot && \
+    useradd --uid 65532 --gid 65532 --no-create-home --shell /usr/sbin/nologin nonroot
 USER 65532:65532
 
 # Keppel's account validation policy requires a `source_repository` manifest
