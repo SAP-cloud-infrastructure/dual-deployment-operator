@@ -17,9 +17,9 @@ import (
 // generous enough for a legitimate slow mirror but tight enough that a hung or
 // slow-loris remote cannot block a reconcile indefinitely.
 const (
-	defaultDialTimeout          = 10 * time.Second
-	defaultTLSHandshakeTimeout  = 10 * time.Second
-	defaultResponseHeaderTimout = 15 * time.Second
+	defaultDialTimeout           = 10 * time.Second
+	defaultTLSHandshakeTimeout   = 10 * time.Second
+	defaultResponseHeaderTimeout = 15 * time.Second
 	// defaultReadIdleTimeout bounds a single stalled Read on the connection.
 	// This is the ONLY mechanism that caps a server which sends response
 	// headers promptly and then stalls mid-body (see HardenDefaultHTTPTransport
@@ -107,7 +107,7 @@ func HardenDefaultHTTPTransport() {
 		return &idleReadConn{Conn: conn, idle: defaultReadIdleTimeout}, nil
 	}
 	tr.TLSHandshakeTimeout = defaultTLSHandshakeTimeout
-	tr.ResponseHeaderTimeout = defaultResponseHeaderTimout
+	tr.ResponseHeaderTimeout = defaultResponseHeaderTimeout
 	tr.IdleConnTimeout = defaultIdleConnTimeout
 
 	// Force HTTP/1.1: a connection-level read deadline is unsafe under HTTP/2
