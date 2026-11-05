@@ -127,7 +127,7 @@ type RemoteRef struct {
 //     the repo/path boundary is ambiguous.
 //   - Remote git directory references without a mandatory ?ref=
 func classifyKustomizeReference(raw string) (refKind, string, error) {
-	// Finding 3: strip the legacy go-getter git:: prefix before any other check.
+	// Strip the legacy go-getter git:: prefix before any other check.
 	// krusty silently strips it too; we strip it so we can classify (and reject)
 	// the underlying form correctly.
 	stripped := raw
@@ -181,7 +181,7 @@ func classifyKustomizeReference(raw string) (refKind, string, error) {
 		return classifyGitHubShorthand(stripped)
 	}
 
-	// P1-3: Anything that reaches here is a URL-like or remote-looking string
+	// Anything that reaches here is a URL-like or remote-looking string
 	// that the classifier does not fully understand. Reject explicitly rather than
 	// silently treating as local (which would let krusty fetch it unchecked).
 	//
@@ -256,7 +256,7 @@ func isSCPStyle(raw string) bool {
 // appear before the first '/', and is there no '@' BEFORE that colon (which
 // would identify the git@host:path form handled by isSCPStyle)?
 //
-// This prevents the P1-3 bypass where "github.com:org/repo//base@variant?ref=main"
+// This prevents the bypass where "github.com:org/repo//base@variant?ref=main"
 // was incorrectly classified as local because '@' appeared anywhere in the string.
 func isSCPWithoutAt(raw string) bool {
 	// Must not have a scheme (those are handled separately)
@@ -355,7 +355,7 @@ func classifyHTTPURL(raw string) (refKind, string, error) {
 		return refKindRemoteFile, "", nil
 	}
 
-	// Finding 4: validate repository/path boundary independent of ref presence.
+	// Validate repository/path boundary independent of ref presence.
 	// krusty uses exactly 2 path segments (org/repo) as the default repo path
 	// for non-file:// URLs. More segments without an explicit // separator or a
 	// .git suffix means the repo/path boundary is ambiguous — reject always.
@@ -364,7 +364,7 @@ func classifyHTTPURL(raw string) (refKind, string, error) {
 	}
 
 	// Remote git directory: requires ?ref=
-	// P1-2: use url.ParseQuery explicitly so a malformed query string (e.g.
+	// Use url.ParseQuery explicitly so a malformed query string (e.g.
 	// "?ref=sha&bad=%zz") is rejected rather than silently returning partial
 	// results. url.URL.Query() calls url.ParseQuery internally but discards
 	// the error — a malformed query could extract a valid ?ref= and pass the
@@ -415,7 +415,7 @@ func classifyGitHubShorthand(raw string) (refKind, string, error) {
 	// Split off query to inspect the path portion separately.
 	pathPart, query, _ := strings.Cut(raw, "?")
 
-	// Finding 4 (round 2): apply the same repo/path boundary validation as the
+	// Apply the same repo/path boundary validation as the
 	// HTTPS classifier. github.com/org/repo is exactly 3 path segments (host +
 	// org + repo); any additional segment without a // separator is ambiguous.
 	// Strip the "github.com/" prefix to get just the path, then check.
@@ -423,7 +423,7 @@ func classifyGitHubShorthand(raw string) (refKind, string, error) {
 		return 0, "", errors.New("remote reference: ambiguous GitHub shorthand path (multi-segment path with no // boundary); use // to separate repo from subpath")
 	}
 
-	// Finding 5: only ?ref= is mandatory; do NOT fall back to ?version=.
+	// Only ?ref= is mandatory; do NOT fall back to ?version=.
 	// Mirror classifyHTTPURL: reject a malformed query string explicitly rather
 	// than silently swallowing the ParseQuery error. A malformed query could let
 	// a valid-looking ?ref= pass the SHA gate while krusty/git sees the whole
@@ -674,7 +674,7 @@ func walkDir(absRoot, dir string, visited, seen map[string]bool, remotes *[]Remo
 	visited[absDir] = true
 	defer func() { delete(visited, absDir) }()
 
-	// Finding 2: boundary-check the kustomization file itself before reading it,
+	// Boundary-check the kustomization file itself before reading it,
 	// to catch a symlinked kustomization.yaml that resolves outside the root.
 	kust, err := readKustomizationBounded(absRoot, absDir)
 	if err != nil {
@@ -701,13 +701,13 @@ func walkDir(absRoot, dir string, visited, seen map[string]bool, remotes *[]Remo
 		field := fr.field
 		kind, ref, err := classifyKustomizeReference(raw)
 		if err != nil {
-			// Finding 1: do NOT include raw in the error message.
+			// Do NOT include raw in the error message (it may contain a URL/credentials).
 			return fmt.Errorf("tree walk: invalid reference in kustomization: %w", err)
 		}
 
 		switch kind {
 		case refKindLocal:
-			// P1-4: Reject absolute local paths outright. There is no legitimate
+			// Reject absolute local paths outright. There is no legitimate
 			// reason for a kustomize overlay's resources/components/bases field to
 			// reference an absolute filesystem path in the context of a remote-base
 			// policy check. More importantly, filepath.Join(absDir, rawAbsPath)
@@ -722,7 +722,7 @@ func walkDir(absRoot, dir string, visited, seen map[string]bool, remotes *[]Remo
 			// whether to recurse (directory) or skip (file).
 			childPath := filepath.Join(absDir, raw)
 
-			// Finding 2: resolve symlinks and check boundary for every referenced
+			// Resolve symlinks and check boundary for every referenced
 			// path, including files, before any stat-based skip decision.
 			absChild, boundErr := resolveAndCheckBoundary(absRoot, childPath)
 			if boundErr != nil {
@@ -753,7 +753,7 @@ func walkDir(absRoot, dir string, visited, seen map[string]bool, remotes *[]Remo
 			}
 
 		case refKindRemoteGitDir, refKindRemoteFile:
-			// Finding 6: deduplicate remote refs, preserving first-discovery order.
+			// Deduplicate remote refs, preserving first-discovery order.
 			// Carry the field context so the strict pass can apply field-specific
 			// rules (remote values are only legitimate in resource-like fields, and
 			// an HTTPS git-dir ref is admissible under components but not under
@@ -897,7 +897,7 @@ func resolveAndCheckBoundary(absRoot, path string) (string, error) {
 			// and check the boundary.
 			approx, aErr := filepath.Abs(path)
 			if aErr != nil {
-				// P1-5: do NOT include aErr.Error() — it may contain the raw path
+				// Do NOT include aErr.Error() — it may contain the raw path
 				// (which can be a credential-bearing reference). Return a fixed message.
 				_ = aErr // discarded intentionally to prevent credential leakage
 				return "", errors.New("tree walk: resolve path: could not determine absolute path (fail-closed)")
@@ -908,7 +908,7 @@ func resolveAndCheckBoundary(absRoot, path string) (string, error) {
 			}
 			return "", nil // non-existent, in-bounds
 		}
-		// P1-5: do NOT include err.Error() — it may contain the raw path (which
+		// Do NOT include err.Error() — it may contain the raw path (which
 		// can be a credential-bearing reference). Return a fixed message.
 		_ = err // discarded intentionally to prevent credential leakage
 		return "", errors.New("tree walk: resolve path: could not resolve filesystem path (fail-closed)")
@@ -927,13 +927,13 @@ func readKustomizationBounded(absRoot, dir string) (*kustomizationYAML, error) {
 	for _, name := range konfig.RecognizedKustomizationFileNames() {
 		path := filepath.Join(dir, name)
 
-		// Finding 2: resolve the kustomization file itself and check its boundary.
+		// Resolve the kustomization file itself and check its boundary.
 		absFile, err := filepath.EvalSymlinks(path)
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
 			}
-			// P1-5: do NOT include err.Error() or the path — the path may contain
+			// Do NOT include err.Error() or the path — the path may contain
 			// credential-bearing text (e.g. a resource entry like
 			// "user:TOKEN@host/path" that becomes a directory name). Discard the
 			// raw OS error and return a fixed-text sanitized message.
@@ -947,7 +947,7 @@ func readKustomizationBounded(absRoot, dir string) (*kustomizationYAML, error) {
 
 		data, err := os.ReadFile(absFile)
 		if err != nil {
-			// P1-5: do NOT include err.Error() or the absFile path — the OS error
+			// Do NOT include err.Error() or the absFile path — the OS error
 			// embeds the full path, which can contain a credential-bearing directory
 			// name (e.g. ".../user:SUPERSECRET@host/kustomization.yaml: is a
 			// directory"). Discard the raw OS error and return a sanitized message.

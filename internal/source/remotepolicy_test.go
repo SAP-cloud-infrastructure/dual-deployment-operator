@@ -198,12 +198,12 @@ func TestClassifyKustomizeReference_SanitizedErrors(t *testing.T) {
 			raw:     "git@github.com:org/secret-repo.git?ref=v1",
 			mustNot: "secret-repo",
 		},
-		// Finding 1: malformed credential-bearing URLs must also not leak
+		// Malformed credential-bearing URLs must also not leak
 		{ //nolint:gosec // test fixture, not a real credential
 			raw:     "https://user:SECRET@host/%zz",
 			mustNot: "SECRET",
 		},
-		// Finding 1: SCP-style with credential must not leak username or path
+		// SCP-style with credential must not leak username or path
 		{
 			raw:     "user:SECRET@host:repo",
 			mustNot: "SECRET",
@@ -223,7 +223,7 @@ func TestClassifyKustomizeReference_SanitizedErrors(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Finding 3: git:: prefix stripping — SSH still rejected, HTTPS accepted
+// git:: prefix stripping — SSH still rejected, HTTPS accepted
 // ---------------------------------------------------------------------------
 
 func TestClassifyKustomizeReference_GitDoubleColon_SSHRejected(t *testing.T) {
@@ -266,7 +266,7 @@ func TestClassifyKustomizeReference_GitDoubleColon_HTTPSAccepted(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Finding 4: ambiguous paths with ?ref= (multi-segment, no //) must be rejected
+// Ambiguous paths with ?ref= (multi-segment, no //) must be rejected
 // ---------------------------------------------------------------------------
 
 func TestClassifyKustomizeReference_RejectAmbiguousWithRef(t *testing.T) {
@@ -311,7 +311,7 @@ func TestClassifyKustomizeReference_AcceptDoubleSlashWithRef(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Finding 5: GitHub shorthand — exact ref extraction, no ?version= fallback
+// GitHub shorthand — exact ref extraction, no ?version= fallback
 // ---------------------------------------------------------------------------
 
 func TestClassifyKustomizeReference_GitHubShorthand_ExactRef(t *testing.T) {
@@ -352,7 +352,7 @@ func TestClassifyKustomizeReference_GitHubShorthand_MissingRef(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Finding 6: deduplication — ordered set semantics
+// Deduplication — ordered set semantics
 // ---------------------------------------------------------------------------
 
 func buildTreeWithDuplicateRemotes(t *testing.T) string {
@@ -498,7 +498,7 @@ func TestTreeWalkKustomize_PreservesFirstDiscoveryOrder(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Finding 2: boundary checks on files + symlinks
+// Boundary checks on files + symlinks
 // ---------------------------------------------------------------------------
 
 func TestTreeWalkKustomize_RejectsFileEscapeViaSymlink(t *testing.T) {
@@ -824,7 +824,7 @@ func TestTreeWalkKustomize_AllThreeFields_NoSliceAliasing(t *testing.T) {
 // Round-2 review findings
 // ---------------------------------------------------------------------------
 
-// Finding 4 (round 2): GitHub shorthand ambiguous path boundary
+// GitHub shorthand ambiguous path boundary
 // github.com/org/repo/subdir?ref=v1 must be rejected (same ambiguity as HTTPS).
 // github.com/org/repo?ref=v1 (no subpath) must still be accepted.
 
@@ -942,7 +942,7 @@ resources: []
 }
 
 // ---------------------------------------------------------------------------
-// P1 regression: malformed YAML with credential-bearing URL must not leak
+// Regression: malformed YAML with credential-bearing URL must not leak
 // ---------------------------------------------------------------------------
 
 // TestTreeWalkKustomize_MalformedYAML_NoCredentialLeak ensures that when a
@@ -1279,7 +1279,7 @@ resources:
 // kustomizeFetchHook instrumentation: it proves the hook actually fires when the
 // gate passes (permissive mode) so the zero-fetch tests are not vacuously true.
 //
-// P2-6: this test previously called real krusty against "unreachable.invalid",
+// this test previously called real krusty against "unreachable.invalid",
 // making an actual network attempt. Fixed: inject krustyRunHook to return a
 // synthetic error immediately after the hook fires, verifying the hook fires
 // without any real network access.
@@ -1307,7 +1307,7 @@ resources:
 	kustomizeFetchHook = func() { fetchReached = true }
 	defer func() { kustomizeFetchHook = oldFetch }()
 
-	// P2-6: inject a synthetic krusty error so no real network call is made.
+	// inject a synthetic krusty error so no real network call is made.
 	// The hook fires before krust.Run is called; krustyRunHook makes krust.Run
 	// return immediately with this sentinel error.
 	oldKrusty := krustyRunHook
@@ -1428,7 +1428,7 @@ func TestResolveAndCheckBoundary_NonExistentOutOfBounds(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// P1-2 regression: malformed query string bypasses strict SHA enforcement
+// Regression: malformed query string bypasses strict SHA enforcement
 // ---------------------------------------------------------------------------
 
 // TestClassifyHTTPURL_RejectsMalformedQuery verifies that a URL with a valid
@@ -1494,7 +1494,7 @@ func TestClassifyGitHubShorthand_RejectsMalformedQuery(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// P1-3 regression: SCP-without-@ and file:// should be rejected, not local
+// Regression: SCP-without-@ and file:// should be rejected, not local
 // ---------------------------------------------------------------------------
 
 // TestClassifyKustomizeReference_RejectsSCPWithoutAt verifies that SCP-like
@@ -1544,7 +1544,7 @@ func TestClassifyKustomizeReference_RejectsFileScheme(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// P1-4 regression: absolute resource references bypass isolation root
+// Regression: absolute resource references bypass isolation root
 // ---------------------------------------------------------------------------
 
 // TestTreeWalkKustomize_RejectsAbsolutePath verifies that an absolute filesystem
@@ -1594,7 +1594,7 @@ func TestTreeWalkKustomize_RejectsAbsolutePathVariants(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// P1-5 regression: credential-bearing paths must not leak in preflight errors
+// Regression: credential-bearing paths must not leak in preflight errors
 // ---------------------------------------------------------------------------
 
 // TestResolveAndCheckBoundary_NoCredentialLeakOnError verifies that when
@@ -1641,11 +1641,11 @@ func TestPreflightSHAGate_CredentialBearingRefNoLeak(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// P1-3 residual regression: SCP-colon bypass via @ appearing later in path
+// Residual regression: SCP-colon bypass via @ appearing later in path
 // ---------------------------------------------------------------------------
 
 // TestClassifyKustomizeReference_RejectsSCPColonWithLaterAt is the exact
-// reproduction case from the P1-3 residual finding. The reference
+// reproduction case for the SCP-colon residual bypass. The reference
 // "github.com:org/repo//base@variant?ref=main" has a colon before the first
 // slash (making it SCP-like) but also has an '@' later in the path/query.
 // The OLD code rejected based on whether '@' appeared ANYWHERE in the string,
@@ -1675,12 +1675,12 @@ func TestClassifyKustomizeReference_RejectsSCPColonWithLaterAt(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// P1-5 residual regression: OS read errors in readKustomizationBounded must
+// Residual regression: OS read errors in readKustomizationBounded must
 // not embed credential-bearing path text
 // ---------------------------------------------------------------------------
 
 // TestReadKustomizationBounded_NoCredentialLeakOnIsADirectory is the exact
-// reproduction case from the P1-5 residual finding. A directory named with a
+// reproduction case for the OS-read-error leak residual. A directory named with a
 // credential-bearing component (e.g. "user:SUPERSECRET@host") that contains a
 // subdirectory named "kustomization.yaml" triggers an "is a directory" OS error
 // in os.ReadFile. The OLD code wrapped this with %w, causing the full path

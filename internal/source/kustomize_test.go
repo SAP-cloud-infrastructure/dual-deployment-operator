@@ -69,7 +69,7 @@ func TestKustomizeAppliesTargetNamespace(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Task 4 — 4.1 RED: classify → tree-walk → SHA-gate pipeline in Render
+// classify → tree-walk → SHA-gate pipeline in Render
 //
 // These tests assert the full preflight pipeline (classify + tree-walk + optional
 // SHA-gate) runs in ALL modes before kust.Run, including permissive mode.
@@ -91,10 +91,10 @@ func buildKustomizeRootWith(t *testing.T, kustContent string, strict bool) *kust
 	}
 }
 
-// TestTask4_StrictModeUnpinnedFailsBeforeKrusty verifies that in strict mode an
+// TestStrictModeUnpinnedFailsBeforeKrusty verifies that in strict mode an
 // unpinned (tag) remote reference is rejected by the preflight before krusty ever
 // runs. The kustomizeFetchHook must NOT fire.
-func TestTask4_StrictModeUnpinnedFailsBeforeKrusty(t *testing.T) {
+func TestStrictModeUnpinnedFailsBeforeKrusty(t *testing.T) {
 	// Scheme-less github.com shorthand reaches git (not krusty's HTTP-first file
 	// loader), so in strict mode it flows to the SHA-pin loop and is rejected for
 	// the unpinned tag ref — exactly the assertion this test encodes. (An
@@ -124,10 +124,10 @@ resources:
 	}
 }
 
-// TestTask4_SSHRefRejectedInPermissiveMode verifies that an SSH (git@) reference
+// TestSSHRefRejectedInPermissiveMode verifies that an SSH (git@) reference
 // is rejected by classification (not just the SHA gate) even in permissive mode.
 // The kustomizeFetchHook must NOT fire.
-func TestTask4_SSHRefRejectedInPermissiveMode(t *testing.T) {
+func TestSSHRefRejectedInPermissiveMode(t *testing.T) {
 	src := buildKustomizeRootWith(t, `apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -153,10 +153,10 @@ resources:
 	}
 }
 
-// TestTask4_EmbeddedCredentialRefRejectedInPermissiveMode verifies that a URL
+// TestEmbeddedCredentialRefRejectedInPermissiveMode verifies that a URL
 // embedding credentials (user:token@host) is rejected by classification even in
 // permissive mode. The kustomizeFetchHook must NOT fire.
-func TestTask4_EmbeddedCredentialRefRejectedInPermissiveMode(t *testing.T) {
+func TestEmbeddedCredentialRefRejectedInPermissiveMode(t *testing.T) {
 	src := buildKustomizeRootWith(t, `apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -182,14 +182,14 @@ resources:
 	}
 }
 
-// TestTask4_PermissiveModeAllowedTreePassesPreflight verifies that in permissive
+// TestPermissiveModeAllowedTreePassesPreflight verifies that in permissive
 // mode a remote reference pinned to a tag (not SHA) passes the preflight and
 // does NOT cause a classification rejection. Strategy: use a local overlay with
 // a valid HTTPS tag ref and verify via krustyRunHook that krusty is actually
 // invoked (no pre-krusty rejection). The hook makes krust.Run return a
 // synthetic error (no network needed); we only check that the error is a
 // krusty-level error, not a preflight rejection.
-func TestTask4_PermissiveModeAllowedTreePassesPreflight(t *testing.T) {
+func TestPermissiveModeAllowedTreePassesPreflight(t *testing.T) {
 	src := buildKustomizeRootWith(t, `apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -222,10 +222,10 @@ resources:
 	}
 }
 
-// TestTask4_LocalOnlyTreeUnchanged verifies that a local-only kustomization
+// TestLocalOnlyTreeUnchanged verifies that a local-only kustomization
 // (no remote refs) still renders successfully in both modes. This is the
 // regression guard: adding preflight must not break local trees.
-func TestTask4_LocalOnlyTreeUnchanged(t *testing.T) {
+func TestLocalOnlyTreeUnchanged(t *testing.T) {
 	// Use the shared testdata fixture (local-only: no remote refs in testdata/kustomize)
 	ms, err := newKustomize(t).Render(context.Background(), ModeSeed, "ns")
 	if err != nil {
@@ -247,9 +247,9 @@ func TestTask4_LocalOnlyTreeUnchanged(t *testing.T) {
 	}
 }
 
-// TestTask4_StrictModeLocalOnlyTreeUnchanged verifies that enabling strict mode
+// TestStrictModeLocalOnlyTreeUnchanged verifies that enabling strict mode
 // on a local-only tree (no remote refs) does not cause a preflight rejection.
-func TestTask4_StrictModeLocalOnlyTreeUnchanged(t *testing.T) {
+func TestStrictModeLocalOnlyTreeUnchanged(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -269,13 +269,13 @@ resources: []
 	}
 }
 
-// TestTask4_ClassificationRunsBeforeKrustyInPermissiveMode is an omnibus check:
+// TestClassificationRunsBeforeKrustyInPermissiveMode is an omnibus check:
 // the tree-walk (classification step) must fire in permissive mode, as evidenced
 // by the fact that a cycle in the local tree is still detected even with
 // requireSHAPinnedRemoteBases=false. The cycle error comes from treeWalkKustomize,
 // so if treeWalk is skipped this test would fail silently via krusty trying to
 // build a cyclic tree.
-func TestTask4_ClassificationRunsBeforeKrustyInPermissiveMode(t *testing.T) {
+func TestClassificationRunsBeforeKrustyInPermissiveMode(t *testing.T) {
 	root := buildCyclicTree(t) // root → child → root (cycle)
 	spec := v1alpha1.KustomizeSource{URL: root, SeedPath: "", ShootPath: ""}
 	src := &kustomizeSource{
@@ -303,7 +303,7 @@ func TestTask4_ClassificationRunsBeforeKrustyInPermissiveMode(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Task 4 Fix-round-1 — RED tests
+// Overlay subPath isolation tests
 // ---------------------------------------------------------------------------
 
 // buildOverlayTree creates a realistic clone-like directory tree:
@@ -403,12 +403,12 @@ resources:
 	return cloneDir, src
 }
 
-// TestTask4Fix_P1_SSHRefInOverlayRejectedWithSubPath is the RED test for P1:
+// TestSSHRefInOverlayRejectedWithSubPath is the RED test for overlay subPath isolation:
 // an SSH ref inside an overlay (which lives beneath the isolationRoot) must be
 // rejected even when subPath is non-empty. Bug: the current code walks from the
 // isolationRoot (cloneDir), not the overlay (cloneDir/overlay), so it misses the
 // SSH ref entirely and the preflight passes.
-func TestTask4Fix_P1_SSHRefInOverlayRejectedWithSubPath(t *testing.T) {
+func TestSSHRefInOverlayRejectedWithSubPath(t *testing.T) {
 	src := buildOverlayTreeWithRemote(t, "git@github.com:org/repo?ref=main")
 	src.requireSHAPinnedRemoteBases = false // permissive — but SSH must still be rejected
 
@@ -423,14 +423,14 @@ func TestTask4Fix_P1_SSHRefInOverlayRejectedWithSubPath(t *testing.T) {
 		t.Fatal("kust.Run reached despite SSH ref in overlay (classification must inspect overlay, not parent)")
 	}
 	if err == nil {
-		t.Fatal("expected SSH rejection for overlay with subPath, got nil — P1 bug: preflight scanned parent instead of overlay")
+		t.Fatal("expected SSH rejection for overlay with subPath, got nil — preflight scanned parent instead of overlay")
 	}
 }
 
-// TestTask4Fix_P1_StrictModeOverlayRefRejectedWithSubPath verifies that in strict
+// TestStrictModeOverlayRefRejectedWithSubPath verifies that in strict
 // mode, an unpinned remote ref inside an overlay (with subPath) is caught.
 // Bug: walking from isolationRoot instead of overlay misses the ref.
-func TestTask4Fix_P1_StrictModeOverlayRefRejectedWithSubPath(t *testing.T) {
+func TestStrictModeOverlayRefRejectedWithSubPath(t *testing.T) {
 	// Scheme-less github shorthand reaches the git route (not krusty's HTTP-first
 	// file loader), so it flows to the SHA-pin loop; an unpinned tag is then
 	// rejected for being non-SHA-pinned (the assertion below). An https:// form
@@ -449,17 +449,17 @@ func TestTask4Fix_P1_StrictModeOverlayRefRejectedWithSubPath(t *testing.T) {
 		t.Fatal("kust.Run reached before SHA-gate (zero-fetch invariant violated for overlay with subPath)")
 	}
 	if err == nil {
-		t.Fatal("expected SHA-pin rejection for overlay with subPath in strict mode, got nil — P1 bug")
+		t.Fatal("expected SHA-pin rejection for overlay with subPath in strict mode, got nil — preflight did not reach the overlay ref")
 	}
 	if !strings.Contains(err.Error(), "SHA") && !strings.Contains(err.Error(), "pin") {
 		t.Errorf("expected SHA-pin error, got: %v", err)
 	}
 }
 
-// TestTask4Fix_P1_OverlayBeneathParentNoKustomization verifies regression (a):
+// TestOverlayBeneathParentNoKustomization verifies regression (a):
 // an overlay beneath a parent directory that has NO kustomization must still
 // have its own refs correctly classified/gated.
-func TestTask4Fix_P1_OverlayBeneathParentNoKustomization(t *testing.T) {
+func TestOverlayBeneathParentNoKustomization(t *testing.T) {
 	cloneDir := t.TempDir()
 
 	write := func(path, content string) {
@@ -501,10 +501,10 @@ resources:
 	}
 }
 
-// TestTask4Fix_P1_OverlayBeneathParentWithUnrelatedKustomization verifies regression (b):
+// TestOverlayBeneathParentWithUnrelatedKustomization verifies regression (b):
 // an overlay beneath a parent that has an UNRELATED kustomization (local-only, valid)
 // must not cause the parent's kustomization to incorrectly reject the overlay.
-func TestTask4Fix_P1_OverlayBeneathParentWithUnrelatedKustomization(t *testing.T) {
+func TestOverlayBeneathParentWithUnrelatedKustomization(t *testing.T) {
 	cloneDir := t.TempDir()
 
 	write := func(path, content string) {
@@ -553,15 +553,14 @@ resources:
 	}
 }
 
-// TestTask4Fix_P2_PermissiveModeAllowedTreeRendersSuccessfully replaces
-// TestTask4_PermissiveModeUnpinnedTagAllowed. Instead of contacting
+// TestPermissiveModeAllowedTreeRendersSuccessfully renders an allowed tree without contacting
 // unreachable.invalid and discarding the error, this test uses a deterministic
 // local fixture to prove the allowed-tree path actually renders successfully.
 //
 // Strategy: build a local clone tree with an overlay that has only valid local
 // refs. This proves that permissive mode does not block a legitimate local-only
 // tree, and the render returns real manifests — not just that a hook fired.
-func TestTask4Fix_P2_PermissiveModeAllowedTreeRendersSuccessfully(t *testing.T) {
+func TestPermissiveModeAllowedTreeRendersSuccessfully(t *testing.T) {
 	_, src := buildOverlayTreeNoRemote(t)
 
 	ms, err := src.Render(context.Background(), ModeSeed, "ns")
@@ -584,7 +583,7 @@ func TestTask4Fix_P2_PermissiveModeAllowedTreeRendersSuccessfully(t *testing.T) 
 }
 
 // ---------------------------------------------------------------------------
-// Task 4 — 4.3 REFACTOR: preflightIsolationRoot unit tests
+// preflightIsolationRoot unit tests
 // ---------------------------------------------------------------------------
 
 // TestPreflightIsolationRoot verifies that preflightIsolationRoot correctly
