@@ -140,3 +140,6 @@ rules:
   - patch
   - update
   - watch
+{{- with .Values.extraRbac.seedApplier }}
+{{ toYaml . }}
+{{- end }}

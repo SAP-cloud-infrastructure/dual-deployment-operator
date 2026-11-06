@@ -240,3 +240,10 @@ prometheus:
 networkPolicy:
   enabled: false
 
+
+## Operand-specific apply-grants appended to each applier ClusterRole's base rules.
+## Owned by the DDO install (not operand charts, not the Go-generated role); supplied
+## per enabled operand and layered per region. Least-privilege, no wildcards.
+extraRbac:
+  seedApplier: []
+  shootApplier: []
