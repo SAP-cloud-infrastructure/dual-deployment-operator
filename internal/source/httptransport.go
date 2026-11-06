@@ -66,6 +66,19 @@ func (c *idleReadConn) Read(p []byte) (int, error) {
 // internally with no injection point. A client with a nil Transport uses
 // http.DefaultTransport, so hardening that global is the only lever available.
 //
+// Because http.DefaultTransport is a process global, this ALSO affects other
+// consumers that fall back to it:
+//   - Helm's OCI registry client (helm/pkg/registry.NewClient) clones
+//     http.DefaultTransport per call, so OCI chart pulls inherit the same
+//     15 s header timeout, 30 s per-read idle deadline, and HTTP/1.1 forcing.
+//     This is acceptable — and arguably beneficial — since it bounds a hung
+//     registry. For large chart blobs the 30 s idle deadline is per-read, not
+//     total-request, so normal pulls are not affected as long as data flows.
+//   - go-git captures http.DefaultTransport at package init, BEFORE this call
+//     runs; it is therefore unaffected.
+//   - controller-runtime / kube-client builds its own transport via rest.Config;
+//     it is unaffected.
+//
 // What this bounds:
 //   - connection establishment      (net.Dialer.Timeout)
 //   - TLS handshake                  (Transport.TLSHandshakeTimeout)
@@ -77,10 +90,12 @@ func (c *idleReadConn) Read(p []byte) (int, error) {
 // Timeout or request context, neither of which kustomize exposes; this is the
 // best containment achievable from our position and is documented as such.
 //
-// HTTP/2 is force-disabled on this transport: with HTTP/2 a connection-level
-// read deadline would affect unrelated multiplexed streams, making the
-// idleReadConn mechanism unsafe. The kustomize file loader only performs simple
-// HTTP/1.1 GETs, so disabling H2 costs nothing here.
+// HTTP/2 is force-disabled on this transport process-wide for consumers that
+// fall back to the default (including kustomize's file loader and Helm's OCI
+// client). With HTTP/2 a connection-level read deadline would affect unrelated
+// multiplexed streams, making the idleReadConn mechanism unsafe. For Helm OCI
+// pulls this trades H2 multiplexing for the safety of the per-read deadline —
+// an acceptable tradeoff given the timeouts are generous for blob pulls.
 //
 // The function is idempotent-safe to call once at process startup. It clones
 // http.DefaultTransport (rather than mutating its fields in place) and then
