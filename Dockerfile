@@ -38,10 +38,11 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o ma
 # We therefore ship git on a minimal, shell-bearing Debian base rather than a
 # distroless image — aligning with the industry norm for git-fetching Kubernetes
 # controllers (Argo CD ships git + a shell + Git LFS on a Debian/Ubuntu base;
-# Flux's source-controller likewise bundles a real git). A hand-assembled
-# shared-library closure copied into distroless was tried previously but could
-# not satisfy the git-submodule shell requirement without re-introducing a shell,
-# so the minimal-Debian base is both simpler and correct.
+# Flux's kustomize-controller likewise installs git, openssh-client, and gnupg
+# via apk; Flux's source-controller uses go-git and does NOT bundle the git CLI).
+# A hand-assembled shared-library closure copied into distroless was tried
+# previously but could not satisfy the git-submodule shell requirement without
+# re-introducing a shell, so the minimal-Debian base is both simpler and correct.
 #
 # Using an apt-based final image also means the dpkg package database
 # (/var/lib/dpkg/status) natively records git, libcurl and gnutls, so container
@@ -62,9 +63,9 @@ RUN apt-get update && \
 # stays hermetic): abort the build if the git binary is missing/broken or if the
 # git-submodule /bin/sh helper cannot be executed. These turn the runtime
 # failures from PR #62 (exit 128 on `git submodule` in the shell-less image) into
-# build-time failures. The HTTPS-fetch path is exercised separately by the
-# combined-image render test (which needs network and therefore does not belong
-# in a hermetic image build).
+# build-time failures. End-to-end coverage (nonroot + read-only rootfs performing
+# a live remote-base fetch) is intentionally out of scope for this hermetic build
+# and is tracked as follow-up work.
 RUN ["git", "version"]
 # `git submodule` is the /bin/sh helper that the shell-less image could not run.
 # Running `git submodule status` inside an empty, freshly-initialized repository
