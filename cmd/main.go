@@ -139,20 +139,20 @@ func main() {
 	//     here; CEL admission only requires a ref= on the root URL. If HTTPS-only
 	//     must hold for the root it needs a separate, explicit scheme check.
 	//   - krusty's own net/http GET of a remote FILE inside a remote base (that
-	//     is Go http, not git); constrained by classifyHTTPURL on top-level refs
-	//     and the hardened transport (HardenDefaultHTTPTransport below).
+	//     is Go http, not git); constrained by classifyHTTPURL on top-level refs.
+	//
+	// Containment of a hung or slow remote fetch (both the git-CLI fetches above
+	// and krusty's/Helm's own net/http GETs) is operational, matching Flux CD and
+	// Argo CD: destination control via the chart's optional egress NetworkPolicy
+	// plus the Gardener egress labels on the manager pod, and the operator's
+	// reconcile/pod lifecycle. The operator does not mutate http.DefaultTransport
+	// in-process (that global-transport hack was removed as an anti-pattern — see
+	// the kustomize-remote-bases guide).
 	if err := os.Setenv("GIT_ALLOW_PROTOCOL", "https"); err != nil {
 		// os.Setenv only fails on Windows with invalid env var names; log and
 		// continue rather than exit so the operator still starts on other issues.
 		setupLog.Error(err, "Failed to set GIT_ALLOW_PROTOCOL")
 	}
-
-	// Harden http.DefaultTransport before any reconcile can fetch a remote
-	// kustomize base. kustomize's file loader builds a timeout-less
-	// &http.Client{} we cannot reach, so it falls back to http.DefaultTransport;
-	// bounding that global is the only way to stop an unresponsive remote from
-	// blocking a reconcile indefinitely. See source.HardenDefaultHTTPTransport.
-	source.HardenDefaultHTTPTransport()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 

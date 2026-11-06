@@ -512,13 +512,14 @@ func pathSegmentCount(path string) int {
 // strict-mode policy enforces its contract on the TOP-LEVEL references
 // the operator parses here, before handing the root to krusty. Transitive refs
 // that krusty resolves internally are NOT pre-enforced (same model as Flux /
-// Argo CD): they are contained operationally (NetworkPolicy egress + least-
-// privilege credentials) plus the always-on transport hardening — the
-// hardened http.DefaultTransport timeouts (all transitive net/http fetches)
-// and GIT_ALLOW_PROTOCOL=https on the git CLI krusty shells out to. Note the
-// git-CLI HTTPS-only constraint does NOT reach krusty's own net/http GET of a
-// remote FILE inside a base (that is Go http, not git), so transitive fetches
-// are not scheme-gated to HTTPS the way top-level refs are.
+// Argo CD): they are contained operationally — the chart's optional egress
+// NetworkPolicy plus the Gardener egress labels on the manager pod (destination
+// control), least-privilege credentials, and GIT_ALLOW_PROTOCOL=https on the
+// git CLI krusty shells out to. Note the git-CLI HTTPS-only constraint does NOT
+// reach krusty's own net/http GET of a remote FILE inside a base (that is Go
+// http, not git), so transitive fetches are not scheme-gated to HTTPS the way
+// top-level refs are. The operator does not harden http.DefaultTransport
+// in-process (that global-transport mutation was removed as an anti-pattern).
 //
 // Field groups:
 //   - Resource-like (may legitimately be remote): resources, components, bases.
