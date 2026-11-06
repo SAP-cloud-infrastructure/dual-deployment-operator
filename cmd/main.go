@@ -87,6 +87,19 @@ func main() {
 	clientconfig.RegisterFlags(flag.CommandLine)
 	flag.Parse()
 
+	// When a dedicated source scratch dir is configured (required under a
+	// read-only root filesystem), point the process TMPDIR at it so Go's
+	// os.MkdirTemp and git's clone temp files land on the writable mount.
+	// Done in-process (not only via the Deployment env) so a Helm values list
+	// override of the container env cannot silently drop it and strand clones
+	// on a read-only /tmp.
+	if sourceScratchDir != "" {
+		if err := os.Setenv("TMPDIR", sourceScratchDir); err != nil {
+			setupLog.Error(err, "unable to set TMPDIR from --source-scratch-dir")
+			os.Exit(1)
+		}
+	}
+
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
