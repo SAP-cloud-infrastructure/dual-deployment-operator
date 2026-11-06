@@ -8,16 +8,20 @@ by the dual-deployment-operator's Kustomize renderer.
 The operator resolves the configured seed or shoot overlay, then runs krusty.
 Krusty fetches transitive remote bases live during each `Render()`; seed and shoot
 are rendered separately, so remote content is fetched as part of each render.
-There is no hermetic offline render or SHA-keyed cache for remote Kustomize bases.
-A remote fetch failure fails the render rather than silently omitting content.
+There is no hermetic offline render. A remote fetch failure fails the render rather
+than silently omitting content.
 
-> **Note on the operator's render cache:** The operator includes an opt-in
-> in-memory render cache keyed by the resolved content identifier (git SHA or OCI
-> digest). When a cache hit occurs, the cached result is returned directly and
-> krusty is **not** invoked — meaning remote bases are **not** re-fetched and the
-> preflight check is **not** re-run. The cache therefore does not change security
-> properties for new content, but it does mean that subsequent reconciles of
-> unchanged source content skip the preflight entirely.
+> **Render cache (always-on):** The operator maintains an always-on in-memory
+> render cache keyed by the resolved content identifier (git SHA or OCI digest).
+> When a cache hit occurs, the cached result is returned directly and krusty is
+> **not** invoked — meaning remote bases are **not** re-fetched and the preflight
+> is **not** re-run. **Hazard:** if a remote base is referenced by a mutable tag
+> or branch and that tag/branch is subsequently force-moved to a different commit,
+> the cached render stays frozen at the original content until the cache is evicted
+> (process restart, new root-SHA, or capacity eviction). To avoid silent staleness,
+> pin remote bases to immutable 40-character commit SHAs (see
+> [Pin refs for reproducibility](#pin-refs-for-reproducibility)) or accept that a
+> restarted operator will re-fetch and reflect the moved tag.
 
 For example, a GitHub remote directory may be referenced as:
 
@@ -36,18 +40,19 @@ a canonical `https://raw.githubusercontent.com/<owner>/<repo>/<sha>/<path>` URL
 (immutable blob at a commit SHA).
 
 The operator runs a preflight over the reachable kustomization tree before
-krusty fetches remote content. It classifies remote references and rejects
-unsupported forms, including SSH URLs, `http://`, embedded user information, URL
-fragments, ambiguous repository paths, and (in strict mode) `https://` git
-directories outside the `components` field. Errors are sanitized and do not echo
-credentials.
+krusty fetches remote content. It classifies remote references across all
+kustomization fields it understands and rejects unsupported forms, including SSH
+URLs, `http://`, embedded user information, URL fragments, ambiguous repository
+paths, and (in strict mode) bare `https://` git directories in resource-like
+fields. Errors are sanitized: the error message preserves host/repo/path and exit
+context for diagnosis but never contains credential material.
 
 ## Pin refs for reproducibility
 
 Pin remote bases to immutable commit SHAs where possible. Argo CD's [Kustomize
 Best Practices](https://argo-cd.readthedocs.io/en/stable/user-guide/best_practices/)
-warn that remote bases can “suddenly change meaning, even without any changes to
-your own Git repository.” Since this operator fetches remote bases live, the same
+warn that remote bases can "suddenly change meaning, even without any changes to
+your own Git repository." Since this operator fetches remote bases live, the same
 reproducibility caveat applies here: a branch or tag can resolve to different
 content on a later render.
 
@@ -74,6 +79,37 @@ not the configured source-root URL.
 > points visible before the first fetch, not kustomizations nested inside remote
 > repositories.
 
+### Strict-mode field scope and accepted remote forms
+
+The preflight classifies references from **all** fields it understands in each
+`kustomization.yaml`:
+
+| Category | Fields | Behaviour in strict mode |
+|---|---|---|
+| **Resource-like** | `resources`, `components`, `bases` | Remote refs accepted in the accepted forms below; SHA-pinning enforced. |
+| **Tree-edge** | `generators`, `transformers`, `validators` (path form only; inline YAML docs are silently skipped) | Must reference a **local path** only. A direct remote value is rejected. Local **directories** are recursed into, so an unpinned remote base inside a transformer-referenced local directory is caught. |
+| **Local-only** | `patches[].path`, `patchesJson6902[].path`, `patchesStrategicMerge` (file-path form), `replacements[].path`, `crds`, `configurations`, `openapi.path`, `configMapGenerator`/`secretGenerator` file and env refs | Must reference a **local path** only. A direct remote value is rejected. These are not recursed further. |
+
+> **Limitation:** the preflight does not parse inside a plugin/builtin config file
+> (e.g. a `PatchTransformer`'s embedded `path:` field). Remote paths embedded
+> within such a config file are not pre-enforced.
+
+**Accepted remote forms in strict mode:**
+
+| Form | Example | Notes |
+|---|---|---|
+| Scheme-less GitHub shorthand | `github.com/org/repo//dir?ref=<40-hex-sha>` | Preferred for git directories. Krusty resolves via git so the SHA is honored. |
+| `git::https://` prefixed | `git::https://github.com/org/repo//dir?ref=<40-hex-sha>` | The `git::` go-getter force-prefix is stripped; the remaining URL is validated as above. |
+| Canonical raw GitHub file | `https://raw.githubusercontent.com/<owner>/<repo>/<40-hex-sha>/<path>` | Single file only (not valid in `components`). Immutable blob addressed by commit SHA. |
+
+**Always rejected** (flag-independent):
+
+- `http://` (cleartext) remote references
+- `ssh://` or SCP-style (`user@host:path`) references
+- References embedding URL userinfo (`user:token@host`)
+- References with URL fragments (`#`)
+- Username-prefixed refs (`user@` in the `?ref=` value)
+
 ## Credentials and network access
 
 Remote Kustomize bases do not have per-source `authSecretRef` support. Any Git
@@ -93,6 +129,30 @@ in the [implementation guide](implementation.md).
 
 The operator image includes `git` on `PATH` because krusty's remote git cloner
 shells out to the Git executable.
+
+### Protocol and transport hardening
+
+The operator applies the following hardening unconditionally (flag-independent):
+
+- **`GIT_ALLOW_PROTOCOL=https`** is set at process startup, constraining all
+  git-driven fetches — including krusty-triggered remote bases and submodules —
+  to HTTPS only. Any attempt to use `ssh://`, `git://`, `file://`, or other
+  protocols at the git layer is denied.
+
+- **`HardenDefaultHTTPTransport`** replaces `http.DefaultTransport` with a
+  transport that imposes explicit timeouts: dial 10 s, TLS handshake 10 s,
+  response-header receipt 15 s, per-read idle deadline 30 s, HTTP/1.1 forced.
+  Because `http.DefaultTransport` is a process global, this also affects
+  **Helm's OCI registry client** (`helm/pkg/registry.NewClient` clones
+  `DefaultTransport` per call), so OCI chart pulls inherit the same bounds.
+  The `go-git` root resolver and the kube clients are unaffected (they capture
+  `DefaultTransport` before this call runs, or build their own transport,
+  respectively).
+
+> **Note for go-makefile-maker users:** the `'**'` branch-glob variant in
+> `pull_request.branches` that supports stacked-PR bases is not emitted by the
+> current version of `go-makefile-maker`. If you need broad branch-glob support,
+> raise it upstream in `sapcc/go-makefile-maker`.
 
 ## Runtime requirements
 
