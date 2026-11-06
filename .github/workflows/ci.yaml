@@ -15,7 +15,7 @@ name: CI
       - '**.md'
   pull_request:
     branches:
-      - '**'
+      - '*'
     paths-ignore:
       - '**.md'
   workflow_dispatch: {}
