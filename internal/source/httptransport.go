@@ -130,5 +130,18 @@ func HardenDefaultHTTPTransport() {
 	tr.ForceAttemptHTTP2 = false
 	tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
 
+	// Clearing TLSNextProto and ForceAttemptHTTP2 is NOT enough: the cloned
+	// transport's TLSClientConfig still carries NextProtos=["h2","http/1.1"], so
+	// ALPN keeps offering "h2". An HTTP/2-capable server (ghcr.io,
+	// raw.githubusercontent.com, Keppel, registry-1.docker.io, quay.io) then
+	// negotiates h2, Go finds no h2 handler in the empty TLSNextProto map, writes
+	// an HTTP/1.1 request onto the h2 connection, and the response comes back as
+	// "malformed HTTP response"/EOF. Pin the ALPN offer to http/1.1 so h2 is
+	// never negotiated in the first place.
+	if tr.TLSClientConfig == nil {
+		tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	tr.TLSClientConfig.NextProtos = []string{"http/1.1"}
+
 	http.DefaultTransport = tr
 }
