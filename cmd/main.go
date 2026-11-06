@@ -108,6 +108,25 @@ func main() {
 	clientconfig.RegisterFlags(flag.CommandLine)
 	flag.Parse()
 
+	// Constrain ALL git-driven fetches (top-level AND transitive bases/submodules
+	// that git itself resolves) to HTTPS only. GIT_ALLOW_PROTOCOL behaves as
+	// git's protocol.allow=never with https=always: any protocol not listed is
+	// denied, so ssh://, git://, file:// and others are blocked at the git layer
+	// for both the operator's own git calls and any krusty-triggered fetches.
+	//
+	// This is set via os.Setenv in main() (not only as a Deployment env var) so
+	// a Helm manager.env list-override cannot silently drop it.
+	//
+	// What this does NOT cover:
+	//   - krusty's own net/http GET of a remote FILE inside a remote base (that
+	//     is Go http, not git); constrained by classifyHTTPURL on top-level refs
+	//     and the hardened transport (HardenDefaultHTTPTransport below).
+	if err := os.Setenv("GIT_ALLOW_PROTOCOL", "https"); err != nil {
+		// os.Setenv only fails on Windows with invalid env var names; log and
+		// continue rather than exit so the operator still starts on other issues.
+		setupLog.Error(err, "Failed to set GIT_ALLOW_PROTOCOL")
+	}
+
 	// Harden http.DefaultTransport before any reconcile can fetch a remote
 	// kustomize base. kustomize's file loader builds a timeout-less
 	// &http.Client{} we cannot reach, so it falls back to http.DefaultTransport;
