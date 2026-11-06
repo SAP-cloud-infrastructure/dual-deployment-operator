@@ -1960,3 +1960,133 @@ func TestPreflightSHAGate_PermissiveAllowsHTTPSGitDirInResources(t *testing.T) {
 		t.Fatalf("permissive mode must not apply strict rules; unexpected error: %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Round-3 Finding 1 & 2: inline doc guard + fieldTreeEdge recursion
+// ---------------------------------------------------------------------------
+
+// TestCollectFieldRefs_InlineGeneratorDocSkipped verifies that an inline
+// multiline YAML document in the generators: field (containing "\n") is NOT
+// classified as a reference — it is silently skipped just like the pre-existing
+// guard on patchesStrategicMerge. Without the guard, the inline doc's first
+// line (e.g. "apiVersion: builtin") would be fed to classifyKustomizeReference
+// and misread as an SCP host:path reference, causing a spurious tree-walk error.
+func TestCollectFieldRefs_InlineGeneratorDocSkipped(t *testing.T) {
+	inline := "apiVersion: builtin\nkind: PrefixSuffixTransformer\nmetadata:\n  name: pfx\nprefix: foo-\n"
+	kust := &kustomizationYAML{
+		Generators: []string{inline},
+	}
+	refs := collectFieldRefs(kust)
+	for _, r := range refs {
+		if r.raw == inline || strings.Contains(r.raw, "\n") {
+			t.Errorf("inline generator doc must be skipped, but got ref: %q (field %s)", r.raw, r.field)
+		}
+	}
+}
+
+// TestCollectFieldRefs_InlineTransformerDocSkipped is the same guard for
+// transformers: field.
+func TestCollectFieldRefs_InlineTransformerDocSkipped(t *testing.T) {
+	inline := "apiVersion: builtin\nkind: PrefixSuffixTransformer\nmetadata:\n  name: pfx\nprefix: foo-\n"
+	kust := &kustomizationYAML{
+		Transformers: []string{inline},
+	}
+	refs := collectFieldRefs(kust)
+	for _, r := range refs {
+		if strings.Contains(r.raw, "\n") {
+			t.Errorf("inline transformer doc must be skipped, but got ref: %q", r.raw)
+		}
+	}
+}
+
+// TestCollectFieldRefs_InlineValidatorDocSkipped is the same guard for
+// validators: field.
+func TestCollectFieldRefs_InlineValidatorDocSkipped(t *testing.T) {
+	inline := "apiVersion: builtin\nkind: SomeValidator\n"
+	kust := &kustomizationYAML{
+		Validators: []string{inline},
+	}
+	refs := collectFieldRefs(kust)
+	for _, r := range refs {
+		if strings.Contains(r.raw, "\n") {
+			t.Errorf("inline validator doc must be skipped, but got ref: %q", r.raw)
+		}
+	}
+}
+
+// TestPreflightSHAGate_InlineTransformerRendersOK_FlagOn verifies that a
+// kustomization.yaml with an inline PrefixSuffixTransformer doc (no remote
+// refs) passes the preflight gate with requireSHAPinnedRemoteBases=true AND
+// false — i.e. the inline doc does not cause a spurious error.
+func TestPreflightSHAGate_InlineTransformerRendersOK_FlagOn(t *testing.T) {
+	inline := "apiVersion: builtin\nkind: PrefixSuffixTransformer\nmetadata:\n  name: pfx\nprefix: foo-\n"
+	body := "transformers:\n  - |\n    " + strings.ReplaceAll(inline, "\n", "\n    ") + "\n"
+	root := writeKust(t, body)
+	for _, strict := range []bool{false, true} {
+		if err := preflightSHAGate(root, root, strict); err != nil {
+			t.Errorf("strict=%v: inline transformer doc must not cause preflight error, got: %v", strict, err)
+		}
+	}
+}
+
+// TestPreflightSHAGate_TransformersLocalDirUnpinnedBase_StrictRejects verifies
+// Finding 2: a transformers: entry pointing at a local DIRECTORY that itself
+// contains a kustomization.yaml with an unpinned remote base must be REJECTED
+// in strict mode (the fieldTreeEdge category causes walkDir to recurse into it).
+func TestPreflightSHAGate_TransformersLocalDirUnpinnedBase_StrictRejects(t *testing.T) {
+	root := t.TempDir()
+	// ./t/kustomization.yaml has an unpinned remote base
+	tDir := filepath.Join(root, "t")
+	if err := os.MkdirAll(tDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	innerKust := "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - github.com/org/repo//base?ref=main\n"
+	if err := os.WriteFile(filepath.Join(tDir, "kustomization.yaml"), []byte(innerKust), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// root kustomization references ./t as a transformer dir
+	rootKust := "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\ntransformers:\n  - ./t\n"
+	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(rootKust), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := preflightSHAGate(root, root, true)
+	if err == nil {
+		t.Fatal("strict mode must reject unpinned remote base reachable via transformers-referenced local dir, got nil")
+	}
+}
+
+// TestPreflightSHAGate_TransformersDirectRemote_Rejected verifies that a
+// direct remote value in a transformers: entry is rejected in strict mode
+// (same as fieldLocalOnly rule 1 — remote in a tree-edge field is disallowed).
+func TestPreflightSHAGate_TransformersDirectRemote_Rejected(t *testing.T) {
+	root := writeKust(t, "transformers:\n  - github.com/org/repo//transformer?ref=main\n")
+	err := preflightSHAGate(root, root, true)
+	if err == nil {
+		t.Fatal("strict mode must reject direct remote value in transformers field, got nil")
+	}
+}
+
+// TestPreflightSHAGate_TransformersLocalDirPinnedBase_StrictAccepts verifies
+// that a transformers: entry pointing at a local directory whose kustomization
+// references only a SHA-pinned remote base IS accepted in strict mode.
+func TestPreflightSHAGate_TransformersLocalDirPinnedBase_StrictAccepts(t *testing.T) {
+	sha := "0123456789abcdef0123456789abcdef01234567"
+	root := t.TempDir()
+	tDir := filepath.Join(root, "t")
+	if err := os.MkdirAll(tDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	innerKust := "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - github.com/org/repo//base?ref=" + sha + "\n"
+	if err := os.WriteFile(filepath.Join(tDir, "kustomization.yaml"), []byte(innerKust), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rootKust := "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\ntransformers:\n  - ./t\n"
+	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte(rootKust), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := preflightSHAGate(root, root, true); err != nil {
+		t.Errorf("strict mode must accept SHA-pinned remote base reachable via transformers dir, got: %v", err)
+	}
+}

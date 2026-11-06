@@ -73,11 +73,25 @@ const (
 	fieldComponents
 	// fieldBases is the legacy bases: field (same acceptance as resources).
 	fieldBases
+	// fieldTreeEdge marks a reference drawn from generators/transformers/
+	// validators entries (path form — inline docs are skipped before tagging).
+	// krusty runs these through accumulateResources just like resource-like
+	// fields, so a LOCAL DIRECTORY entry is a real kustomization tree edge that
+	// krusty follows. Semantics:
+	//   - walkDir recurses into a referenced local DIRECTORY (same as resource-
+	//     like fields), so an unpinned remote base inside that directory is
+	//     caught in strict mode.
+	//   - A DIRECT remote value in this field is rejected in strict mode (same
+	//     as fieldLocalOnly Rule 1).
+	//   - A referenced local FILE (non-dir) is not recursed into; strict mode
+	//     does NOT parse inside builtin config files (e.g. a PatchTransformer's
+	//     embedded path:) — that is a documented limitation.
+	fieldTreeEdge
 	// fieldLocalOnly marks a reference drawn from a field that, under the strict
 	// contract, must resolve to a LOCAL path only (patches[].path,
 	// replacements[].path, crds, configurations, openapi.path,
-	// generator/transformer/validator config files, configMap/secret generator
-	// files/envs). A remote value in such a field is rejected in strict mode.
+	// configMap/secret generator files/envs). A remote value in such a field is
+	// rejected in strict mode.
 	fieldLocalOnly
 )
 
@@ -89,6 +103,8 @@ func (f kustField) String() string {
 		return "components"
 	case fieldBases:
 		return "bases"
+	case fieldTreeEdge:
+		return "generator/transformer/validator"
 	case fieldLocalOnly:
 		return "local-only field"
 	default:
@@ -502,11 +518,15 @@ func pathSegmentCount(path string) int {
 //
 // Field groups:
 //   - Resource-like (may legitimately be remote): resources, components, bases.
+//   - Tree-edge (generators/transformers/validators path form): a local directory
+//     here is a real kustomization tree edge krusty follows; walkDir recurses.
+//     A direct remote value is rejected in strict mode (same as local-only).
+//     Inline multiline docs are skipped before tagging — they are not references.
 //   - Local-only under the strict contract (a remote value is rejected in
 //     strict mode): patches[].path, patchesJson6902[].path,
 //     patchesStrategicMerge[] (file-path form), replacements[].path, crds,
-//     configurations, openapi.path, and the generator/transformer/validator
-//     config-file paths + configMapGenerator/secretGenerator files/envs.
+//     configurations, openapi.path, and the configMapGenerator/secretGenerator
+//     files/envs.
 type kustomizationYAML struct {
 	// Resource-like fields: remote values permitted (subject to SHA-pin gate).
 	Resources  []string `json:"resources,omitempty"`
@@ -514,9 +534,14 @@ type kustomizationYAML struct {
 	Bases      []string `json:"bases,omitempty"`
 
 	// Plugin config references. Each entry is either a path to a config file or
-	// an inline config; built-in plugins may themselves embed remote paths, so
-	// in strict mode we reject any entry that classifies as remote and leave a
-	// documented note that inline configs are not deeply inspected.
+	// an inline config. Inline multiline docs (containing "\n") are skipped —
+	// only single-line path entries are treated as references (fieldTreeEdge).
+	// krusty runs path entries through accumulateResources, so a local directory
+	// is a real kustomization tree edge and walkDir recurses into it in strict
+	// mode; a direct remote value is rejected in strict mode. NOTE: strict mode
+	// recurses into referenced local directories but does NOT parse inside
+	// builtin config files (e.g. a PatchTransformer's embedded path: field) —
+	// that is a documented limitation (see proposal.md §remote-base-policy).
 	Generators   []string `json:"generators,omitempty"`
 	Transformers []string `json:"transformers,omitempty"`
 	Validators   []string `json:"validators,omitempty"`
@@ -741,10 +766,16 @@ func walkDir(absRoot, dir string, visited, seen map[string]bool, remotes *[]Remo
 				continue // file resource — boundary already checked above, skip recursion
 			}
 
-			// Only recurse into directories reached via resource-like fields.
-			// Local-only fields (patches, crds, generator configs, ...) never form
-			// a kustomization tree edge, so there is nothing to recurse into; the
-			// directory case is unreachable for them in practice, but guard anyway.
+			// Only recurse into directories reached via resource-like fields
+			// or fieldTreeEdge (generators/transformers/validators path form).
+			// Pure local-only fields (patches, crds, configMap/secretGenerator
+			// sources, ...) never form a kustomization tree edge — there is
+			// nothing to recurse into; the directory case is unreachable for
+			// them in practice, but guard anyway.
+			// fieldTreeEdge entries DO recurse: krusty runs them through
+			// accumulateResources, so an unpinned remote base inside a
+			// transformer-referenced local dir would be fetched un-vetted
+			// in strict mode without this recursion.
 			if field == fieldLocalOnly {
 				continue
 			}
@@ -816,14 +847,28 @@ func collectFieldRefs(kust *kustomizationYAML) []fieldRef {
 	addLocal := func(s string) {
 		refs = append(refs, fieldRef{raw: s, field: fieldLocalOnly})
 	}
+
+	// Tree-edge fields (generators/transformers/validators, path form only).
+	// krusty runs these through accumulateResources so a local directory is a
+	// real kustomization tree edge that walkDir must recurse into in strict mode.
+	// Inline multiline docs (containing "\n") are skipped here — they are not
+	// references; classifyKustomizeReference would misread the first line of
+	// "apiVersion: builtin\n..." as an SCP host:path, causing a spurious error.
+	// A direct remote value in this field is rejected in strict mode (same as
+	// fieldLocalOnly Rule 1, applied via fieldTreeEdge in validateStrictRemoteRefs).
+	addTreeEdge := func(s string) {
+		if s != "" && !strings.ContainsAny(s, "\n") {
+			refs = append(refs, fieldRef{raw: s, field: fieldTreeEdge})
+		}
+	}
 	for _, g := range kust.Generators {
-		addLocal(g)
+		addTreeEdge(g)
 	}
 	for _, t := range kust.Transformers {
-		addLocal(t)
+		addTreeEdge(t)
 	}
 	for _, v := range kust.Validators {
-		addLocal(v)
+		addTreeEdge(v)
 	}
 	for _, p := range kust.Patches {
 		if p.Path != "" {
@@ -1179,7 +1224,12 @@ func preflightSHAGate(isolationRoot, entryPoint string, requireSHAPinnedRemoteBa
 func validateStrictRemoteRefs(remotes []RemoteRef) error {
 	for _, r := range remotes {
 		// Rule 1: remote values are only legitimate in resource-like fields.
-		if r.Field == fieldLocalOnly {
+		// fieldLocalOnly entries must resolve to local paths only; fieldTreeEdge
+		// entries (generators/transformers/validators) may reference local
+		// directories that krusty recurses into, but a DIRECT remote value in
+		// such a field is also rejected — only the local directory path form is
+		// allowed (the remote base inside it is validated by walkDir recursion).
+		if r.Field == fieldLocalOnly || r.Field == fieldTreeEdge {
 			return fmt.Errorf(
 				"preflight: remote reference found in a local-only field (%s); "+
 					"in strict mode patches, replacements, crds, configurations, openapi, "+
