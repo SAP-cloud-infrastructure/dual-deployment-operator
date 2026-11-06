@@ -20,7 +20,7 @@ Gated off by default; the wrapper chart enables it and supplies the SA values.
 {{- $saName := required "shootRbac.serviceAccountName is required when shootRbac.enabled" .Values.shootRbac.serviceAccountName }}
 {{- $saNamespace := required "shootRbac.serviceAccountNamespace is required when shootRbac.enabled" .Values.shootRbac.serviceAccountNamespace }}
 {{- $extra := "" }}
-{{- with .Values.extraRbac.shootApplier }}{{ $extra = printf "%s\n" (toYaml . | trim) }}{{- end }}
+{{- with ((.Values.extraRbac | default dict).shootApplier) }}{{ $extra = printf "%s\n" (toYaml . | trim) }}{{- end }}
 {{- $objects := printf `apiVersion: v1
 kind: ServiceAccount
 metadata:
