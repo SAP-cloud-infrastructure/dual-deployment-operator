@@ -3,7 +3,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Missing-git-binary: Render surfaces a reason-coded, credential-safe error
+// Missing-git-binary: Render surfaces a credential-safe, actionable error
 //
 // krusty (sigs.k8s.io/kustomize/api) resolves remote kustomize bases by calling
 // ClonerUsingGitExec, which shells out to a `git` binary on PATH. When the binary
@@ -13,10 +13,12 @@
 // discard this message: a git-missing diagnostic carries no credentials and is
 // exactly the actionable detail an operator needs. These tests verify that:
 //
-//   1. The sanitized error carries a stable machine reason-code prefix.
-//   2. The actionable diagnostic ("no 'git' program on path") is PRESERVED.
-//   3. The error is non-nil (fail-closed invariant).
-//   4. Full end-to-end path: Render() propagates the reason-coded error.
+//  1. The sanitized error is non-nil (fail-closed invariant).
+//  2. The actionable diagnostic ("no 'git' program on path") is PRESERVED.
+//  3. Full end-to-end path: Render() propagates the error.
+//
+// Note: Finding 3 removed the reason-code prefix — it mislabelled local errors.
+// The message is forwarded redacted-but-intact, with no prefix added.
 //
 // This is a pure-Go unit test; it does not build or run containers. The manual
 // container verification procedure for a new image is documented in the
@@ -30,12 +32,13 @@ import (
 	"testing"
 )
 
-// TestGitMissingError_ReasonCodedFailClosed verifies that a "git not on PATH"
-// error from krusty is mapped to a reason-coded render error (fail-closed) while
+// TestGitMissingError_FailClosed verifies that a "git not on PATH"
+// error from krusty is mapped to a non-nil render error (fail-closed) while
 // preserving the actionable, credential-free diagnostic. Even if the git binary
-// is accidentally absent from the operator image, the operator surfaces a clean,
-// classifiable error that still tells the operator what went wrong.
-func TestGitMissingError_ReasonCodedFailClosed(t *testing.T) {
+// is accidentally absent from the operator image, the operator surfaces a clean
+// error that tells the operator what went wrong. Finding 3 removed the reason-
+// code prefix (it mislabelled local errors); the message is forwarded as-is.
+func TestGitMissingError_FailClosed(t *testing.T) {
 	// This is the exact error message krusty emits when it cannot find git:
 	// see sigs.k8s.io/kustomize/pkg/git.ClonerUsingGitExec
 	gitNotFoundErr := &gitNotFoundSimulatorError{msg: "no 'git' program on path"}
@@ -49,21 +52,21 @@ func TestGitMissingError_ReasonCodedFailClosed(t *testing.T) {
 
 	msg := sanitized.Error()
 
-	// Must carry a stable machine reason-code prefix so callers can branch on
-	// the failure class without parsing free text.
-	if !strings.Contains(msg, ":") {
-		t.Errorf("sanitized error should carry a reason-code prefix, got: %q", msg)
-	}
-
 	// The credential-free diagnostic is PRESERVED (redact-and-preserve policy).
 	if !strings.Contains(msg, "no 'git' program on path") {
 		t.Errorf("sanitized error should preserve the actionable git-missing detail, got: %q", msg)
 	}
+	// No reason-code prefix (Finding 3 removed it — it mislabelled local errors).
+	for _, prefix := range []string{"GitExecFailed:", "KustomizeBuildFailed:", "RemoteUnreachable:"} {
+		if strings.HasPrefix(msg, prefix) {
+			t.Errorf("sanitizeKrustyError must not add a reason-code prefix (Finding 3), got: %q", msg)
+		}
+	}
 }
 
-// TestGitMissingError_EndToEndReasonCoded verifies that Render() propagates the
-// reason-coded error through the full krustyRunHook path when git is absent.
-func TestGitMissingError_EndToEndReasonCoded(t *testing.T) {
+// TestGitMissingError_EndToEndFailClosed verifies that Render() propagates the
+// error through the full krustyRunHook path when git is absent.
+func TestGitMissingError_EndToEndFailClosed(t *testing.T) {
 	root := buildMinimalKustomizeRoot(t)
 	src := buildKustomizeSourceForRoot(t, root)
 

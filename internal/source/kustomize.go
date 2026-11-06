@@ -170,50 +170,41 @@ func preflightIsolationRoot(root, suffix string) string {
 }
 
 // redactCredentials removes credential substrings from a diagnostic string
-// while leaving the rest of the message intact. It targets the two forms in
+// while leaving the rest of the message intact. It targets multiple forms in
 // which a secret can appear in a krusty / git / HTTP error:
 //
-//  1. URL userinfo: scheme://user:password@host/... → scheme://host/...
-//     (both the "user:password@" and bare "user@" forms are stripped).
-//  2. git ask-pass / credential echoes of the form "https://user:token@host"
-//     embedded mid-sentence without a surrounding URL structure.
+//  1. URL userinfo up to the LAST @ before the host:
+//     scheme://user:password@host/... → scheme://[REDACTED]@host/...
+//     scheme://user:p@ss@host/...     → scheme://[REDACTED]@host/...
+//     (greedy match up to the last @ that precedes a slash/whitespace/end)
+//  2. Query parameters whose key matches common secret names (token,
+//     access_token, private_token, password, pass, secret, api_key, etc.) —
+//     the value is replaced with [REDACTED], the key is preserved.
 //
 // Everything else (hostnames, repo paths, exit codes, git subcommands, HTTP
 // status lines) is preserved so the operator keeps an actionable diagnostic.
 // This is the OWASP-aligned "redact the secret, keep the context" approach
 // rather than discarding the entire message.
-var reURLUserinfo = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]*@`)
+
+// reURLUserinfo matches URL userinfo: everything between "scheme://" and the
+// last "@" that precedes a non-whitespace host-like token. The match is greedy
+// (capturing [^\s]*) so it reaches the LAST "@" in the authority — this handles
+// both passwords containing "@" (user:p@ss@host) and normal user:token@host.
+// Passwords containing "/" (user:pa/ss@host) are also covered because [^\s]*
+// is greedy across slashes up to the last "@" before the non-whitespace tail.
+var reURLUserinfo = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^\s]*@`)
+
+// reSecretQueryParam matches secret-bearing query parameters in URLs. The key
+// is preserved; only the value (after "=") is redacted.
+var reSecretQueryParam = regexp.MustCompile(`(?i)([?&](token|access_token|private_token|password|pass|secret|api[_-]?key|x-amz-security-token|sig|signature)=)[^&\s#]*`)
 
 func redactCredentials(s string) string {
-	// Replace "scheme://userinfo@" with "scheme://" + a redaction marker so the
-	// reader can see a credential was present without seeing its value.
-	return reURLUserinfo.ReplaceAllString(s, "${1}[REDACTED]@")
-}
-
-// krustyReason classifies a raw krusty / git error into a stable, machine-
-// readable reason code. The code is safe to surface in a status condition
-// Reason field and never contains any portion of the raw error text.
-func krustyReason(raw string) string {
-	l := strings.ToLower(raw)
-	switch {
-	case strings.Contains(l, "authentication") || strings.Contains(l, "authorization") ||
-		strings.Contains(l, "403") || strings.Contains(l, "401") ||
-		strings.Contains(l, "could not read username") || strings.Contains(l, "terminal prompts disabled"):
-		return "RemoteAuthenticationFailed"
-	case strings.Contains(l, "submodule"):
-		return "SubmoduleFetchFailed"
-	case strings.Contains(l, "could not resolve host") || strings.Contains(l, "connection refused") ||
-		strings.Contains(l, "timeout") || strings.Contains(l, "timed out") ||
-		strings.Contains(l, "no such host") || strings.Contains(l, "i/o timeout"):
-		return "RemoteUnreachable"
-	case strings.Contains(l, "not found") || strings.Contains(l, "404") ||
-		strings.Contains(l, "couldn't find remote ref") || strings.Contains(l, "did not match any file"):
-		return "RemoteNotFound"
-	case strings.Contains(l, "exec") && strings.Contains(l, "git"):
-		return "GitExecFailed"
-	default:
-		return "KustomizeBuildFailed"
-	}
+	// 1. Redact URL userinfo. The regex is greedy up to the last "@" so it
+	//    handles user:token@host, user:p@ss@host, and user:pa/ss@host forms.
+	s = reURLUserinfo.ReplaceAllString(s, "${1}[REDACTED]@")
+	// 2. Redact secret query-parameter values.
+	s = reSecretQueryParam.ReplaceAllString(s, "${1}[REDACTED]")
+	return s
 }
 
 // sanitizeKrustyError maps a raw error from krusty.Run to a sanitized render
@@ -224,19 +215,21 @@ func krustyReason(raw string) string {
 // caller mis-configured a URL), full git command strings, or HTTP status lines.
 // Of these, only embedded credentials are sensitive. Rather than discard the
 // whole message (which also hides purely-local overlay errors such as a bad
-// patch target or invalid YAML, and would regress diagnostics vs. main), we:
+// patch target or invalid YAML, and would regress diagnostics vs. main), we
+// forward the raw message with credential substrings redacted (redactCredentials)
+// — hostnames, repo paths, exit codes and git subcommands are preserved.
 //
-//   - Prefix a stable machine reason code (krustyReason) so callers can branch
-//     on the failure class without parsing free text.
-//   - Forward the raw message with credential substrings redacted
-//     (redactCredentials) — hostnames, repo paths, exit codes and git
-//     subcommands are preserved.
+// NOTE: a reason-code prefix (krustyReason) was removed in Finding 3. It
+// substring-matched the whole message and mislabelled purely-local errors
+// (duplicate ClusterRole, patch-no-target, random temp-dir names) as
+// "RemoteAuthenticationFailed" etc. Nothing outside tests read the label; the
+// condition reason stays SeedRenderFailed/ShootRenderFailed. The label is gone.
 //
-// The returned error uses errors.New (not fmt.Errorf with %w) so the ORIGINAL
-// unredacted error is never reachable via errors.Unwrap / errors.As — a caller
-// cannot accidentally re-log the pre-redaction text. The redacted text is still
-// embedded in the returned error's message, which is intentional: it is safe by
-// construction and is what the operator needs to debug.
+// The returned error uses fmt.Errorf without %w so the ORIGINAL unredacted error
+// is never reachable via errors.Unwrap / errors.As — a caller cannot accidentally
+// re-log the pre-redaction text. The redacted text is still embedded in the
+// returned error's message, which is intentional: it is safe by construction and
+// is what the operator needs to debug.
 //
 // Returns nil iff err == nil (success path unaffected).
 func sanitizeKrustyError(err error) error {
@@ -244,5 +237,5 @@ func sanitizeKrustyError(err error) error {
 		return nil
 	}
 	redacted := redactCredentials(err.Error())
-	return fmt.Errorf("%s: %s", krustyReason(err.Error()), redacted) //nolint:err113 // dynamic sanitized message by design; no sentinel needed
+	return fmt.Errorf("%s", redacted) //nolint:err113 // dynamic sanitized message by design; no sentinel needed
 }
