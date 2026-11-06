@@ -19,6 +19,8 @@ Gated off by default; the wrapper chart enables it and supplies the SA values.
 {{- if .Values.shootRbac.enabled }}
 {{- $saName := required "shootRbac.serviceAccountName is required when shootRbac.enabled" .Values.shootRbac.serviceAccountName }}
 {{- $saNamespace := required "shootRbac.serviceAccountNamespace is required when shootRbac.enabled" .Values.shootRbac.serviceAccountNamespace }}
+{{- $extra := "" }}
+{{- with .Values.extraRbac.shootApplier }}{{ $extra = printf "%s\n" (toYaml . | trim) }}{{- end }}
 {{- $objects := printf `apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -46,7 +48,7 @@ rules:
 - apiGroups: [""]
   resources: ["serviceaccounts", "configmaps", "secrets", "services", "namespaces"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
----
+%s---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -61,7 +63,7 @@ subjects:
 - kind: ServiceAccount
   name: %s
   namespace: %s
-` $saName $saNamespace $saName $saNamespace }}
+` $saName $saNamespace $extra $saName $saNamespace }}
 apiVersion: resources.gardener.cloud/v1alpha1
 kind: ManagedResource
 metadata:
