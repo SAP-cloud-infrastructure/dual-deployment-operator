@@ -59,6 +59,12 @@ type Deps struct {
 	// source is returned unwrapped (uncached behavior preserved, matching
 	// pre-Phase-7.5 semantics).
 	RenderCache *renderCache
+	// RequireSHAPinnedRemoteBases, when true, enables strict SHA-pin enforcement
+	// for kustomize remote bases: every remote base reference discovered during
+	// preflight must be pinned to a full 40-hex lowercase commit SHA. Any tag,
+	// branch, or undeterminable ref is rejected before any fetch occurs.
+	// When false (default), tags and branches are accepted.
+	RequireSHAPinnedRemoteBases bool
 }
 
 // NewHelmLoader returns a production OCI+HTTP ChartLoader (no cache). The
@@ -115,7 +121,7 @@ func From(spec v1alpha1.Source, deps Deps) (Source, error) {
 			return nil, errors.New("source: kustomize source requires a RootResolver (none configured)")
 		}
 		resolver := withGitCreds(deps.RootResolver, deps.CredentialResolver, spec.Kustomize.AuthSecretRef)
-		inner := &kustomizeSource{spec: spec.Kustomize, resolver: resolver}
+		inner := &kustomizeSource{spec: spec.Kustomize, resolver: resolver, requireSHAPinnedRemoteBases: deps.RequireSHAPinnedRemoteBases}
 		return wrapKustomize(inner, resolver, spec.Kustomize, deps.RenderCache), nil
 	default:
 		return nil, errors.New("source: exactly one of source.helm or source.kustomize must be set")
