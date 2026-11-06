@@ -27,6 +27,25 @@ func requireEquivalenceEnabled(t *testing.T) {
 	}
 }
 
+// requireKustomizeEquivalenceEnabled gates TestEquivalenceIPAMCAPI, which only
+// requires outbound HTTPS access to github.com and raw.githubusercontent.com
+// (no internal keppel OCI registry). Set RUN_KUSTOMIZE_EQUIVALENCE=1 to run it
+// independently of the Helm-source suite; RUN_EQUIVALENCE=1 also enables it
+// (superset). The test is NOT in the default unit-test job because live git
+// clones and krusty remote-base fetches carry a flakiness risk (rate limits,
+// transient failures) unsuitable for the standard CI test run.
+//
+// TODO(follow-up): add an in-image equivalence step (build the operator image,
+// run krusty inside a container against the ipam-capi fixture) so remote-base
+// coverage is also exercised via the image that ships, not just go-test.
+// Tracked in the Dockerfile comment for the krusty git binary.
+func requireKustomizeEquivalenceEnabled(t *testing.T) {
+	t.Helper()
+	if os.Getenv("RUN_KUSTOMIZE_EQUIVALENCE") == "" && os.Getenv("RUN_EQUIVALENCE") == "" {
+		t.Skip("TestEquivalenceIPAMCAPI requires RUN_KUSTOMIZE_EQUIVALENCE=1 or RUN_EQUIVALENCE=1 (needs outbound HTTPS to github.com)")
+	}
+}
+
 // operators enumerates the fixtures exercised by the equivalence suite. One
 // subtest per operator.
 var operators = []string{

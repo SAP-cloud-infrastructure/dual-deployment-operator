@@ -58,8 +58,19 @@ import (
 //
 // The comparison catches any regression in the operator's preflighting, resolver,
 // or render pipeline that causes it to diverge from the direct krusty output.
+//
+// # Gate
+//
+// Gated on RUN_KUSTOMIZE_EQUIVALENCE=1 (narrower than RUN_EQUIVALENCE, which also
+// requires the internal keppel OCI registry). This test only needs outbound HTTPS
+// access to github.com and raw.githubusercontent.com — available on public GitHub
+// Actions runners and local dev. It is NOT enabled by default because live git
+// clones and krusty remote-base fetches carry a flakiness risk (rate limits,
+// transient network failures) that is unsuitable for the standard unit-test job.
+// Enable it in a dedicated network-access job (or locally) by setting
+// RUN_KUSTOMIZE_EQUIVALENCE=1. RUN_EQUIVALENCE=1 also enables it (superset).
 func TestEquivalenceIPAMCAPI(t *testing.T) {
-	requireEquivalenceEnabled(t)
+	requireKustomizeEquivalenceEnabled(t)
 
 	f, err := LoadFixture("../../testdata/fixtures/ipam-capi")
 	if err != nil {

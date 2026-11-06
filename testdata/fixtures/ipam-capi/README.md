@@ -66,10 +66,25 @@ is self-contained and renders today; that is what this fixture covers.
 
 ## Network requirements
 
-Gated on `RUN_EQUIVALENCE=1`. Both sides require outbound network access to `github.com`
-and `raw.githubusercontent.com` to fetch the upstream krusty remote bases. All sources
-are public/anonymous — no OCI registry credentials needed (unlike the four Helm fixtures
-which additionally require the internal keppel OCI registry for `helm dependency build`).
+Gated on `RUN_KUSTOMIZE_EQUIVALENCE=1` (or `RUN_EQUIVALENCE=1`, which is a
+superset). Both sides require outbound HTTPS network access to `github.com` and
+`raw.githubusercontent.com` to fetch the upstream krusty remote bases. All sources
+are public/anonymous — no OCI registry credentials needed (unlike the four Helm
+fixtures which additionally require the internal keppel OCI registry for
+`helm dependency build`).
+
+The test is **not** in the default `Test` CI job because live git clones and
+krusty remote-base fetches carry a flakiness risk (rate limits, transient network
+failures from CI runners to github.com) that is unsuitable for the standard
+unit-test run. Enable it in a dedicated network-access CI job by setting
+`RUN_KUSTOMIZE_EQUIVALENCE=1`. Public GitHub Actions runners do have access to
+`github.com`, but the risk of transient failures in high-concurrency runs is real.
+
+> **TODO (follow-up):** add an in-image equivalence step — build the operator
+> image and exercise the ipam-capi remote-base render from inside the container —
+> so the `git` binary that ships in the image is also exercised end-to-end, not
+> only via `go test`. The Dockerfile comment for the krusty `git` binary tracks
+> this.
 
 ## Files
 
