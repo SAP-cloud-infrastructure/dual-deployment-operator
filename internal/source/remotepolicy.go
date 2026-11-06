@@ -59,7 +59,7 @@ func (k refKind) String() string {
 }
 
 // kustField identifies which kustomization.yaml field a reference came from.
-// The strict-mode validation pass (D2') uses this because loader semantics
+// The strict-mode validation pass uses this because loader semantics
 // differ by field: upstream dispatches `resources` and `components` through
 // different code paths, and most other fetch-capable fields are local-only in
 // our strict contract.
@@ -509,12 +509,16 @@ func pathSegmentCount(path string) int {
 // kustomizationYAML is a typed struct for parsing kustomization.yaml. We parse
 // every top-level field that can carry a reference to another resource, patch,
 // generator config, or data file — not only resources/components/bases. The
-// strict-mode policy (D1') enforces its contract on the TOP-LEVEL references
+// strict-mode policy enforces its contract on the TOP-LEVEL references
 // the operator parses here, before handing the root to krusty. Transitive refs
 // that krusty resolves internally are NOT pre-enforced (same model as Flux /
 // Argo CD): they are contained operationally (NetworkPolicy egress + least-
-// privilege credentials) plus the always-on HTTPS-only and transport-timeout
-// hardening.
+// privilege credentials) plus the always-on transport hardening — the
+// hardened http.DefaultTransport timeouts (all transitive net/http fetches)
+// and GIT_ALLOW_PROTOCOL=https on the git CLI krusty shells out to. Note the
+// git-CLI HTTPS-only constraint does NOT reach krusty's own net/http GET of a
+// remote FILE inside a base (that is Go http, not git), so transitive fetches
+// are not scheme-gated to HTTPS the way top-level refs are.
 //
 // Field groups:
 //   - Resource-like (may legitimately be remote): resources, components, bases.
@@ -711,11 +715,11 @@ func walkDir(absRoot, dir string, visited, seen map[string]bool, remotes *[]Remo
 	}
 
 	// Collect every reference together with the field it came from. Field
-	// context is required by the strict-mode validation pass (D1'/D2'): remote
+	// context is required by the strict-mode validation pass: remote
 	// values are only legitimate in resource-like fields, and loader semantics
 	// differ between resources and components. Using a freshly-allocated slice
 	// (never append-aliasing kust.Resources' backing array) is also required for
-	// correctness — see the original #r1 aliasing fix.
+	// correctness — see the aliasing invariant noted on collectFieldRefs.
 	fieldRefs := collectFieldRefs(kust)
 
 	for _, fr := range fieldRefs {
@@ -814,6 +818,23 @@ type fieldRef struct {
 	field kustField
 }
 
+// isInlineConfig reports whether s is an inline kustomize builtin-plugin config
+// (a generator/transformer/validator body written in place) rather than a path
+// or remote reference. It parses s as YAML and treats it as an inline config
+// iff the result is a mapping with BOTH apiVersion and kind set — the structural
+// signature of a plugin config. A path or URL unmarshals to a bare scalar string
+// (not a map), and an arbitrary scalar lacks apiVersion/kind, so both are
+// correctly reported as non-config references. This replaces the old "contains
+// a newline" heuristic, which both missed block-scalar remote refs (a literal
+// "- |" keeps a trailing newline) and false-positived single-line flow configs.
+func isInlineConfig(s string) bool {
+	var m map[string]any
+	if err := yaml.Unmarshal([]byte(s), &m); err != nil {
+		return false
+	}
+	return m["apiVersion"] != nil && m["kind"] != nil
+}
+
 // collectFieldRefs gathers every reference string from a parsed kustomization,
 // tagged with its originating field. Resource-like fields (resources/
 // components/bases) may legitimately be remote; every other fetch-capable field
@@ -825,7 +846,7 @@ type fieldRef struct {
 // error messages stable.
 //
 // A freshly-allocated slice is returned; we never append into any input slice's
-// backing array (the #r1 aliasing invariant).
+// backing array (the slice-aliasing invariant).
 func collectFieldRefs(kust *kustomizationYAML) []fieldRef {
 	refs := make([]fieldRef, 0,
 		len(kust.Resources)+len(kust.Components)+len(kust.Bases))
@@ -851,14 +872,19 @@ func collectFieldRefs(kust *kustomizationYAML) []fieldRef {
 	// Tree-edge fields (generators/transformers/validators, path form only).
 	// krusty runs these through accumulateResources so a local directory is a
 	// real kustomization tree edge that walkDir must recurse into in strict mode.
-	// Inline multiline docs (containing "\n") are skipped here — they are not
-	// references; classifyKustomizeReference would misread the first line of
-	// "apiVersion: builtin\n..." as an SCP host:path, causing a spurious error.
-	// A direct remote value in this field is rejected in strict mode (same as
-	// fieldLocalOnly Rule 1, applied via fieldTreeEdge in validateStrictRemoteRefs).
+	// Inline builtin plugin configs (apiVersion + kind set) are skipped here —
+	// they are not references; classifyKustomizeReference would misread the first
+	// line of "apiVersion: builtin\n..." as an SCP host:path, causing a spurious
+	// error. We detect them structurally via isInlineConfig rather than by the
+	// presence of a "\n": a literal block scalar ("- |") keeps a trailing newline
+	// even for a plain remote URL (so a newline test would wrongly skip a real
+	// remote ref — thread 0fZ3m), and a single-line flow inline config carries no
+	// newline (so a newline test would wrongly treat it as a path). A direct
+	// remote value in this field is rejected in strict mode (same as fieldLocalOnly
+	// Rule 1, applied via fieldTreeEdge in validateStrictRemoteRefs).
 	addTreeEdge := func(s string) {
-		if s != "" && !strings.ContainsAny(s, "\n") {
-			refs = append(refs, fieldRef{raw: s, field: fieldTreeEdge})
+		if trimmed := strings.TrimSpace(s); trimmed != "" && !isInlineConfig(trimmed) {
+			refs = append(refs, fieldRef{raw: trimmed, field: fieldTreeEdge})
 		}
 	}
 	for _, g := range kust.Generators {
@@ -1166,8 +1192,8 @@ func preflightSHAGate(isolationRoot, entryPoint string, requireSHAPinnedRemoteBa
 		return nil
 	}
 
-	// Phase 2a (D2'): strict-mode acceptance rules. Classification stays flag-
-	// agnostic (Phase 1), so these field/kind-specific rejections apply ONLY in
+	// Strict-mode acceptance rules. Classification stays flag-
+	// agnostic, so these field/kind-specific rejections apply ONLY in
 	// strict mode — flag-off behavior is unchanged. This rejects remote values
 	// in local-only fields, closes the HTTP-first remote-file bypass (accepting
 	// only canonical raw.githubusercontent.com SHA-pinned file URLs), and
@@ -1196,7 +1222,7 @@ func preflightSHAGate(isolationRoot, entryPoint string, requireSHAPinnedRemoteBa
 	return nil
 }
 
-// validateStrictRemoteRefs applies the strict-mode (D2') acceptance rules to the
+// validateStrictRemoteRefs applies the strict-mode acceptance rules to the
 // remote references discovered by the tree walk. It is called ONLY when
 // requireSHAPinnedRemoteBases is true, so permissive (flag-off) behavior is
 // completely unaffected.

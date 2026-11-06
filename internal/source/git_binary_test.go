@@ -17,12 +17,12 @@
 //  2. The actionable diagnostic ("no 'git' program on path") is PRESERVED.
 //  3. Full end-to-end path: Render() propagates the error.
 //
-// Note: Finding 3 removed the reason-code prefix — it mislabelled local errors.
-// The message is forwarded redacted-but-intact, with no prefix added.
+// Note: the earlier reason-code prefix was removed because it mislabelled
+// local errors. The message is forwarded redacted-but-intact, with no prefix.
 //
-// This is a pure-Go unit test; it does not build or run containers. The manual
-// container verification procedure for a new image is documented in the
-// deployment guide under docs/ (see PR #63).
+// This is a pure-Go unit test; it does not build or run containers. Manual
+// container verification of a new image (git present, HTTPS fetch, submodule)
+// is a release-time step, not something this unit test exercises.
 
 package source
 
@@ -36,8 +36,8 @@ import (
 // error from krusty is mapped to a non-nil render error (fail-closed) while
 // preserving the actionable, credential-free diagnostic. Even if the git binary
 // is accidentally absent from the operator image, the operator surfaces a clean
-// error that tells the operator what went wrong. Finding 3 removed the reason-
-// code prefix (it mislabelled local errors); the message is forwarded as-is.
+// error that tells the operator what went wrong. The earlier reason-code
+// prefix was removed (it mislabelled local errors); the message is forwarded as-is.
 func TestGitMissingError_FailClosed(t *testing.T) {
 	// This is the exact error message krusty emits when it cannot find git:
 	// see sigs.k8s.io/kustomize/pkg/git.ClonerUsingGitExec
@@ -56,10 +56,10 @@ func TestGitMissingError_FailClosed(t *testing.T) {
 	if !strings.Contains(msg, "no 'git' program on path") {
 		t.Errorf("sanitized error should preserve the actionable git-missing detail, got: %q", msg)
 	}
-	// No reason-code prefix (Finding 3 removed it — it mislabelled local errors).
+	// No reason-code prefix (it was removed — it mislabelled local errors).
 	for _, prefix := range []string{"GitExecFailed:", "KustomizeBuildFailed:", "RemoteUnreachable:"} {
 		if strings.HasPrefix(msg, prefix) {
-			t.Errorf("sanitizeKrustyError must not add a reason-code prefix (Finding 3), got: %q", msg)
+			t.Errorf("sanitizeKrustyError must not add a reason-code prefix, got: %q", msg)
 		}
 	}
 }

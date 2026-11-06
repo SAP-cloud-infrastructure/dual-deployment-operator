@@ -63,8 +63,10 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 
 	flag.BoolVar(&requireSHAPinnedRemoteBases, "kustomize-require-sha-pinned-remote-bases", false,
-		"When true, every kustomize remote base reference must be pinned to a full 40-hex lowercase commit SHA. "+
-			"Tags, branches, and undeterminable refs are rejected before any fetch occurs.")
+		"When true, every remote base reference the operator parses from the top-level kustomization must be pinned "+
+			"to a full 40-hex lowercase commit SHA; tags, branches, and undeterminable refs are rejected before any "+
+			"fetch occurs. Transitive/nested refs that krusty resolves internally, and remote refs embedded inside a "+
+			"builtin plugin config file, are NOT pre-enforced (matching Flux/Argo CD).")
 }
 
 //nolint:gocyclo
@@ -121,16 +123,21 @@ func main() {
 		}
 	}
 
-	// Constrain ALL git-driven fetches (top-level AND transitive bases/submodules
-	// that git itself resolves) to HTTPS only. GIT_ALLOW_PROTOCOL behaves as
-	// git's protocol.allow=never with https=always: any protocol not listed is
-	// denied, so ssh://, git://, file:// and others are blocked at the git layer
-	// for both the operator's own git calls and any krusty-triggered fetches.
+	// Constrain git-CLI-driven fetches to HTTPS only. GIT_ALLOW_PROTOCOL behaves
+	// as git's protocol.allow=never with https=always: any protocol not listed is
+	// denied, so ssh://, git://, file:// and others are blocked at the git-CLI
+	// layer. This covers the fetches krusty runs by shelling out to the `git`
+	// binary for remote bases and the submodules it resolves internally.
 	//
 	// This is set via os.Setenv in main() (not only as a Deployment env var) so
 	// a Helm manager.env list-override cannot silently drop it.
 	//
 	// What this does NOT cover:
+	//   - The operator's OWN go-git calls (the kustomize RootResolver that clones
+	//     the root URL). go-git does not honor GIT_ALLOW_PROTOCOL — it still
+	//     accepts http:// and file://. The root URL's transport is NOT constrained
+	//     here; CEL admission only requires a ref= on the root URL. If HTTPS-only
+	//     must hold for the root it needs a separate, explicit scheme check.
 	//   - krusty's own net/http GET of a remote FILE inside a remote base (that
 	//     is Go http, not git); constrained by classifyHTTPURL on top-level refs
 	//     and the hardened transport (HardenDefaultHTTPTransport below).

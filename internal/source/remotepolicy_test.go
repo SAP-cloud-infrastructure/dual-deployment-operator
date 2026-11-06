@@ -1753,7 +1753,7 @@ func TestReadKustomizationBounded_NoCredentialLeakOnEvalSymlinksError(t *testing
 }
 
 // ---------------------------------------------------------------------------
-// Strict-mode acceptance matrix (D2'): krusty v0.21.1 dispatches any http(s)
+// Strict-mode acceptance matrix: krusty v0.21.1 dispatches any http(s)
 // URL to its HTTP file loader FIRST (accumulateFile → IsRemoteFile checks only
 // the scheme), falling back to a git clone only on failure. So an https:// URL
 // in a resource-like field (resources/bases, and path-valued
@@ -1962,7 +1962,7 @@ func TestPreflightSHAGate_PermissiveAllowsHTTPSGitDirInResources(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Round-3 Finding 1 & 2: inline doc guard + fieldTreeEdge recursion
+// inline doc guard + fieldTreeEdge recursion
 // ---------------------------------------------------------------------------
 
 // TestCollectFieldRefs_InlineGeneratorDocSkipped verifies that an inline
@@ -2014,6 +2014,53 @@ func TestCollectFieldRefs_InlineValidatorDocSkipped(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Round-4 thread 0fZ3m: inline-config detection must not rely on "\n"
+// ---------------------------------------------------------------------------
+// The old guard skipped entries CONTAINING a newline. Two cases slipped
+// through: (1) a block-scalar remote ref whose trailing token absorbs the
+// newline (no "\n" left) was treated as a path and git-fetched; (2) a
+// single-line FLOW inline config (no "\n") was misread as an SCP path and
+// wrongly rejected. The guard now parses the entry and treats it as an inline
+// config iff it unmarshals to a map with apiVersion AND kind set.
+
+// TestCollectFieldRefs_BlockScalarRemoteRefNotSkipped verifies case (1): a
+// transformers block-scalar whose value is a remote ref with a trailing "&x="
+// (which can swallow the newline) must still be collected as a fieldTreeEdge
+// reference so strict mode can reject it — it is NOT an inline config.
+func TestCollectFieldRefs_BlockScalarRemoteRefNotSkipped(t *testing.T) {
+	remote := "https://github.com/org/repo//dir?ref=main&x="
+	kust := &kustomizationYAML{
+		Transformers: []string{remote},
+	}
+	refs := collectFieldRefs(kust)
+	found := false
+	for _, r := range refs {
+		if r.raw == remote && r.field == fieldTreeEdge {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("block-scalar remote ref %q must be collected as a fieldTreeEdge reference, got refs: %+v", remote, refs)
+	}
+}
+
+// TestCollectFieldRefs_FlowInlineConfigSkipped verifies case (2): a single-line
+// flow-style inline config (no "\n") must be recognised as an inline config and
+// skipped, not misclassified as an SCP path reference.
+func TestCollectFieldRefs_FlowInlineConfigSkipped(t *testing.T) {
+	inline := "{apiVersion: builtin, kind: PrefixSuffixTransformer, metadata: {name: pfx}, prefix: foo-}"
+	kust := &kustomizationYAML{
+		Transformers: []string{inline},
+	}
+	refs := collectFieldRefs(kust)
+	for _, r := range refs {
+		if r.raw == inline {
+			t.Errorf("flow-style inline config must be skipped, but got ref: %q (field %s)", r.raw, r.field)
+		}
+	}
+}
+
 // TestPreflightSHAGate_InlineTransformerRendersOK_FlagOn verifies that a
 // kustomization.yaml with an inline PrefixSuffixTransformer doc (no remote
 // refs) passes the preflight gate with requireSHAPinnedRemoteBases=true AND
@@ -2030,7 +2077,7 @@ func TestPreflightSHAGate_InlineTransformerRendersOK_FlagOn(t *testing.T) {
 }
 
 // TestPreflightSHAGate_TransformersLocalDirUnpinnedBase_StrictRejects verifies
-// Finding 2: a transformers: entry pointing at a local DIRECTORY that itself
+// Tree-edge recursion: a transformers: entry pointing at a local DIRECTORY that itself
 // contains a kustomization.yaml with an unpinned remote base must be REJECTED
 // in strict mode (the fieldTreeEdge category causes walkDir to recurse into it).
 func TestPreflightSHAGate_TransformersLocalDirUnpinnedBase_StrictRejects(t *testing.T) {
@@ -2064,6 +2111,20 @@ func TestPreflightSHAGate_TransformersDirectRemote_Rejected(t *testing.T) {
 	err := preflightSHAGate(root, root, true)
 	if err == nil {
 		t.Fatal("strict mode must reject direct remote value in transformers field, got nil")
+	}
+}
+
+// TestPreflightSHAGate_TransformersBlockScalarRemote_Rejected verifies thread
+// 0fZ3m: a transformers block-scalar ("- |") whose value is a remote ref
+// carries a TRAILING newline from the literal block scalar. The old guard
+// skipped anything containing "\n", so this real remote ref slipped past strict
+// mode and krusty would git-fetch it. It must now be REJECTED in strict mode.
+func TestPreflightSHAGate_TransformersBlockScalarRemote_Rejected(t *testing.T) {
+	body := "transformers:\n  - |\n    https://github.com/org/repo//dir?ref=main&x=\n"
+	root := writeKust(t, body)
+	err := preflightSHAGate(root, root, true)
+	if err == nil {
+		t.Fatal("strict mode must reject a block-scalar remote ref in transformers, got nil")
 	}
 }
 

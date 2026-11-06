@@ -103,8 +103,10 @@ func (k *kustomizeSource) Render(ctx context.Context, mode Mode, namespace strin
 	resMap, err := runKrusty(kust, root)
 	if err != nil {
 		// sanitizeKrustyError maps krusty's raw error (which can contain
-		// repository URLs, credentials, or git command output) to a stable
-		// sanitized message. The raw error is dropped — never forwarded.
+		// repository URLs, credentials, or git command output) to a
+		// credential-redacted message. The error TEXT is preserved (host, repo,
+		// path, exit code, git subcommand) with only credentials redacted; it is
+		// forwarded as a flat %s (no %w), so the raw error is not Unwrap-able.
 		return nil, fmt.Errorf("source: kustomize build (mode=%s): %w", mode, sanitizeKrustyError(err))
 	}
 	yamlBytes, err := resMap.AsYaml()
@@ -170,16 +172,22 @@ func preflightIsolationRoot(root, suffix string) string {
 }
 
 // redactCredentials removes credential substrings from a diagnostic string
-// while leaving the rest of the message intact. It targets multiple forms in
-// which a secret can appear in a krusty / git / HTTP error:
+// while leaving the rest of the message intact. It targets two forms in which
+// a secret can appear in a krusty / git / HTTP error:
 //
-//  1. URL userinfo up to the LAST @ before the host:
+//  1. URL userinfo: everything between "scheme://" and the "@" that terminates
+//     the authority (before the first "/", "?" or "#"):
 //     scheme://user:password@host/... → scheme://[REDACTED]@host/...
 //     scheme://user:p@ss@host/...     → scheme://[REDACTED]@host/...
-//     (greedy match up to the last @ that precedes a slash/whitespace/end)
-//  2. Query parameters whose key matches common secret names (token,
-//     access_token, private_token, password, pass, secret, api_key, etc.) —
-//     the value is replaced with [REDACTED], the key is preserved.
+//     The match is bounded to the authority so a benign "@" that appears LATER
+//     in the path or query (e.g. ?ref=pkg@1.2.3) is NOT swallowed.
+//  2. Query parameters: the value of every query parameter is redacted UNLESS
+//     its key is on a small allowlist of known-safe kustomize remote-base
+//     params (ref, version, timeout, submodules). This fail-closed allowlist
+//     catches credential params that a denylist missed — X-Amz-Signature,
+//     X-Amz-Credential, X-Goog-Signature, X-Goog-Credential, key, auth, token,
+//     access_token, … — without having to enumerate them. The key is preserved;
+//     only the value (after "=") is replaced with [REDACTED].
 //
 // Everything else (hostnames, repo paths, exit codes, git subcommands, HTTP
 // status lines) is preserved so the operator keeps an actionable diagnostic.
@@ -187,23 +195,41 @@ func preflightIsolationRoot(root, suffix string) string {
 // rather than discarding the entire message.
 
 // reURLUserinfo matches URL userinfo: everything between "scheme://" and the
-// last "@" that precedes a non-whitespace host-like token. The match is greedy
-// (capturing [^\s]*) so it reaches the LAST "@" in the authority — this handles
-// both passwords containing "@" (user:p@ss@host) and normal user:token@host.
-// Passwords containing "/" (user:pa/ss@host) are also covered because [^\s]*
-// is greedy across slashes up to the last "@" before the non-whitespace tail.
-var reURLUserinfo = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^\s]*@`)
+// "@" that terminates the authority. The userinfo body reaches the LAST "@"
+// before a query/fragment start, so it covers an embedded "@" or "/" in a
+// password (user:p@ss@host, user:pa/ss@host) but stops at the first "?" or "#"
+// — a "@" that appears later in the query (e.g. ?ref=pkg@1.2.3) is never
+// consumed.
+var reURLUserinfo = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^\s?#]*@`)
 
-// reSecretQueryParam matches secret-bearing query parameters in URLs. The key
-// is preserved; only the value (after "=") is redacted.
-var reSecretQueryParam = regexp.MustCompile(`(?i)([?&](token|access_token|private_token|password|pass|secret|api[_-]?key|x-amz-security-token|sig|signature)=)[^&\s#]*`)
+// allowlistedQueryParams are the query-parameter keys whose values are known to
+// be non-sensitive for kustomize remote bases; everything else is redacted.
+var allowlistedQueryParams = map[string]bool{
+	"ref":        true,
+	"version":    true,
+	"timeout":    true,
+	"submodules": true,
+}
+
+// reQueryParam matches any single "?key=value" or "&key=value" pair. The value
+// stops at the next query separator ("&"), fragment ("#"), whitespace, or a
+// surrounding shell/quote delimiter ("'", `"`) so a trailing "': HTTP Error" in
+// a wrapped error message is not eaten. Group 1 = separator, group 2 = key,
+// group 3 = value.
+var reQueryParam = regexp.MustCompile(`([?&])([A-Za-z0-9_.-]+)=([^&\s#'"]*)`)
 
 func redactCredentials(s string) string {
-	// 1. Redact URL userinfo. The regex is greedy up to the last "@" so it
-	//    handles user:token@host, user:p@ss@host, and user:pa/ss@host forms.
+	// 1. Redact URL userinfo (bounded to the authority).
 	s = reURLUserinfo.ReplaceAllString(s, "${1}[REDACTED]@")
-	// 2. Redact secret query-parameter values.
-	s = reSecretQueryParam.ReplaceAllString(s, "${1}[REDACTED]")
+	// 2. Redact every query-parameter value whose key is not allowlisted.
+	s = reQueryParam.ReplaceAllStringFunc(s, func(m string) string {
+		sub := reQueryParam.FindStringSubmatch(m)
+		sep, key := sub[1], sub[2]
+		if allowlistedQueryParams[strings.ToLower(key)] {
+			return m
+		}
+		return sep + key + "=[REDACTED]"
+	})
 	return s
 }
 
@@ -219,7 +245,7 @@ func redactCredentials(s string) string {
 // forward the raw message with credential substrings redacted (redactCredentials)
 // — hostnames, repo paths, exit codes and git subcommands are preserved.
 //
-// NOTE: a reason-code prefix (krustyReason) was removed in Finding 3. It
+// NOTE: an earlier reason-code prefix (krustyReason) was removed. It
 // substring-matched the whole message and mislabelled purely-local errors
 // (duplicate ClusterRole, patch-no-target, random temp-dir names) as
 // "RemoteAuthenticationFailed" etc. Nothing outside tests read the label; the

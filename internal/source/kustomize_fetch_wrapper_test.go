@@ -91,7 +91,7 @@ func TestSanitizeKrustyError_NilPassthrough(t *testing.T) {
 // credentials stripped, but safe diagnostic context (hostname, repo path, exit
 // code) PRESERVED so the operator can act on it. This is the OWASP/K8s-aligned
 // policy: redact the secret, keep the context — not the old blanket "discard
-// everything" behavior. No reason-code prefix is added (Finding 3: the prefix
+// everything" behavior. No reason-code prefix is added (the prefix
 // mislabelled local errors as RemoteAuthenticationFailed, etc.).
 func TestSanitizeKrustyError_GitExecCredentialsRedactedContextPreserved(t *testing.T) {
 	// Simulate a krusty git-exec failure WITHOUT credentials: only safe context.
@@ -114,10 +114,10 @@ func TestSanitizeKrustyError_GitExecCredentialsRedactedContextPreserved(t *testi
 	if !strings.Contains(msg, "128") {
 		t.Errorf("redact-and-preserve must keep the exit code for diagnostics, got: %q", msg)
 	}
-	// No reason-code prefix: Finding 3 removed it (it mislabelled local errors).
+	// No reason-code prefix: it was removed (it mislabelled local errors).
 	for _, prefix := range []string{"RemoteUnreachable:", "RemoteAuthenticationFailed:", "KustomizeBuildFailed:", "GitExecFailed:", "RemoteNotFound:", "SubmoduleFetchFailed:"} {
 		if strings.HasPrefix(msg, prefix) {
-			t.Errorf("sanitizeKrustyError must not add a reason-code prefix (Finding 3), got: %q", msg)
+			t.Errorf("sanitizeKrustyError must not add a reason-code prefix (no reason-code prefix), got: %q", msg)
 		}
 	}
 }
@@ -155,7 +155,7 @@ func TestSanitizeKrustyError_CredentialBearingURLRedacted(t *testing.T) {
 // TestSanitizeKrustyError_HTTPErrorContextPreserved verifies that an HTTP loader
 // error keeps its safe context (status code, host, path) under redact-and-
 // preserve — there are no credentials to strip here, so the message is forwarded
-// as-is (no reason-code prefix). Finding 3 removed the prefix because it
+// as-is (no reason-code prefix). The prefix was removed because it
 // mislabelled purely-local errors as RemoteAuthenticationFailed etc.
 func TestSanitizeKrustyError_HTTPErrorContextPreserved(t *testing.T) {
 	rawErr := errors.New("HTTP Error: status code 403 (Forbidden) fetching https://internal-registry.corp.example/manifests/base.yaml")
@@ -173,15 +173,15 @@ func TestSanitizeKrustyError_HTTPErrorContextPreserved(t *testing.T) {
 	if !strings.Contains(msg, "base.yaml") {
 		t.Errorf("redact-and-preserve must keep file path for diagnostics, got: %q", msg)
 	}
-	// No reason-code prefix (Finding 3).
+	// No reason-code prefix (no reason-code prefix).
 	if strings.HasPrefix(msg, "RemoteAuthenticationFailed:") {
-		t.Errorf("sanitizeKrustyError must not add a reason-code prefix (Finding 3), got: %q", msg)
+		t.Errorf("sanitizeKrustyError must not add a reason-code prefix (no reason-code prefix), got: %q", msg)
 	}
 }
 
 // TestSanitizeKrustyError_LocalBuildErrorPreserved verifies that a purely-local
 // krusty build error (e.g. a YAML parse failure — no remote involved) is
-// forwarded with its diagnostic text intact. Finding 3 removed the reason-code
+// forwarded with its diagnostic text intact. The reason-code
 // prefix because it mislabelled local errors as RemoteAuthenticationFailed etc.
 func TestSanitizeKrustyError_LocalBuildErrorPreserved(t *testing.T) {
 	rawErr := errors.New("kustomization.yaml: error converting YAML to JSON: yaml: line 7: mapping values are not allowed in this context")
@@ -195,9 +195,9 @@ func TestSanitizeKrustyError_LocalBuildErrorPreserved(t *testing.T) {
 	if !strings.Contains(msg, "mapping values are not allowed") {
 		t.Errorf("redact-and-preserve must keep local build diagnostic, got: %q", msg)
 	}
-	// No reason-code prefix (Finding 3): a local error must not be mislabelled.
+	// No reason-code prefix (no reason-code prefix): a local error must not be mislabelled.
 	if strings.HasPrefix(msg, "KustomizeBuildFailed:") {
-		t.Errorf("sanitizeKrustyError must not add a reason-code prefix (Finding 3), got: %q", msg)
+		t.Errorf("sanitizeKrustyError must not add a reason-code prefix (no reason-code prefix), got: %q", msg)
 	}
 }
 
@@ -233,9 +233,9 @@ func TestKrustyRunWrapper_FetchFailureProducesRenderError(t *testing.T) {
 	if !strings.Contains(msg, "private.corp.example") {
 		t.Errorf("redact-and-preserve must keep the (credential-free) host context, got: %q", msg)
 	}
-	// No reason-code prefix (Finding 3 removed it).
+	// No reason-code prefix (it was removed).
 	if strings.Contains(msg, "RemoteUnreachable:") {
-		t.Errorf("sanitizeKrustyError must not add a reason-code prefix (Finding 3), got: %q", msg)
+		t.Errorf("sanitizeKrustyError must not add a reason-code prefix (no reason-code prefix), got: %q", msg)
 	}
 }
 
@@ -293,9 +293,9 @@ func TestKrustyRunWrapper_HTTPNon2xxProducesRenderError(t *testing.T) {
 	if !strings.Contains(msg, "cdn.internal.corp.example") {
 		t.Errorf("redact-and-preserve must keep the (credential-free) host context, got: %q", msg)
 	}
-	// No reason-code prefix (Finding 3 removed it).
+	// No reason-code prefix (it was removed).
 	if strings.Contains(msg, "RemoteNotFound:") {
-		t.Errorf("sanitizeKrustyError must not add a reason-code prefix (Finding 3), got: %q", msg)
+		t.Errorf("sanitizeKrustyError must not add a reason-code prefix (no reason-code prefix), got: %q", msg)
 	}
 }
 
@@ -353,7 +353,7 @@ func TestKrustyRunWrapper_FailClosedNeverSilentPartialRender(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Round-3 Finding 4: redactCredentials — additional gap coverage
+// redactCredentials — additional gap coverage
 // ---------------------------------------------------------------------------
 
 // TestRedactCredentials_TokenQueryParam verifies that ?token=SECRET is redacted.
@@ -426,5 +426,88 @@ func TestRedactCredentials_BenignURL(t *testing.T) {
 	got := redactCredentials(input)
 	if got != input {
 		t.Errorf("redactCredentials must not modify a URL with no credentials: in=%q out=%q", input, got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Round-4 thread 0fZ3q: redactCredentials — allowlist query-param policy
+// ---------------------------------------------------------------------------
+// The denylist of secret-looking keys missed several real credential params
+// (X-Amz-Signature, X-Amz-Credential, X-Goog-Signature, X-Goog-Credential,
+// key, auth). The policy is now an ALLOWLIST: only ref, version, timeout and
+// submodules keep their value; every other query value is redacted. These
+// tests assert the new fail-closed contract and the two regex side effects.
+
+// TestRedactCredentials_AllowlistKeepsKnownSafeParams verifies that the four
+// allowlisted kustomize query params are preserved verbatim.
+func TestRedactCredentials_AllowlistKeepsKnownSafeParams(t *testing.T) {
+	input := "fetch https://github.com/org/repo//dir?ref=abc123&version=v1.2.3&timeout=30s&submodules=false: exit status 1"
+	got := redactCredentials(input)
+	for _, keep := range []string{"ref=abc123", "version=v1.2.3", "timeout=30s", "submodules=false"} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("redactCredentials must preserve allowlisted param %q, got: %q", keep, got)
+		}
+	}
+	if strings.Contains(got, "[REDACTED]") {
+		t.Errorf("redactCredentials must not redact any allowlisted param, got: %q", got)
+	}
+}
+
+// TestRedactCredentials_AllowlistRedactsCloudSignatureParams verifies that the
+// previously-missed cloud credential params are redacted under the allowlist.
+func TestRedactCredentials_AllowlistRedactsCloudSignatureParams(t *testing.T) {
+	cases := []struct {
+		name   string
+		key    string
+		secret string
+	}{
+		{"amz-signature", "X-Amz-Signature", "deadbeefcafe0001"},
+		{"amz-credential", "X-Amz-Credential", "AKIAIOSFODNN7EXAMPLE"},
+		{"goog-signature", "X-Goog-Signature", "0123456789abcdef"},
+		{"goog-credential", "X-Goog-Credential", "svcacct%40proj.iam"},
+		{"bare-key", "key", "AIzaSyExampleSecretValue"},
+		{"bare-auth", "auth", "Bearer-xyz-token"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := "fetch https://cdn.example.com/x.yaml?" + tc.key + "=" + tc.secret + " failed"
+			got := redactCredentials(input)
+			if strings.Contains(got, tc.secret) {
+				t.Errorf("redactCredentials must redact %s value, got: %q", tc.key, got)
+			}
+			if !strings.Contains(got, tc.key+"=") {
+				t.Errorf("redactCredentials must preserve the key %q, got: %q", tc.key, got)
+			}
+			if !strings.Contains(got, "[REDACTED]") {
+				t.Errorf("expected [REDACTED] marker, got: %q", got)
+			}
+		})
+	}
+}
+
+// TestRedactCredentials_ClosingQuoteNotEaten verifies the first side effect:
+// the value match must stop at a closing quote so "?token=X':" keeps the "':".
+func TestRedactCredentials_ClosingQuoteNotEaten(t *testing.T) {
+	input := "exec 'git fetch https://cdn.example.com/x?token=GHSATSECRET': HTTP Error"
+	got := redactCredentials(input)
+	if strings.Contains(got, "GHSATSECRET") {
+		t.Errorf("redactCredentials must redact the token value, got: %q", got)
+	}
+	if !strings.Contains(got, "': HTTP Error") {
+		t.Errorf("redactCredentials must not eat the closing quote; want \"': HTTP Error\" preserved, got: %q", got)
+	}
+}
+
+// TestRedactCredentials_RefWithAtPreservesHost verifies the second side effect:
+// a benign ?ref=pkg@1.2.3 must NOT be swallowed by the userinfo regex into
+// https://[REDACTED]@1.2.3 — the host/repo must survive.
+func TestRedactCredentials_RefWithAtPreservesHost(t *testing.T) {
+	input := "fetch https://github.com/o/r//b?ref=pkg@1.2.3: exit status 1"
+	got := redactCredentials(input)
+	if !strings.Contains(got, "github.com/o/r//b") {
+		t.Errorf("redactCredentials must preserve host/repo for ?ref=pkg@1.2.3, got: %q", got)
+	}
+	if !strings.Contains(got, "ref=pkg@1.2.3") {
+		t.Errorf("redactCredentials must preserve a benign ?ref=pkg@1.2.3, got: %q", got)
 	}
 }
