@@ -82,12 +82,19 @@ out to it.
 
 Before invoking krusty, walk the reachable kustomization tree (root + any local
 directories), decode each kustomization with typed parsing, and classify every
-`resources`/`components`/`bases` entry as local, remote-git-directory, or
-remote-file. Under an operator-level flag
-`--kustomize-require-sha-pinned-remote-bases` (default `false`), reject any remote
-reference whose embedded ref is not a 40-hex lowercase commit SHA, **before any
-fetch**. Default-off is tag-permissive (matches krusty/peers); on is a hardening
-mode.
+reference across all fields the parser understands: `resources`/`components`/`bases`
+(remote refs allowed); `generators`/`transformers`/`validators` path form (tree-edge:
+local dirs recursed, direct remote rejected in strict mode; inline YAML docs
+silently skipped); and local-only fields (patches, crds, configMap/secretGenerator
+file refs, openapi, configurations). The `git::` go-getter force-prefix is stripped
+before classification. Under an operator-level flag
+`--kustomize-require-sha-pinned-remote-bases` (default `false`), reject any
+top-level remote reference whose embedded ref is not a 40-hex lowercase commit SHA,
+**before any fetch**. Accepted SHA-pinned forms: scheme-less GitHub shorthand
+`github.com/org/repo//path?ref=<sha>`; `git::https://` prefixed variant (stripped
+then validated); canonical `https://raw.githubusercontent.com/.../<sha>/<path>` for
+single files. Default-off is tag-permissive (matches krusty/peers); on is a
+hardening mode.
 
 *Rationale / alternatives.* CEL on the CR validates only the **root** URL, never
 transitive refs, so pin policy must be a DDO-side runtime pass. This is fully
@@ -97,14 +104,25 @@ offers controller-level `--no-remote-bases=true` (default off) as its blunt
 analogue. An operator-level flag (not a CRD field) matches Flux's controller-level
 precedent and avoids an API change.
 
-### D3 — Fail-closed sanitized wrapper
+Top-level-only enforcement matches both Flux and Argo CD (neither pre-enforces
+transitive refs nested inside remote repositories; krusty resolves those
+internally and there is no loader-interception seam in krusty v0.21.1).
+
+### D3 — Fail-closed sanitized wrapper (REDACT-AND-PRESERVE)
 
 Wrap the krusty `Run` error path so an unreachable remote, a non-2xx remote file,
-or a git fetch failure fails the render closed with a sanitized message that never
-echoes credentials or full URLs. No silent partial render.
+or a git fetch failure fails the render closed. The surfaced error uses a
+**redact-and-preserve** policy: non-credential diagnostic context (host, repository
+path, exit code, git subcommand) is preserved to keep the error actionable; only
+credential material (URL userinfo including passwords containing `@` or `/`, and
+secret-bearing query params such as `token=`, `access_token=`, `password=`, `sig=`)
+is redacted. The error never contains credentials. No silent partial render.
 
 *Rationale.* krusty/git errors already propagate; the wrapper guarantees closed
-failure and redaction, matching DDO's existing error hygiene.
+failure and credential redaction, matching DDO's existing error hygiene. A
+reason-code prefix was considered but removed: it substring-matched the whole
+message and mislabelled purely-local errors; the condition reason stays
+`SeedRenderFailed`/`ShootRenderFailed`.
 
 ### D4 — Credentials: ambient only, documented
 
@@ -131,6 +149,43 @@ remote-base fetches; both rely on CNI/NetworkPolicy.
 
 Add a **new phase after the current last phase** in `docs/implementation.md`;
 leave completed/ongoing phases untouched (phase-scoping rule).
+
+### D7 — Top-level-only SHA enforcement (matches Flux/Argo CD)
+
+The SHA-pin gate enforces only on the top-level remote references the operator
+parses directly. Transitive/nested remote refs that krusty resolves internally
+(inside remote repositories krusty has already fetched) are NOT pre-enforced.
+This matches both Flux and Argo CD: neither peer pre-enforces transitive bases;
+both rely on operational controls (NetworkPolicy egress, least-privilege
+credentials) for the transitive layer. krusty v0.21.1 has no loader-interception
+seam that would allow hooking into transitive fetches.
+
+### D8 — GIT_ALLOW_PROTOCOL=https (process-wide git protocol constraint)
+
+`GIT_ALLOW_PROTOCOL=https` is set via `os.Setenv` early in `main()` (after
+`flag.Parse()`, before `HardenDefaultHTTPTransport`). This constrains ALL
+git-driven fetches — the operator's own go-git calls AND krusty-triggered remote
+bases AND submodules — to HTTPS only. Setting it in-process (not only as a
+Deployment env var) ensures a Helm `manager.env` list-override cannot silently
+drop it.
+
+### D9 — Keep-global-transport rationale (HardenDefaultHTTPTransport)
+
+`HardenDefaultHTTPTransport` mutates the process-global `http.DefaultTransport`
+because krusty's file loader and Helm's OCI registry client have no transport
+injection seam. This is the only lever available. The side effect on Helm OCI
+pulls (they inherit the timeouts) is accepted as beneficial: it bounds a hung
+registry. go-git (captures `DefaultTransport` at package init before this call)
+and kube clients (build their own transport) are unaffected.
+
+### D10 — REDACT-AND-PRESERVE error policy
+
+Sanitized krusty/git errors preserve non-credential diagnostic context (host,
+repository path, exit code, git subcommand) to keep the error actionable. Only
+credential material is redacted: URL userinfo (passwords containing `@` or `/`),
+and secret-bearing query params (`token=`, `access_token=`, `password=`, `sig=`,
+etc.). No reason-code prefix is added (it mislabelled purely-local errors and was
+removed in round-3).
 
 ## Guardrail retention (the heart of this change)
 
@@ -163,10 +218,22 @@ model. Baseline = issue-#58 guardrails the hermetic sibling change provides.
 
 ## Migration Plan
 
-Additive and flag-gated (default off → no behavior change for existing CRs).
+The flag is additive and default-off, but **flag-off is not a zero-behavior-change
+deployment**: the following apply unconditionally regardless of the flag:
+
+- Remote reference classification and rejection of always-banned forms (`http://`,
+  SSH, embedded userinfo, URL fragments, username-prefixed refs).
+- The REDACT-AND-PRESERVE sanitized error format replacing raw krusty/git errors.
+- `GIT_ALLOW_PROTOCOL=https` set at process startup (constrains all git-driven
+  fetches — krusty transitive bases, submodules — to HTTPS).
+- `HardenDefaultHTTPTransport` (dial 10 s, TLS 10 s, response-header 15 s,
+  per-read idle 30 s, HTTP/1.1 forced; affects Helm OCI client as a side effect).
+
+SHA-pin enforcement is the only behavior gated on the flag.
+
 Deploy: ship the image with `git` + the new flag. Rollback: unset the flag / prior
-image; remote bases simply return to the (failing-without-git) baseline, no state
-to unwind.
+image. The above unconditional hardening is lost on rollback, but no persistent
+state is involved.
 
 ## Open Questions
 

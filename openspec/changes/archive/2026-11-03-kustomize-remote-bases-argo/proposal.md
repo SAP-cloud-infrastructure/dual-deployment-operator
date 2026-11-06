@@ -47,9 +47,12 @@ both gaps.
 - Update the authoring guide and egress operational notes for the live-fetch
   contract.
 
-Not changing: the `RootResolver` interface, the go-git root resolver, Helm, the
-render cache, or deployment egress policy defaults. No vendored CRDs are
-de-vendored (`ipam-capi-remote` stays vendored).
+Not changing: the `RootResolver` interface, the go-git root resolver, or
+deployment egress policy defaults. No vendored CRDs are de-vendored
+(`ipam-capi-remote` stays vendored). Note: although Helm source rendering is
+not in scope, the process-global `HardenDefaultHTTPTransport` applied by this
+change does affect Helm's OCI registry client as an accepted side effect (the
+client clones `http.DefaultTransport` per call; see design.md D9).
 
 ## Capabilities
 
