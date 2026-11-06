@@ -1,0 +1,116 @@
+<!--
+SPDX-FileCopyrightText: 2026 SAP SE or an SAP affiliate company
+SPDX-License-Identifier: Apache-2.0
+-->
+
+# Spec delta: kustomize-remote-base-policy
+
+## ADDED Requirements
+
+### Requirement: Remote reference classification before render
+
+Before invoking krusty, the operator MUST walk the reachable kustomization tree
+(the resolved root and any local directories it references) and classify every
+reference it understands across all kustomization fields: `resources`,
+`components`, `bases`, `generators`, `transformers`, `validators` (path form —
+inline YAML docs are silently skipped), `patches[].path`, `patchesJson6902[].path`,
+`patchesStrategicMerge` (file-path form), `replacements[].path`, `crds`,
+`configurations`, `openapi.path`, and `configMapGenerator`/`secretGenerator` file
+and env refs. Each reference is classified as: a local path, a remote
+git-directory base, a remote single-file reference, a tree-edge path
+(generators/transformers/validators), or a local-only path (patches/crds/etc.).
+Classification MUST use the bounded public-API grammar (HTTPS repositories with a
+mandatory `?ref=`, plus GitHub shorthand; the `git::` go-getter force-prefix is
+stripped before classification) and MUST reject unsupported remote forms (SSH,
+embedded userinfo credentials, URL fragments, `http://`, ambiguous repository
+paths) with a sanitized error that never contains credential material but preserves
+host/repo/path/exit context (redact-and-preserve). The walk MUST detect cycles and
+MUST NOT follow references outside the resolved root boundary when walking local
+directories.
+
+#### Scenario: supported remote git base is classified and accepted
+
+- **WHEN** a reachable kustomization lists a `base` of the form
+  `github.com/org/repo//path?ref=<ref>`
+- **THEN** the preflight classifies it as a remote git-directory base
+- **AND** the render proceeds to krusty without error from classification
+
+#### Scenario: SSH or credential-embedding remote form is rejected
+
+- **WHEN** a reachable kustomization lists a remote reference using an SSH URL or
+  one embedding `user:token@host` userinfo
+- **THEN** the preflight fails the render with a sanitized error
+- **AND** the error does not contain the credential value
+
+#### Scenario: cycle in local references is rejected
+
+- **WHEN** the reachable local kustomization directories form a reference cycle
+- **THEN** the preflight fails the render with a cycle error rather than looping
+
+---
+
+### Requirement: Optional SHA-pin enforcement for remote references
+
+The operator MUST expose an operator-level flag
+`--kustomize-require-sha-pinned-remote-bases` (default `false`). When the flag is
+`false`, remote references pinned by tag, branch, or SHA are all permitted (the
+tag-permissive default, matching krusty and peer controllers). When the flag is
+`true`, the preflight MUST reject — **before any remote fetch** — any top-level
+remote reference it parses that is not SHA-pinned in a form krusty actually
+honors. In strict mode the accepted remote forms are: (a) a scheme-less GitHub
+shorthand git directory `github.com/<owner>/<repo>//<path>?ref=<40-hex-sha>`
+(krusty resolves it via git, so the SHA is honored); (b) a `git::https://`
+go-getter-prefixed variant of the same (the prefix is stripped before
+validation); and (c) a canonical single file
+`https://raw.githubusercontent.com/<owner>/<repo>/<40-hex-sha>/<path>`
+(immutable content addressed by SHA, not valid in `components`). An `https://` or
+`http://` git-directory reference in a resource-like field (`resources`/`bases`)
+MUST be rejected in strict mode: krusty issues an HTTP GET for any `http(s)://`
+reference before falling back to a git clone, so the `?ref=` SHA is not
+guaranteed to be honored. The `components` field is exempt (krusty resolves it
+through the git route directly). A reference with no determinable ref MUST be
+rejected in strict mode. Non-resource-like fields (`generators`, `transformers`,
+`validators`) must reference LOCAL paths; a direct remote value there is rejected.
+Local directories referenced by those fields ARE recursed into. Enforcement covers
+the top-level references the operator parses, not transitive bases nested inside
+remote repositories (krusty resolves those internally, and — matching Flux and
+Argo CD — no tool pre-enforces them).
+
+#### Scenario: strict mode rejects a tag-pinned remote base
+
+- **WHEN** the flag is `true` and a reachable kustomization references a remote
+  base pinned by a tag (not a 40-hex SHA)
+- **THEN** the preflight fails the render before any fetch
+- **AND** the error states a 40-character lowercase hexadecimal SHA ref is required
+
+#### Scenario: strict mode accepts a SHA-pinned remote base
+
+- **WHEN** the flag is `true` and the remote base is pinned by a 40-hex commit SHA
+- **THEN** the preflight accepts it and the render proceeds to krusty
+
+#### Scenario: permissive default accepts a tag-pinned remote base
+
+- **WHEN** the flag is `false` (default) and the remote base is pinned by a tag
+- **THEN** the preflight accepts it and the render proceeds to krusty
+
+---
+
+### Requirement: Fail-closed sanitized remote fetch
+
+A remote reference that krusty cannot fetch (unreachable host, git fetch failure,
+or a non-2xx remote single-file response) MUST fail the render closed. The
+operator MUST NOT emit a silent partial render that omits the unreachable
+reference, and the surfaced error MUST be sanitized so it never contains
+credential material. Non-credential diagnostic context (host, repository, path,
+exit code) MAY be preserved to aid debugging (redact-and-preserve).
+
+#### Scenario: unreachable remote base fails the render
+
+- **WHEN** a classified remote reference cannot be fetched during krusty `Run`
+- **THEN** the render returns an error
+- **AND** no manifest set is produced that silently omits the unreachable content
+
+#### Scenario: fetch error is sanitized
+
+- **WHEN** the underlying git/HTTP fetch error contains a URL or credential hint
+- **THEN** the surfaced render error does not contain the credential value

@@ -27,6 +27,12 @@ type Fixture struct {
 	CRFile        string           `json:"cr"`
 	Exclusions    []ExclusionEntry `json:"exclusions"`
 
+	// KustomizePath, when non-empty, documents the kustomize overlay path used by
+	// the operator-side CR's source.kustomize.url. For kustomize-based fixtures
+	// (KustomizePath set), the golden render also uses this path via
+	// RenderGoldenKustomize instead of the Helm chart path in ChartPath.
+	KustomizePath string `json:"kustomizePath,omitempty"`
+
 	ComparedKinds      []string         `json:"comparedKinds"`
 	KnownDivergences   []ExclusionEntry `json:"knownDivergences"`
 	IgnoreLabels       []string         `json:"ignoreLabels"`
@@ -59,9 +65,12 @@ func LoadFixture(dir string) (*Fixture, error) {
 	}
 	f.CR = cr
 
-	f.OverlayRaw, err = os.ReadFile(filepath.Join(dir, f.OverlayValues))
-	if err != nil {
-		return nil, err
+	// OverlayValues is Helm-specific; kustomize fixtures omit it.
+	if f.OverlayValues != "" {
+		f.OverlayRaw, err = os.ReadFile(filepath.Join(dir, f.OverlayValues))
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &f, nil
 }
