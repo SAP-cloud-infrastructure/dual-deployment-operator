@@ -1542,24 +1542,27 @@ The analogous gap does **not** exist on the kustomize path. [`internal/source/ku
 > is reachable (local dev, internal runners). The comparator's normalization/allowlist unit
 > tests always run offline.
 >
-> **`ipam-capi` equivalence is DEFERRED to a standalone future follow-up (not tied to any
-> phase).** It is not sequenced within the phase plan because closing it depends on a
-> `KustomizeSource` capability that is itself a separate CRD + source change; schedule it
-> independently once that extension exists. Two ipam-capi-specific blockers surfaced (the
-> first fixed here, the second deferred):
+> **`ipam-capi` equivalence — the shoot half HAS LANDED; only the seed half is
+> DEFERRED.** The shoot/`managedresources` overlay is exercised by
+> `TestEquivalenceIPAMCAPI` (gated on `RUN_KUSTOMIZE_EQUIVALENCE=1`, see
+> `internal/equivalence/ipam_capi_equivalence_test.go`). What remains deferred is
+> the seed/`manager` half, which depends on a `KustomizeSource` capability that is
+> itself a separate CRD + source change; schedule it independently once that
+> extension exists. Two ipam-capi-specific blockers surfaced (the
+> first fixed here, the second — seed-only — deferred):
 > 1. *Fixed in this change:* the production git `RootResolver` (`fetchSHA`) used a
 >    `Depth: 1` shallow fetch and could not check out an arbitrary historical commit
 >    SHA — see the `kustomize-root-resolver` spec delta + `TestGitResolverResolvesHistoricalSHA`.
-> 2. *Deferred:* ipam-capi's kustomize overlays reference patch files by
+> 2. *Deferred (seed overlay only):* ipam-capi's kustomize overlays reference patch files by
 >    **repo-root-relative** paths (`patches[].path: kustomize/ipam-capi-remote/manager/…`),
 >    so today's `make build-` runs kustomize from the repo root. The operator's
 >    `KustomizeSource` (`url` + `seedPath`/`shootPath`) resolves the build dir to the
 >    overlay **subdir**, so those relative patch paths double and the seed/`manager`
->    overlay fails to build (`no such file`). Closing ipam-capi equivalence requires
+>    overlay fails to build (`no such file`). Closing the seed half requires
 >    extending `KustomizeSource` so the clone root and the kustomize-build dir can differ
 >    (build from the repo root, target the overlay) — a CRD + source change (design §9.4),
 >    hence its own follow-up rather than part of the equivalence-tests change. The
->    `managedresources`/shoot overlay is self-contained and would render; only the
+>    `managedresources`/shoot overlay is self-contained and renders today; only the
 >    seed overlay is blocked.
 
 > **Subchart-wrapping equivalence fixture — FOLLOW-UP (Phase 7.6 regression guard).** Once

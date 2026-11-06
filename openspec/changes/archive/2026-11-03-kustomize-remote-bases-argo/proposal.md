@@ -49,10 +49,11 @@ both gaps.
 
 Not changing: the `RootResolver` interface, the go-git root resolver, or
 deployment egress policy defaults. No vendored CRDs are de-vendored
-(`ipam-capi-remote` stays vendored). Note: although Helm source rendering is
-not in scope, the process-global `HardenDefaultHTTPTransport` applied by this
-change does affect Helm's OCI registry client as an accepted side effect (the
-client clones `http.DefaultTransport` per call; see design.md D9).
+(`ipam-capi-remote` stays vendored). This change does not mutate the
+process-global `http.DefaultTransport`: an earlier in-process transport-hardening
+attempt was removed as an anti-pattern in favour of operational egress control
+(see design.md D9). The chart ships an optional egress `NetworkPolicy` as the
+recommended destination-control layer.
 
 ## Capabilities
 

@@ -138,12 +138,31 @@ ever knows about its own repo"); Flux's remote-base fetch does **not** receive t
 (kustomize-controller issues #158, #392). So ambient-only is aligned, not a
 regression versus peers. Primary guidance: use **public** remote bases, or vendor.
 
-### D5 — Egress is operational, not in-process
+### D5 — Egress is operational; hostname control and source trust are out of scope
 
 Document that reaching remote hosts requires NetworkPolicy egress (the verified
 Gardener labels `networking.gardener.cloud/to-dns` + `to-public-networks` +
 `to-private-networks`). Neither peer documents a remote-host allowlist for
 remote-base fetches; both rely on CNI/NetworkPolicy.
+
+DDO does **not** ship hostname-level egress control, a source allowlist, or a
+proxy. Remote fetch is enabled by default (as in Argo CD), and trust is split:
+**which** sources are trusted is the user's responsibility (RBAC on DDO
+resources + review of the referenced repos; SHA pinning available opt-in via
+`--kustomize-require-sha-pinned-remote-bases`), while **network egress** is the
+platform's (on Gardener, `to-public-networks` blocks private and CGNAT ranges).
+
+*Rationale.* Hostname filtering does not address the real risk — applying
+untrusted *content*. `github.com`/`ghcr.io` are multi-tenant, so a hostname
+allowlist admits an attacker's repo as readily as ours, and the network layer
+cannot distinguish `github.com/sap/...` from `github.com/attacker/...` (the path
+is inside TLS). This matches Argo CD (`sourceRepos` admin allowlist, egress left
+to the platform) and Flux (RBAC on source objects). No reliable hostname
+mechanism exists on the target anyway: no Istio sidecar (so `ServiceEntry` /
+`REGISTRY_ONLY` never applies), no Cilium (`toFQDNs` unavailable), and Calico OSS
+has no native FQDN egress. See
+[`docs/decisions/egress-hostname-control.md`](../../../../docs/decisions/egress-hostname-control.md)
+for the full decision, options considered, and accepted residual risks.
 
 ### D6 — Phase placement
 
@@ -163,20 +182,36 @@ seam that would allow hooking into transitive fetches.
 ### D8 — GIT_ALLOW_PROTOCOL=https (process-wide git protocol constraint)
 
 `GIT_ALLOW_PROTOCOL=https` is set via `os.Setenv` early in `main()` (after
-`flag.Parse()`, before `HardenDefaultHTTPTransport`). This constrains ALL
-git-driven fetches — the operator's own go-git calls AND krusty-triggered remote
-bases AND submodules — to HTTPS only. Setting it in-process (not only as a
+`flag.Parse()`). This constrains the
+git-CLI fetches krusty shells out to — krusty-triggered remote bases AND
+submodules — to HTTPS only. Setting it in-process (not only as a
 Deployment env var) ensures a Helm `manager.env` list-override cannot silently
 drop it.
 
-### D9 — Keep-global-transport rationale (HardenDefaultHTTPTransport)
+**It does NOT cover the operator's own go-git calls.** The `RootResolver`
+clones the configured source-root URL with go-git, which does not consult
+`GIT_ALLOW_PROTOCOL`: with the variable set, the root resolver still contacts an
+`http://` server and clones `file://`. The root URL has no scheme rule of its
+own (CEL only requires `ref=`); if HTTPS-only must hold for the root it needs a
+separate explicit scheme check. Constrain the root operationally (NetworkPolicy
+egress) in the meantime.
 
-`HardenDefaultHTTPTransport` mutates the process-global `http.DefaultTransport`
-because krusty's file loader and Helm's OCI registry client have no transport
-injection seam. This is the only lever available. The side effect on Helm OCI
-pulls (they inherit the timeouts) is accepted as beneficial: it bounds a hung
-registry. go-git (captures `DefaultTransport` at package init before this call)
-and kube clients (build their own transport) are unaffected.
+### D9 — No in-process transport hardening (anti-pattern removed)
+
+An earlier revision mutated the process-global `http.DefaultTransport`
+(bounded timeouts + forced HTTP/1.1 by stripping ALPN h2) because krusty's file
+loader and Helm's OCI registry client have no transport injection seam. This was
+removed: forcing a protocol version and replacing the global transport are
+anti-patterns, and neither Flux CD nor Argo CD does it. HTTP/2 does not make
+remote content more or less trustworthy; the real risks (SSRF, oversized bodies,
+slow reads, redirects) are addressed independently. Both peer projects bound
+fetches with context/process timeouts and relocate egress control to the
+platform (NetworkPolicy, egress proxy, repo allowlists).
+
+Containment of hung, slow, or misdirected remote-base fetches is therefore
+**operational**: the chart's optional egress `NetworkPolicy` (D5), the Gardener
+egress labels on the manager pod, and the reconcile/pod lifecycle. The operator
+does not mutate `http.DefaultTransport` in-process.
 
 ### D10 — REDACT-AND-PRESERVE error policy
 
@@ -226,8 +261,9 @@ deployment**: the following apply unconditionally regardless of the flag:
 - The REDACT-AND-PRESERVE sanitized error format replacing raw krusty/git errors.
 - `GIT_ALLOW_PROTOCOL=https` set at process startup (constrains all git-driven
   fetches — krusty transitive bases, submodules — to HTTPS).
-- `HardenDefaultHTTPTransport` (dial 10 s, TLS 10 s, response-header 15 s,
-  per-read idle 30 s, HTTP/1.1 forced; affects Helm OCI client as a side effect).
+- The optional egress `NetworkPolicy` (chart) is the recommended
+  destination-control layer; the operator does not harden `http.DefaultTransport`
+  in-process (anti-pattern, removed — see D9).
 
 SHA-pin enforcement is the only behavior gated on the flag.
 

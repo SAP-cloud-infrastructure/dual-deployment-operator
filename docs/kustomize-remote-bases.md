@@ -43,8 +43,9 @@ The operator runs a preflight over the reachable kustomization tree before
 krusty fetches remote content. It classifies remote references across all
 kustomization fields it understands and rejects unsupported forms, including SSH
 URLs, `http://`, embedded user information, URL fragments, ambiguous repository
-paths, and (in strict mode) bare `https://` git directories in resource-like
-fields. Errors are sanitized: the error message preserves host/repo/path and exit
+paths, and (in strict mode) bare `https://` git directories in `resources` and
+`bases` (`components` is exempt — see the accepted-forms table). Errors are
+sanitized: the error message preserves host/repo/path and exit
 context for diagnosis but never contains credential material.
 
 ## Pin refs for reproducibility
@@ -101,6 +102,7 @@ The preflight classifies references from **all** fields it understands in each
 | Scheme-less GitHub shorthand | `github.com/org/repo//dir?ref=<40-hex-sha>` | Preferred for git directories. Krusty resolves via git so the SHA is honored. |
 | `git::https://` prefixed | `git::https://github.com/org/repo//dir?ref=<40-hex-sha>` | The `git::` go-getter force-prefix is stripped; the remaining URL is validated as above. |
 | Canonical raw GitHub file | `https://raw.githubusercontent.com/<owner>/<repo>/<40-hex-sha>/<path>` | Single file only (not valid in `components`). Immutable blob addressed by commit SHA. |
+| Bare `https://` git directory in `components` | `https://github.com/org/repo//dir?ref=<40-hex-sha>` | `components` is exempt from the bare-`https://` rejection that applies to `resources`/`bases`. The same form is rejected under `resources` and `bases`; use the scheme-less shorthand there. |
 
 **Always rejected** (flag-independent):
 
@@ -108,7 +110,9 @@ The preflight classifies references from **all** fields it understands in each
 - `ssh://` or SCP-style (`user@host:path`) references
 - References embedding URL userinfo (`user:token@host`)
 - References with URL fragments (`#`)
-- Username-prefixed refs (`user@` in the `?ref=` value)
+- Username-prefixed references — a reference that *starts* with `user@`, such as
+  `user@github.com/o/r//b?ref=<sha>` (a `user@` appearing only inside the `?ref=`
+  value, e.g. `github.com/o/r//b?ref=user@x`, is not rejected)
 
 ## Credentials and network access
 
@@ -132,27 +136,83 @@ shells out to the Git executable.
 
 ### Protocol and transport hardening
 
-The operator applies the following hardening unconditionally (flag-independent):
+The operator constrains the git protocol unconditionally (flag-independent):
 
-- **`GIT_ALLOW_PROTOCOL=https`** is set at process startup, constraining all
-  git-driven fetches — including krusty-triggered remote bases and submodules —
-  to HTTPS only. Any attempt to use `ssh://`, `git://`, `file://`, or other
-  protocols at the git layer is denied.
+- **`GIT_ALLOW_PROTOCOL=https`** is set at process startup, constraining the
+  git-driven fetches krusty runs through `git` — including krusty-triggered
+  remote bases and submodules — to HTTPS only. Any attempt to use `ssh://`,
+  `git://`, `file://`, or other protocols at the git layer is denied.
+  **The configured source-root URL is not covered by this:** it is resolved by
+  the operator's own `go-git` client, which ignores `GIT_ALLOW_PROTOCOL` — with
+  the variable set, the root resolver still contacts an `http://` server and
+  clones `file://`. Constrain the root URL operationally (NetworkPolicy egress)
+  rather than relying on this variable.
 
-- **`HardenDefaultHTTPTransport`** replaces `http.DefaultTransport` with a
-  transport that imposes explicit timeouts: dial 10 s, TLS handshake 10 s,
-  response-header receipt 15 s, per-read idle deadline 30 s, HTTP/1.1 forced.
-  Because `http.DefaultTransport` is a process global, this also affects
-  **Helm's OCI registry client** (`helm/pkg/registry.NewClient` clones
-  `DefaultTransport` per call), so OCI chart pulls inherit the same bounds.
-  The `go-git` root resolver and the kube clients are unaffected (they capture
-  `DefaultTransport` before this call runs, or build their own transport,
-  respectively).
+The operator does **not** mutate the process-global `http.DefaultTransport` or
+force HTTP/1.1 in-process. Forcing a protocol version or replacing the global
+transport is an anti-pattern — neither Flux CD nor Argo CD does it, and HTTP/2
+does not make remote content more or less trustworthy. Both projects instead
+bound fetches with timeouts and relocate egress control to the platform. This
+operator follows that norm: containment of hung, slow, or misdirected
+remote-base fetches is **operational**, not in-process:
 
-> **Note for go-makefile-maker users:** the `'**'` branch-glob variant in
-> `pull_request.branches` that supports stacked-PR bases is not emitted by the
-> current version of `go-makefile-maker`. If you need broad branch-glob support,
-> raise it upstream in `sapcc/go-makefile-maker`.
+- The chart ships an optional egress `NetworkPolicy`
+  (`networkPolicy.egress.enabled`, scoped to the manager pod) as the recommended
+  destination-control layer. Core `NetworkPolicy` expresses CIDR/port rules; for
+  FQDN allowlisting use an egress proxy or a CNI that supports it.
+- In a Gardener control-plane namespace the manager pod's egress labels
+  (`networking.gardener.cloud/to-*`) gate outbound traffic behind the
+  namespace's deny-all baseline.
+- The reconcile and pod lifecycle bound how long any single fetch can run.
+
+## Security and responsibility
+
+Live-fetching remote bases follows the Argo CD / Flux model: remote fetch is
+**enabled by default**, and trust is split across three parties. See the
+[egress and source-trust decision](decisions/egress-hostname-control.md) for the
+full rationale.
+
+| Who | Owns |
+|---|---|
+| **User** | Who may create or change DDO resources (RBAC); which repos and registries are referenced, and their review; whether to pin to commit SHAs (`--kustomize-require-sha-pinned-remote-bases`). |
+| **DDO** | Rejecting malformed or unsafe reference forms (SSH, embedded credentials, fragments, unknown schemes); local tree safety (cycles, symlink escapes); bounded fetch time; sanitized errors that never expose credentials. |
+| **Platform** | Network egress policy (on Gardener: `to-public-networks`, which blocks private and CGNAT ranges); any forward proxy with a hostname allowlist, if the platform chooses to run one. |
+
+### Hostname-level egress control is out of scope
+
+DDO does **not** restrict outbound connections by hostname (e.g. "only
+`github.com`, `ghcr.io`, `raw.githubusercontent.com`"), and does not ship a source
+allowlist or a proxy. This is deliberate:
+
+- **It does not address the main risk.** The real risk of live fetching is
+  applying untrusted *content*. `github.com` and `ghcr.io` are multi-tenant — an
+  allowlist of those hostnames admits an attacker's repo as readily as yours, and
+  the network layer cannot tell `github.com/sap/...` from
+  `github.com/attacker/...` because the path is inside TLS. Content trust belongs
+  where the source is chosen (RBAC + repo review), not at the packet layer.
+- **It matches the community norm.** Neither Argo CD nor Flux ships hostname
+  egress control; both leave egress to the platform and treat source trust as the
+  user's (Argo CD's admin-configured `sourceRepos`, Flux's RBAC on source
+  objects).
+- **No reliable mechanism exists on the target.** DDO runs in a shoot
+  control-plane namespace with no Istio sidecar (so `ServiceEntry` /
+  `REGISTRY_ONLY` never applies), Cilium is not installed (`toFQDNs`
+  unavailable), and Calico OSS has no native FQDN egress (`destination.domains`
+  is Enterprise/Cloud only). Core/Calico `NetworkPolicy` can express CIDR/port
+  rules but not hostnames. Reliable hostname allowlisting would require a
+  **platform forward proxy** that DDO consumes via `HTTPS_PROXY` / `NO_PROXY` —
+  if and when the platform runs one.
+
+### Residual risks (accepted)
+
+- Without an allowlist or RBAC restriction, any repo a DDO resource references can
+  be fetched.
+- Unpinned refs (branches, tags) can change after review unless SHA pinning is
+  enabled.
+- Nested remote bases inside a referenced repo are fetched too and are **not**
+  checked by the preflight policy engine (it sees only the locally reachable tree).
+- DDO can reach any public endpoint the platform policy allows; private ranges are
+  blocked on Gardener by `to-public-networks`.
 
 ## Runtime requirements
 
@@ -182,3 +242,12 @@ with `Read-only file system`. The deployment therefore sets
 `chart/values.yaml`. If you build your own manifests, set `TMPDIR` to a writable
 mounted path and size the volume to hold the largest clone (the stock
 `sizeLimit` is `256Mi`).
+
+When `--source-scratch-dir` is set, the operator also exports `TMPDIR` to that
+path **in-process** at startup, so a Helm-values override of the environment
+variable cannot silently drop it. Note that both the `go-git` root clone **and**
+krusty's remote-base clones land under this directory, not just krusty's — so
+size the volume for the combined peak. For reference, the `ipam-capi`
+equivalence fixture's render peaked at roughly 100 MiB of the 256 MiB default,
+so memory, not disk, is the first limit it hits (see the sizing note in the
+review discussion).
