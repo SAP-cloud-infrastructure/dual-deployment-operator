@@ -11,14 +11,22 @@ SPDX-License-Identifier: Apache-2.0
 
 Before invoking krusty, the operator MUST walk the reachable kustomization tree
 (the resolved root and any local directories it references) and classify every
-`resources`, `components`, and `bases` entry as one of: a local path, a remote
-git-directory base, or a remote single-file reference. Classification MUST use the
-bounded public-API grammar (HTTPS repositories with a mandatory `?ref=`, plus
-GitHub shorthand normalized to HTTPS) and MUST reject unsupported remote forms
-(SSH, embedded userinfo credentials, URL fragments, ambiguous repository paths)
-with a sanitized error that does not echo credentials. The walk MUST detect cycles
-and MUST NOT follow references outside the resolved root boundary when walking
-local directories.
+reference it understands across all kustomization fields: `resources`,
+`components`, `bases`, `generators`, `transformers`, `validators` (path form —
+inline YAML docs are silently skipped), `patches[].path`, `patchesJson6902[].path`,
+`patchesStrategicMerge` (file-path form), `replacements[].path`, `crds`,
+`configurations`, `openapi.path`, and `configMapGenerator`/`secretGenerator` file
+and env refs. Each reference is classified as: a local path, a remote
+git-directory base, a remote single-file reference, a tree-edge path
+(generators/transformers/validators), or a local-only path (patches/crds/etc.).
+Classification MUST use the bounded public-API grammar (HTTPS repositories with a
+mandatory `?ref=`, plus GitHub shorthand; the `git::` go-getter force-prefix is
+stripped before classification) and MUST reject unsupported remote forms (SSH,
+embedded userinfo credentials, URL fragments, `http://`, ambiguous repository
+paths) with a sanitized error that never contains credential material but preserves
+host/repo/path/exit context (redact-and-preserve). The walk MUST detect cycles and
+MUST NOT follow references outside the resolved root boundary when walking local
+directories.
 
 #### Scenario: supported remote git base is classified and accepted
 
@@ -49,19 +57,24 @@ The operator MUST expose an operator-level flag
 tag-permissive default, matching krusty and peer controllers). When the flag is
 `true`, the preflight MUST reject — **before any remote fetch** — any top-level
 remote reference it parses that is not SHA-pinned in a form krusty actually
-honors. In strict mode only two SHA-pinned forms are accepted: (a) a scheme-less
-GitHub shorthand git directory `github.com/<owner>/<repo>//<path>?ref=<40-hex-sha>`
-(krusty resolves it via git, so the SHA is honored); and (b) a canonical single
-file `https://raw.githubusercontent.com/<owner>/<repo>/<40-hex-sha>/<path>`
-(immutable content addressed by SHA). An `https://` or `http://` git-directory
-reference in a file-first field (`resources`/`bases`) MUST be rejected in strict
-mode: krusty issues an HTTP GET for any `http(s)://` reference before falling back
-to a git clone, so the `?ref=` SHA is not guaranteed to be honored. The
-`components` field is exempt (krusty resolves it through the git route directly).
-A reference with no determinable ref MUST be rejected in strict mode. Enforcement
-covers the top-level references the operator parses, not transitive bases nested
-inside remote repositories (krusty resolves those internally, and — matching Flux
-and Argo CD — no tool pre-enforces them).
+honors. In strict mode the accepted remote forms are: (a) a scheme-less GitHub
+shorthand git directory `github.com/<owner>/<repo>//<path>?ref=<40-hex-sha>`
+(krusty resolves it via git, so the SHA is honored); (b) a `git::https://`
+go-getter-prefixed variant of the same (the prefix is stripped before
+validation); and (c) a canonical single file
+`https://raw.githubusercontent.com/<owner>/<repo>/<40-hex-sha>/<path>`
+(immutable content addressed by SHA, not valid in `components`). An `https://` or
+`http://` git-directory reference in a resource-like field (`resources`/`bases`)
+MUST be rejected in strict mode: krusty issues an HTTP GET for any `http(s)://`
+reference before falling back to a git clone, so the `?ref=` SHA is not
+guaranteed to be honored. The `components` field is exempt (krusty resolves it
+through the git route directly). A reference with no determinable ref MUST be
+rejected in strict mode. Non-resource-like fields (`generators`, `transformers`,
+`validators`) must reference LOCAL paths; a direct remote value there is rejected.
+Local directories referenced by those fields ARE recursed into. Enforcement covers
+the top-level references the operator parses, not transitive bases nested inside
+remote repositories (krusty resolves those internally, and — matching Flux and
+Argo CD — no tool pre-enforces them).
 
 #### Scenario: strict mode rejects a tag-pinned remote base
 

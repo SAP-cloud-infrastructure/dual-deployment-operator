@@ -18,14 +18,22 @@ sanitized fetch; SHA-pin enforcement is opt-in via
 
 Before invoking krusty, the operator MUST walk the reachable kustomization tree
 (the resolved root and any local directories it references) and classify every
-`resources`, `components`, and `bases` entry as one of: a local path, a remote
-git-directory base, or a remote single-file reference. Classification MUST use the
-bounded public-API grammar (HTTPS repositories with a mandatory `?ref=`, plus
-GitHub shorthand normalized to HTTPS) and MUST reject unsupported remote forms
-(SSH, embedded userinfo credentials, URL fragments, ambiguous repository paths)
-with a sanitized error that does not echo credentials. The walk MUST detect cycles
-and MUST NOT follow references outside the resolved root boundary when walking
-local directories.
+reference it understands across all kustomization fields: `resources`,
+`components`, `bases`, `generators`, `transformers`, `validators` (path form —
+inline YAML docs are silently skipped), `patches[].path`, `patchesJson6902[].path`,
+`patchesStrategicMerge` (file-path form), `replacements[].path`, `crds`,
+`configurations`, `openapi.path`, and `configMapGenerator`/`secretGenerator` file
+and env refs. Each reference is classified as: a local path, a remote
+git-directory base, a remote single-file reference, a tree-edge path
+(generators/transformers/validators), or a local-only path (patches/crds/etc.).
+Classification MUST use the bounded public-API grammar (HTTPS repositories with a
+mandatory `?ref=`, plus GitHub shorthand; the `git::` go-getter force-prefix is
+stripped before classification) and MUST reject unsupported remote forms (SSH,
+embedded userinfo credentials, URL fragments, `http://`, ambiguous repository
+paths) with a sanitized error that never contains credential material but preserves
+host/repo/path/exit context (redact-and-preserve). The walk MUST detect cycles and
+MUST NOT follow references outside the resolved root boundary when walking local
+directories.
 
 #### Scenario: supported remote git base is classified and accepted
 
@@ -58,15 +66,23 @@ tag-permissive default, matching krusty and peer controllers). When the flag is
 reference whose embedded ref is not a 40-character lowercase hexadecimal commit
 SHA. Ref extraction MUST be: for a remote git base, the `?ref=` value; for a
 `raw.githubusercontent.com` single-file URL, the commit-SHA path segment after
-`<org>/<repo>`. In strict mode the ONLY accepted remote forms are (a) a
-scheme-less GitHub shorthand git-directory reference (`github.com/org/repo//path?ref=<sha>`,
-which krusty resolves via git so the SHA is honored) and (b) a canonical
+`<org>/<repo>`. In strict mode the accepted remote forms are (a) a scheme-less
+GitHub shorthand git-directory reference (`github.com/org/repo//path?ref=<sha>`,
+which krusty resolves via git so the SHA is honored); (b) a `git::https://`
+go-getter-prefixed variant of the same (the prefix is stripped and the underlying
+URL is validated as above); and (c) a canonical
 `https://raw.githubusercontent.com/<org>/<repo>/<40-hex-sha>/<path>` single file
-(an immutable blob). An `https://`/`http://` git-directory reference in a
-file-first field (`resources`/`bases`) is rejected in strict mode because krusty
-attempts an HTTP GET of the URL before falling back to git, so the `?ref=` is not
-guaranteed to be honored (`components` is exempt — krusty resolves it via git
-directly). A reference with no determinable ref MUST be rejected in strict mode.
+(an immutable blob, not valid in `components`). An `https://`/`http://`
+git-directory reference in a resource-like field (`resources`/`bases`) is rejected
+in strict mode because krusty attempts an HTTP GET of the URL before falling back
+to git, so the `?ref=` is not guaranteed to be honored (`components` is exempt —
+krusty resolves it via git directly). A reference with no determinable ref MUST be
+rejected in strict mode. Non-resource-like fields (`generators`, `transformers`,
+`validators`) must reference LOCAL paths in strict mode; a direct remote value
+there is rejected. Local directories referenced by those fields ARE recursed into,
+so an unpinned remote base inside a transformer-referenced local directory is still
+caught. The preflight does NOT parse remote paths embedded inside builtin config
+files (a documented limitation).
 
 #### Scenario: strict mode rejects a tag-pinned remote base
 
@@ -106,4 +122,6 @@ exit code) MAY be preserved to keep the error actionable (redact-and-preserve).
 
 - **WHEN** the underlying git/HTTP fetch error contains a URL or credential hint
 - **THEN** the surfaced render error does not contain the credential value
+- **AND** the error preserves non-credential diagnostic context (host, repository,
+  path, exit code, git subcommand) to keep the error actionable
 
