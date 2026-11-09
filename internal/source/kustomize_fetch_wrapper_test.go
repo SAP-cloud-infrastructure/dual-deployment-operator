@@ -511,3 +511,72 @@ func TestRedactCredentials_RefWithAtPreservesHost(t *testing.T) {
 		t.Errorf("redactCredentials must preserve a benign ?ref=pkg@1.2.3, got: %q", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Final-review finding #1 (HIGH): query-param redaction bypasses
+// ---------------------------------------------------------------------------
+// The earlier key charset [A-Za-z0-9_.-] and the quote-terminated value let
+// three real credential forms slip through unredacted. Each case is a valid
+// URL that Go's url.Parse accepts, so it can genuinely reach a forwarded error.
+
+// TestRedactCredentials_PercentEncodedKeyRedacted verifies that a
+// percent-encoded key (api%5Fkey → api_key) does not evade redaction.
+func TestRedactCredentials_PercentEncodedKeyRedacted(t *testing.T) {
+	input := "fetch https://cdn.example.com/x.yaml?api%5Fkey=SUPERSECRET failed"
+	got := redactCredentials(input)
+	if strings.Contains(got, "SUPERSECRET") {
+		t.Errorf("redactCredentials must redact a percent-encoded-key value, got: %q", got)
+	}
+	if !strings.Contains(got, "[REDACTED]") {
+		t.Errorf("expected [REDACTED] marker, got: %q", got)
+	}
+}
+
+// TestRedactCredentials_BracketKeyRedacted verifies that a key with bracket
+// characters (token[]) is still redacted.
+func TestRedactCredentials_BracketKeyRedacted(t *testing.T) {
+	input := "fetch https://cdn.example.com/x.yaml?token[]=SUPERSECRET failed"
+	got := redactCredentials(input)
+	if strings.Contains(got, "SUPERSECRET") {
+		t.Errorf("redactCredentials must redact a bracket-key value, got: %q", got)
+	}
+	if !strings.Contains(got, "[REDACTED]") {
+		t.Errorf("expected [REDACTED] marker, got: %q", got)
+	}
+}
+
+// TestRedactCredentials_EmbeddedQuoteSecretTailRedacted verifies that a quote
+// embedded inside the value (followed by more secret) does not leak the tail.
+// Distinct from TestRedactCredentials_ClosingQuoteNotEaten, where the quote is
+// a genuine closing shell quote followed by non-value text.
+func TestRedactCredentials_EmbeddedQuoteSecretTailRedacted(t *testing.T) {
+	input := "fetch https://cdn.example.com/x.yaml?token=FIRST'SECRETTAIL failed"
+	got := redactCredentials(input)
+	if strings.Contains(got, "SECRETTAIL") {
+		t.Errorf("redactCredentials must redact the secret tail after an embedded quote, got: %q", got)
+	}
+	if strings.Contains(got, "FIRST") {
+		t.Errorf("redactCredentials must redact the secret before an embedded quote, got: %q", got)
+	}
+	if !strings.Contains(got, "[REDACTED]") {
+		t.Errorf("expected [REDACTED] marker, got: %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Final-review finding #4 (LOW): userinfo regex must not consume a path "@"
+// ---------------------------------------------------------------------------
+
+// TestRedactCredentials_PathAtPreservesHost verifies that a path segment
+// containing "@" (…/repo/base@v1) is not mistaken for URL userinfo, so the
+// host and repo path survive for diagnostics.
+func TestRedactCredentials_PathAtPreservesHost(t *testing.T) {
+	input := "fetch https://example.com/repo/base@v1?ref=main: exit status 1"
+	got := redactCredentials(input)
+	if !strings.Contains(got, "example.com/repo/base@v1") {
+		t.Errorf("redactCredentials must preserve a path '@' (not userinfo), got: %q", got)
+	}
+	if strings.Contains(got, "[REDACTED]") {
+		t.Errorf("redactCredentials must not redact a path '@', got: %q", got)
+	}
+}

@@ -8,6 +8,7 @@ package source
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -176,31 +177,45 @@ func preflightIsolationRoot(root, suffix string) string {
 // a secret can appear in a krusty / git / HTTP error:
 //
 //  1. URL userinfo: everything between "scheme://" and the "@" that terminates
-//     the authority (before the first "/", "?" or "#"):
+//     the authority:
 //     scheme://user:password@host/... → scheme://[REDACTED]@host/...
 //     scheme://user:p@ss@host/...     → scheme://[REDACTED]@host/...
+//     scheme://user:pa/ss@host/...    → scheme://[REDACTED]@host/...
 //     The match is bounded to the authority so a benign "@" that appears LATER
-//     in the path or query (e.g. ?ref=pkg@1.2.3) is NOT swallowed.
+//     in the path (e.g. .../repo/base@v1) or query (e.g. ?ref=pkg@1.2.3) is NOT
+//     swallowed — the host and repo path survive for diagnostics.
 //  2. Query parameters: the value of every query parameter is redacted UNLESS
 //     its key is on a small allowlist of known-safe kustomize remote-base
 //     params (ref, version, timeout, submodules). This fail-closed allowlist
 //     catches credential params that a denylist missed — X-Amz-Signature,
 //     X-Amz-Credential, X-Goog-Signature, X-Goog-Credential, key, auth, token,
-//     access_token, … — without having to enumerate them. The key is preserved;
-//     only the value (after "=") is replaced with [REDACTED].
+//     access_token, … — without having to enumerate them. The key is matched
+//     regardless of spelling (percent-encoded "api%5Fkey", bracketed "token[]")
+//     and is percent-decoded before the allowlist comparison, so a secret key
+//     cannot evade redaction by encoding its characters, and an allowlisted key
+//     cannot be spoofed by encoding. The key is preserved; only the value
+//     (after "=") is replaced with [REDACTED]. A genuine closing shell quote
+//     that follows the value (e.g. a wrapped "…?token=X': HTTP Error") is kept,
+//     but a quote embedded inside the value (followed by more secret, e.g.
+//     "token=FIRST'SECRETTAIL") is redacted along with its tail.
 //
 // Everything else (hostnames, repo paths, exit codes, git subcommands, HTTP
 // status lines) is preserved so the operator keeps an actionable diagnostic.
 // This is the OWASP-aligned "redact the secret, keep the context" approach
 // rather than discarding the entire message.
 
-// reURLUserinfo matches URL userinfo: everything between "scheme://" and the
-// "@" that terminates the authority. The userinfo body reaches the LAST "@"
-// before a query/fragment start, so it covers an embedded "@" or "/" in a
-// password (user:p@ss@host, user:pa/ss@host) but stops at the first "?" or "#"
-// — a "@" that appears later in the query (e.g. ?ref=pkg@1.2.3) is never
-// consumed.
-var reURLUserinfo = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^\s?#]*@`)
+// reURLUserinfo matches URL userinfo bounded to the authority: everything
+// between "scheme://" and the "@" that terminates the authority. Two
+// alternatives, tried left-to-right:
+//   - "user:pass" where the password may contain "/" (user:pa/ss@host): a ":"
+//     before any "/", then anything up to the "@" (but not past "?"/"#");
+//   - "user" / "user:pass" with no "/" at all (user@host, user:p@ss@host).
+//
+// Because neither alternative crosses a "/" before the "@" without a preceding
+// ":", a path segment that merely contains "@" (…/repo/base@v1) is NOT treated
+// as userinfo, and a "@" in the query (?ref=pkg@1.2.3, after "?") is never
+// reached.
+var reURLUserinfo = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)([^\s/?#:]*:[^\s?#]*|[^\s/?#]*)@`)
 
 // allowlistedQueryParams are the query-parameter keys whose values are known to
 // be non-sensitive for kustomize remote bases; everything else is redacted.
@@ -211,12 +226,23 @@ var allowlistedQueryParams = map[string]bool{
 	"submodules": true,
 }
 
-// reQueryParam matches any single "?key=value" or "&key=value" pair. The value
-// stops at the next query separator ("&"), fragment ("#"), whitespace, or a
-// surrounding shell/quote delimiter ("'", `"`) so a trailing "': HTTP Error" in
-// a wrapped error message is not eaten. Group 1 = separator, group 2 = key,
-// group 3 = value.
-var reQueryParam = regexp.MustCompile(`([?&])([A-Za-z0-9_.-]+)=([^&\s#'"]*)`)
+// reQueryParam matches any single "?key=value" or "&key=value" pair. The key is
+// any run of non-structural characters (so percent-encoded or bracketed keys
+// match); the value runs to the next query separator ("&"), fragment ("#"), or
+// whitespace. A surrounding quote is handled in redactCredentials, not here, so
+// that an embedded-quote secret tail is still captured. Group 1 = separator,
+// group 2 = key, group 3 = value.
+var reQueryParam = regexp.MustCompile(`([?&])([^=&\s#'"]+)=([^&\s#]*)`)
+
+// isWord reports whether b is a word byte ([A-Za-z0-9_]). It distinguishes a
+// genuine closing shell quote (followed by non-word text, e.g. "': HTTP Error")
+// from a quote embedded inside a secret value (followed by more secret).
+func isWord(b byte) bool {
+	return b == '_' ||
+		(b >= 'a' && b <= 'z') ||
+		(b >= 'A' && b <= 'Z') ||
+		(b >= '0' && b <= '9')
+}
 
 func redactCredentials(s string) string {
 	// 1. Redact URL userinfo (bounded to the authority).
@@ -224,11 +250,28 @@ func redactCredentials(s string) string {
 	// 2. Redact every query-parameter value whose key is not allowlisted.
 	s = reQueryParam.ReplaceAllStringFunc(s, func(m string) string {
 		sub := reQueryParam.FindStringSubmatch(m)
-		sep, key := sub[1], sub[2]
-		if allowlistedQueryParams[strings.ToLower(key)] {
+		sep, key, val := sub[1], sub[2], sub[3]
+		// Percent-decode the key before the allowlist check so an encoded
+		// secret key (api%5Fkey) cannot evade redaction and an encoded
+		// allowlisted key cannot be spoofed. Fall back to the raw key on a
+		// decode error (fail-closed: an undecodable key is not allowlisted).
+		decodedKey := key
+		if d, err := url.QueryUnescape(key); err == nil {
+			decodedKey = d
+		}
+		if allowlistedQueryParams[strings.ToLower(decodedKey)] {
 			return m
 		}
-		return sep + key + "=[REDACTED]"
+		// Preserve a genuine closing quote and any trailing non-value text
+		// (e.g. "': HTTP Error"), but redact a secret tail that follows a
+		// quote embedded inside the value.
+		suffix := ""
+		if i := strings.IndexAny(val, `'"`); i >= 0 {
+			if i+1 >= len(val) || !isWord(val[i+1]) {
+				suffix = val[i:]
+			}
+		}
+		return sep + key + "=[REDACTED]" + suffix
 	})
 	return s
 }
