@@ -211,10 +211,16 @@ slow reads, redirects) are addressed independently. Both peer projects bound
 fetches with context/process timeouts and relocate egress control to the
 platform (NetworkPolicy, egress proxy, repo allowlists).
 
-Containment of hung, slow, or misdirected remote-base fetches is therefore
-**operational**: the chart's optional egress `NetworkPolicy` (D5), the Gardener
-egress labels on the manager pod, and the reconcile/pod lifecycle. The operator
-does not mutate `http.DefaultTransport` in-process.
+Containment of hung, slow, or misdirected remote-base fetches is split by
+concern. **Duration** is bounded by a per-render `context.WithTimeout` from the
+`--source-render-timeout` flag (default `5m`), matching Flux
+`GitRepository.spec.timeout` and Argo CD `ARGOCD_EXEC_TIMEOUT` — it cancels a
+stalled go-git root resolve or `git` remote-base fetch and frees the reconcile
+worker (it does not reach krusty's own internal `net/http` GET, which has no
+context seam). **Destination** is gated **operationally**: the chart's optional
+egress `NetworkPolicy` (D5), the Gardener egress labels on the manager pod, and
+the reconcile/pod lifecycle. The operator does not mutate `http.DefaultTransport`
+in-process.
 
 ### D10 — REDACT-AND-PRESERVE error policy
 

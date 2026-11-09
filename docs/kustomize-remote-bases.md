@@ -163,15 +163,19 @@ remote-base fetches is **operational**, not in-process:
 - In a Gardener control-plane namespace the manager pod's egress labels
   (`networking.gardener.cloud/to-*`) gate outbound traffic behind the
   namespace's deny-all baseline.
-- **Fetch duration is not bounded in-process.** `runKrusty` is invoked without a
-  context deadline, and upstream krusty fetches remote bases with a bare
-  `&http.Client{}` plus `io.ReadAll` (no timeout). An allowed-but-unresponsive
-  endpoint can therefore stall a reconcile indefinitely while the pod stays
-  healthy. This is an **accepted limitation**: bounding it reliably needs an
-  external control (a reconcile watchdog or a liveness/termination policy that
-  kills a stuck worker), not in-process transport mutation — which was removed as
-  an anti-pattern. The egress NetworkPolicy and Gardener labels gate *where* a
-  fetch may go, not *how long* it may run.
+- **Render duration is bounded by a context deadline.** A single render is
+  wrapped with `context.WithTimeout` from the `--source-render-timeout` flag
+  (default `5m`; set `0` to disable). This is the community-norm bound for GitOps
+  remote fetches — Flux uses `GitRepository.spec.timeout`, Argo CD uses
+  `ARGOCD_EXEC_TIMEOUT`. A context deadline (not transport mutation) is what
+  bounds the whole `resolve → fetch → checkout` sequence, cancels a blocked `git`
+  subprocess, and frees the stalled reconcile worker instead of blocking it
+  indefinitely. **Caveat:** the deadline reaches the go-git root resolve and the
+  `git` CLI krusty shells out to for remote bases, but **not** krusty's own
+  internal `net/http` GET of a remote base (upstream krusty uses a bare
+  `&http.Client{}` + `io.ReadAll` with no context seam). The egress NetworkPolicy
+  and Gardener labels remain the layer that gates *where* a fetch may go, as
+  opposed to *how long* it may run.
 
 ## Security and responsibility
 
@@ -183,7 +187,7 @@ full rationale.
 | Who | Owns |
 |---|---|
 | **User** | Who may create or change DDO resources (RBAC); which repos and registries are referenced, and their review; whether to pin to commit SHAs (`--kustomize-require-sha-pinned-remote-bases`). |
-| **DDO** | Rejecting malformed or unsafe reference forms (SSH, embedded credentials, fragments, unknown schemes); local tree safety (cycles, symlink escapes); sanitized errors that never expose credentials. (DDO does **not** bound fetch duration in-process — see the accepted limitation above.) |
+| **DDO** | Rejecting malformed or unsafe reference forms (SSH, embedded credentials, fragments, unknown schemes); local tree safety (cycles, symlink escapes); sanitized errors that never expose credentials; bounding render duration with a context deadline (`--source-render-timeout`, default `5m`) that cancels a stalled resolve/`git` fetch — though it does not reach krusty's own internal HTTP GET (see the render-duration note above). |
 | **Platform** | Network egress policy. Effective reachability is the **union** of the applicable NetworkPolicies — Gardener labels only *allow* the categories they name, they do not deny others. The chart's default manager-pod labels include `to-public-networks` **and** `to-private-networks`, so private ranges are reachable by default; restrict them at the platform (drop `to-private-networks`, deny-all baseline) if that is not wanted. Also: any forward proxy with a hostname allowlist, if the platform chooses to run one. |
 
 ### Hostname-level egress control is out of scope

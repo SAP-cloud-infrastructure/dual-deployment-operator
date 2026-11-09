@@ -107,7 +107,7 @@ pinning as an opt-in flag, and can restrict who creates DDO resources through RB
 | Who | Owns |
 | --- | --- |
 | **User** | Who may create or change DDO resources (RBAC); which repos and registries are referenced, and their review; whether to pin to commit SHAs (enable `--kustomize-require-sha-pinned-remote-bases`). |
-| **DDO** | Rejecting malformed or unsafe reference forms (SSH, embedded credentials, fragments, unknown schemes); local tree safety (cycles, symlink escapes); sanitized errors that never expose credentials. DDO does **not** bound fetch duration in-process (see residual risks). |
+| **DDO** | Rejecting malformed or unsafe reference forms (SSH, embedded credentials, fragments, unknown schemes); local tree safety (cycles, symlink escapes); sanitized errors that never expose credentials; bounding render duration with a `--source-render-timeout` context deadline (default `5m`) that cancels a stalled resolve/`git` fetch (does not reach krusty's own internal HTTP GET — see residual risks). |
 | **Platform** | Network egress policy. Effective reachability is the **union** of the applicable NetworkPolicies — Gardener labels only *allow* the categories they name. The chart's default manager-pod labels include `to-public-networks` **and** `to-private-networks`, so private ranges are reachable by default unless the platform drops `to-private-networks` behind a deny-all baseline; any forward proxy with a hostname allowlist, if the platform chooses to run one. |
 
 ## Consequences and follow-ups
@@ -125,10 +125,13 @@ pinning as an opt-in flag, and can restrict who creates DDO resources through RB
   `to-private-networks`, so private/internal ranges are reachable by default; the
   metadata endpoint (`169.254.169.254`) and internal services are blocked only if the
   platform drops `to-private-networks` (and link-local) behind a deny-all baseline.
-- Fetch duration is not bounded in-process (`runKrusty` has no context deadline;
-  upstream krusty uses a bare `&http.Client{}` + `io.ReadAll`), so an unresponsive
-  endpoint can stall a reconcile indefinitely. Bounding it reliably needs an external
-  watchdog, not in-process transport mutation.
+- Render duration is bounded by a `context.WithTimeout` from the
+  `--source-render-timeout` flag (default `5m`; `0` disables), matching Flux
+  `GitRepository.spec.timeout` and Argo CD `ARGOCD_EXEC_TIMEOUT`. The deadline
+  cancels a stalled go-git root resolve or `git` remote-base fetch and frees the
+  reconcile worker; it does **not** reach krusty's own internal `net/http` GET of
+  a remote base (upstream krusty uses a bare `&http.Client{}` + `io.ReadAll` with
+  no context seam).
 
 **Follow-ups:**
 
