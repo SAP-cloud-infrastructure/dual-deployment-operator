@@ -100,7 +100,7 @@ The preflight classifies references from **all** fields it understands in each
 | Form | Example | Notes |
 |---|---|---|
 | Scheme-less GitHub shorthand | `github.com/org/repo//dir?ref=<40-hex-sha>` | Preferred for git directories. Krusty resolves via git so the SHA is honored. |
-| `git::https://` prefixed | `git::https://github.com/org/repo//dir?ref=<40-hex-sha>` | The `git::` go-getter force-prefix is stripped; the remaining URL is validated as above. |
+| `git::https://` prefixed | `git::https://github.com/org/repo//dir?ref=<40-hex-sha>` | The `git::` go-getter force-prefix is stripped; the remaining URL is validated as above. **Deprecated upstream:** kustomize `v0.21.1` emits a build-time warning — *"Forcing the git protocol using the git:: URL prefix is not supported. Kustomize currently strips this invalid prefix, but will stop doing so in a future release."* Prefer the scheme-less `github.com/org/repo//dir?ref=<sha>` shorthand, which krusty resolves via git without the prefix. |
 | Canonical raw GitHub file | `https://raw.githubusercontent.com/<owner>/<repo>/<40-hex-sha>/<path>` | Single file only (not valid in `components`). Immutable blob addressed by commit SHA. |
 | Bare `https://` git directory in `components` | `https://github.com/org/repo//dir?ref=<40-hex-sha>` | `components` is exempt from the bare-`https://` rejection that applies to `resources`/`bases`. The same form is rejected under `resources` and `bases`; use the scheme-less shorthand there. |
 
@@ -163,19 +163,82 @@ remote-base fetches is **operational**, not in-process:
 - In a Gardener control-plane namespace the manager pod's egress labels
   (`networking.gardener.cloud/to-*`) gate outbound traffic behind the
   namespace's deny-all baseline.
-- **Render duration is bounded by a context deadline.** A single render is
-  wrapped with `context.WithTimeout` from the `--source-render-timeout` flag
-  (default `5m`; set `0` to disable). This is the community-norm bound for GitOps
-  remote fetches — Flux uses `GitRepository.spec.timeout`, Argo CD uses
-  `ARGOCD_EXEC_TIMEOUT`. A context deadline (not transport mutation) is what
-  bounds the whole `resolve → fetch → checkout` sequence, cancels a blocked `git`
-  subprocess, and frees the stalled reconcile worker instead of blocking it
-  indefinitely. **Caveat:** the deadline reaches the go-git root resolve and the
-  `git` CLI krusty shells out to for remote bases, but **not** krusty's own
-  internal `net/http` GET of a remote base (upstream krusty uses a bare
-  `&http.Client{}` + `io.ReadAll` with no context seam). The egress NetworkPolicy
-  and Gardener labels remain the layer that gates *where* a fetch may go, as
-  opposed to *how long* it may run.
+- **Render duration is bounded by a context deadline — on the root resolve
+  only.** A single render is wrapped with `context.WithTimeout` from the
+  `--source-render-timeout` flag (default `5m`; set `0` to disable). This is the
+  community-norm bound for GitOps remote fetches — Flux uses
+  `GitRepository.spec.timeout`, Argo CD uses `ARGOCD_EXEC_TIMEOUT`. A context
+  deadline (not transport mutation) cancels a stalled **go-git root resolve**
+  (`resolve → fetch → checkout` of the configured source URL, which DDO runs with
+  context-aware go-git) and frees the reconcile worker instead of blocking it
+  indefinitely. **Caveat — it does not reach krusty's remote-base fetches.**
+  Krusty runs its remote-base `git` clone through `exec.Command` (not
+  `exec.CommandContext`) wrapped in kustomize's own ~27s `TimedCall`, which
+  abandons the call but never kills the subprocess, and fetches remote *files*
+  with a bare `&http.Client{}` + `io.ReadAll`. Neither has a context seam at
+  kustomize `v0.21.1`, so the operator's deadline cannot cancel them — a hung
+  remote-base fetch is contained operationally (egress NetworkPolicy, Gardener
+  labels) and by kustomize's internal ~27s git budget, not by this deadline. See
+  [Render duration and hard timeouts](#render-duration-and-hard-timeouts) for why
+  a true hard-kill is not available in-process and the subprocess path considered
+  for the future. The egress NetworkPolicy and Gardener labels remain the layer
+  that gates *where* a fetch may go, as opposed to *how long* it may run.
+
+## Render duration and hard timeouts
+
+The `--source-render-timeout` context deadline bounds the **go-git root resolve**
+(the configured source URL), which DDO performs with the context-aware go-git
+client. It does **not** bound krusty's remote-base fetches, and at kustomize
+`v0.21.1` it cannot: krusty exposes no context seam for the work it does after
+`kust.Run` is called.
+
+- Krusty runs its remote-base `git` clone through `exec.Command` (not
+  `exec.CommandContext`), wrapped in kustomize's own `TimedCall` (~27s). On
+  timeout `TimedCall` returns but does not kill the subprocess — the `git`
+  process (and any `git-remote-https` child) keeps running.
+- Krusty fetches remote *files* (`https://raw.githubusercontent.com/...`) with a
+  bare `&http.Client{}` + `io.ReadAll`, with no timeout and no context. Because
+  krusty attempts an HTTP GET first for *every* `https://` resource, this path
+  covers every `https://` remote base, not only single files.
+- `krusty.MakeKustomizer(opts)` accepts only `filesys.FileSystem`,
+  `LoadRestrictions`, `Reorder`, `AddManagedbyLabel`, and `PluginConfig` — none
+  of which lets a caller inject a context-aware HTTP client or git runner. The
+  loader krusty builds internally holds unexported `http`/`cloner` fields with no
+  exported constructor that `Run` consumes. So a caller cannot make krusty's
+  fetches respect a deadline in-process.
+
+**What contains a hung remote-base fetch today:** kustomize's internal ~27s git
+`TimedCall` (abandons the call), plus operational egress controls (the chart's
+optional manager-pod egress `NetworkPolicy` and the Gardener egress labels) that
+gate *where* a fetch may go. This matches Flux's posture: Flux's
+kustomize-controller also runs krusty in-process, and its `spec.timeout` is a
+reconcile timeout that does not hard-kill a blocked krusty operation.
+
+### Hard-kill via a child process — considered, not implemented
+
+A true hard timeout that terminates a stalled remote-base fetch requires running
+the kustomize build in a **separate OS process** and killing it on deadline, the
+way Argo CD applies `ARGOCD_EXEC_TIMEOUT` to the `kustomize build` child process
+it spawns. The build would run under `exec.CommandContext` in its own process
+group; on deadline DDO would `SIGKILL` the group, terminating the `git`/HTTP
+fetches as descendants of a killable child. Two shapes:
+
+- **Shell out to the `kustomize` CLI** (the Argo CD model). Requires shipping the
+  `kustomize` binary in the operator image and governing CLI-vs-library version
+  skew indefinitely.
+- **Self re-exec** a hidden `ddo __render` subcommand that calls krusty in the
+  child. No extra binary; the render, preflight, and error-redaction logic stay
+  identical to today's in-process path.
+
+This is **not implemented** and is recorded here for future consideration. It is
+a meaningful change — the render call site moves to a subprocess boundary, error
+sanitization must parse child `stderr` rather than a Go error value (re-validating
+the full credential-redaction allowlist against the new input), the test seams
+change from an in-process hook to a fake-binary/stdout seam, and the
+process-group kill must be sequenced after the child is reaped so it does not
+race the temp-directory cleanup. It is deferred until a hung krusty fetch that
+escapes kustomize's ~27s budget and the egress controls proves to be a real
+operational problem.
 
 ## Security and responsibility
 
@@ -187,7 +250,7 @@ full rationale.
 | Who | Owns |
 |---|---|
 | **User** | Who may create or change DDO resources (RBAC); which repos and registries are referenced, and their review; whether to pin to commit SHAs (`--kustomize-require-sha-pinned-remote-bases`). |
-| **DDO** | Rejecting malformed or unsafe reference forms (SSH, embedded credentials, fragments, unknown schemes); local tree safety (cycles, symlink escapes); sanitized errors that never expose credentials; bounding render duration with a context deadline (`--source-render-timeout`, default `5m`) that cancels a stalled resolve/`git` fetch — though it does not reach krusty's own internal HTTP GET (see the render-duration note above). |
+| **DDO** | Rejecting malformed or unsafe reference forms (SSH, embedded credentials, fragments, unknown schemes); local tree safety (cycles, symlink escapes); sanitized errors that never expose credentials; bounding the go-git root resolve with a context deadline (`--source-render-timeout`, default `5m`) that cancels a stalled root clone — though it does **not** reach krusty's remote-base fetches, neither the `git` subprocess nor the internal HTTP GET (see the render-duration note above). |
 | **Platform** | Network egress policy. Effective reachability is the **union** of the applicable NetworkPolicies — Gardener labels only *allow* the categories they name, they do not deny others. The chart's default manager-pod labels include `to-public-networks` **and** `to-private-networks`, so private ranges are reachable by default; restrict them at the platform (drop `to-private-networks`, deny-all baseline) if that is not wanted. Also: any forward proxy with a hostname allowlist, if the platform chooses to run one. |
 
 ### Hostname-level egress control is out of scope

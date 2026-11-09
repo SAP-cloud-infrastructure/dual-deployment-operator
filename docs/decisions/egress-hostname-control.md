@@ -107,7 +107,7 @@ pinning as an opt-in flag, and can restrict who creates DDO resources through RB
 | Who | Owns |
 | --- | --- |
 | **User** | Who may create or change DDO resources (RBAC); which repos and registries are referenced, and their review; whether to pin to commit SHAs (enable `--kustomize-require-sha-pinned-remote-bases`). |
-| **DDO** | Rejecting malformed or unsafe reference forms (SSH, embedded credentials, fragments, unknown schemes); local tree safety (cycles, symlink escapes); sanitized errors that never expose credentials; bounding render duration with a `--source-render-timeout` context deadline (default `5m`) that cancels a stalled resolve/`git` fetch (does not reach krusty's own internal HTTP GET — see residual risks). |
+| **DDO** | Rejecting malformed or unsafe reference forms (SSH, embedded credentials, fragments, unknown schemes); local tree safety (cycles, symlink escapes); sanitized errors that never expose credentials; bounding the go-git root resolve with a `--source-render-timeout` context deadline (default `5m`) that cancels a stalled root clone — the deadline does **not** reach krusty's remote-base fetches (neither its `git` subprocess nor its internal HTTP GET); see residual risks. |
 | **Platform** | Network egress policy. Effective reachability is the **union** of the applicable NetworkPolicies — Gardener labels only *allow* the categories they name. The chart's default manager-pod labels include `to-public-networks` **and** `to-private-networks`, so private ranges are reachable by default unless the platform drops `to-private-networks` behind a deny-all baseline; any forward proxy with a hostname allowlist, if the platform chooses to run one. |
 
 ## Consequences and follow-ups
@@ -128,16 +128,28 @@ pinning as an opt-in flag, and can restrict who creates DDO resources through RB
 - Render duration is bounded by a `context.WithTimeout` from the
   `--source-render-timeout` flag (default `5m`; `0` disables), matching Flux
   `GitRepository.spec.timeout` and Argo CD `ARGOCD_EXEC_TIMEOUT`. The deadline
-  cancels a stalled go-git root resolve or `git` remote-base fetch and frees the
-  reconcile worker; it does **not** reach krusty's own internal `net/http` GET of
-  a remote base (upstream krusty uses a bare `&http.Client{}` + `io.ReadAll` with
-  no context seam).
+  cancels a stalled go-git root resolve and frees the reconcile worker, but it
+  does **not** reach krusty's remote-base fetches. Krusty runs its `git` clone
+  through `exec.Command` (not `exec.CommandContext`) wrapped in kustomize's own
+  ~27s `TimedCall`, which abandons but never kills the subprocess, and fetches
+  remote files with a bare `&http.Client{}` + `io.ReadAll` — neither has a
+  context seam at kustomize `v0.21.1`. So the deadline effectively bounds the
+  root resolve only. A hung krusty remote-base fetch is contained operationally
+  (egress NetworkPolicy, Gardener labels) and by kustomize's internal ~27s git
+  budget, not by this deadline. A future hard-kill path (running the build as a
+  child process under `exec.CommandContext` in its own process group, the Argo CD
+  `ARGOCD_EXEC_TIMEOUT` model) is documented for future consideration in the
+  [remote-bases guide](../kustomize-remote-bases.md#render-duration-and-hard-timeouts).
 
 **Follow-ups:**
 
-- [ ] Optional: git lockdown in the #62 image (`https`-only protocols, no redirects,
-  no submodules, no credential prompts) so git cannot reach beyond the referenced
-  URL. Low cost; not decided.
+- [x] Git lockdown in the #62 image. **Shipped:** the image bakes an
+  `/etc/gitconfig` with `protocol.allow=never` + `protocol.https.allow=always`
+  (HTTPS-only) and `http.followRedirects=false` (no cross-host redirect
+  following), with fail-closed build-time smoke tests. Submodule and
+  credential-prompt lockdown were **not** included — submodules are opted out
+  per-reference (`submodules=false`) and credential prompting is already
+  non-interactive in the operator environment.
 - [ ] Confirm with the Gardener team that the cloud metadata IP
   (`169.254.169.254`) is blocked for pods with `to-public-networks`.
 

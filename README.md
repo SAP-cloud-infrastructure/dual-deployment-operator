@@ -126,8 +126,10 @@ this only for top-level remote references parsed by the operator. It does not
 pre-enforce nested references, apply to Helm, or pin the kustomize root URL.
 
 Each render has a context deadline set by `--source-render-timeout` (default
-`5m`; `0` disables it); it bounds go-git root resolution and git CLI fetches,
-but does not reach kustomize's internal HTTP GET for remote files. Git CLI
+`5m`; `0` disables it); it bounds go-git root resolution only. It does not
+reach krusty's remote-base fetches — neither the `git` subprocess krusty runs
+(via `exec.Command`, not context-bound) nor its internal HTTP GET for remote
+files. Git CLI
 fetches are restricted to HTTPS, and the image's git configuration also blocks
 other protocols and redirects. Surfaced git/kustomize errors redact URL
 userinfo and query values except `ref`, `version`, `timeout`, and `submodules`.
