@@ -94,9 +94,13 @@ RUN ["test", "-x", "/usr/lib/git-core/git-remote-https"]
 #     env allowlist, wins if they ever disagree).
 #   http.followRedirects=false
 #     Git treats any HTTP redirect as an error, so an https:// base cannot be
-#     silently redirected to http:// or to an attacker-controlled host. This is
-#     a concern GIT_ALLOW_PROTOCOL does NOT cover (it only gates the scheme of
-#     the initial URL), so /etc/gitconfig is the only place it is enforced.
+#     silently redirected elsewhere. Note this is NOT about the redirect's
+#     scheme: GIT_ALLOW_PROTOCOL (and protocol.allow above) DO apply to
+#     redirect targets — a redirect to http:// is already rejected with
+#     'Protocol "http" is disabled (in redirect)'. What followRedirects=false
+#     additionally refuses is a redirect to ANOTHER https:// host (which the
+#     protocol allowlist would otherwise permit), so a base cannot be bounced to
+#     an attacker-controlled HTTPS server. /etc/gitconfig is where that is set.
 #
 # Flux does its git fetching in source-controller (go-git), not in a shelled-out
 # git; Argo CD relies on the system /etc/gitconfig from its base image. We make
