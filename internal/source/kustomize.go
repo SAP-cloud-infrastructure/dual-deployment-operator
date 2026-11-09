@@ -210,9 +210,15 @@ func preflightIsolationRoot(root, suffix string) string {
 //     scheme://user:password@host/... → scheme://[REDACTED]@host/...
 //     scheme://user:p@ss@host/...     → scheme://[REDACTED]@host/...
 //     scheme://user:pa/ss@host/...    → scheme://[REDACTED]@host/...
-//     The match is bounded to the authority so a benign "@" that appears LATER
-//     in the path (e.g. .../repo/base@v1) or query (e.g. ?ref=pkg@1.2.3) is NOT
-//     swallowed — the host and repo path survive for diagnostics.
+//     A benign "@" that appears later in the query (e.g. ?ref=pkg@1.2.3, after
+//     "?") is never reached, and a path "@" (e.g. .../repo/base@v1) with NO
+//     preceding userinfo is left intact — host and repo path survive. The one
+//     exception: when real userinfo WITH a password precedes a later path "@"
+//     (e.g. https://user:pass@host/org/repo/base@v1/), the password branch —
+//     which may legitimately contain "/" — extends greedily to that last "@",
+//     so host and path are redacted too (→ https://[REDACTED]@v1/). This
+//     over-redacts in the safe direction: a credential is always removed; only
+//     some surrounding context is lost in that specific shape.
 //  2. Query parameters: the value of every query parameter is redacted UNLESS
 //     its key is on a small allowlist of known-safe kustomize remote-base
 //     params (ref, version, timeout, submodules). This fail-closed allowlist
@@ -240,10 +246,15 @@ func preflightIsolationRoot(root, suffix string) string {
 //     before any "/", then anything up to the "@" (but not past "?"/"#");
 //   - "user" / "user:pass" with no "/" at all (user@host, user:p@ss@host).
 //
-// Because neither alternative crosses a "/" before the "@" without a preceding
-// ":", a path segment that merely contains "@" (…/repo/base@v1) is NOT treated
-// as userinfo, and a "@" in the query (?ref=pkg@1.2.3, after "?") is never
-// reached.
+// Because the second (no-"/") alternative cannot cross a "/" before the "@", a
+// path segment that merely contains "@" (…/repo/base@v1) with NO preceding
+// userinfo is NOT treated as userinfo, and a "@" in the query (?ref=pkg@1.2.3,
+// after "?") is never reached. The first alternative is different: once a ":"
+// (password) is present, its password part may contain "/", so if real
+// userinfo precedes a later path "@" (user:pass@host/…/base@v1) the match
+// extends greedily to that last "@" and the host/path are redacted along with
+// the credential. That over-redacts in the safe direction (the secret is
+// always removed) and only affects that specific shape.
 var reURLUserinfo = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)([^\s/?#:]*:[^\s?#]*|[^\s/?#]*)@`)
 
 // allowlistedQueryParams are the query-parameter keys whose values are known to
