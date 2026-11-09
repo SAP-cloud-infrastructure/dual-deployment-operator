@@ -77,11 +77,12 @@ func init() {
 			"builtin plugin config file, are NOT pre-enforced (matching Flux/Argo CD).")
 
 	flag.DurationVar(&renderTimeout, "source-render-timeout", 5*time.Minute,
-		"Per-render deadline for a kustomize source: bounds the root resolve and any git-driven remote-base fetches "+
-			"krusty shells out to (matching Flux GitRepository.spec.timeout / Argo CD ARGOCD_EXEC_TIMEOUT). A stalled "+
-			"endpoint cancels the render and frees the reconcile worker instead of blocking indefinitely. Set to 0 to "+
-			"disable the deadline. Note: it does not reach krusty's own internal HTTP GET of a remote base (no upstream "+
-			"cancellation seam).")
+		"Per-render deadline for a kustomize source: bounds the go-git root resolve (matching Flux "+
+			"GitRepository.spec.timeout / Argo CD ARGOCD_EXEC_TIMEOUT). A stalled root clone cancels the render and "+
+			"frees the reconcile worker instead of blocking indefinitely. Set to 0 to disable the deadline. Note: it "+
+			"does NOT reach krusty's remote-base fetches (neither the git subprocess, run via exec.Command, nor "+
+			"krusty's internal HTTP GET; no cancellation seam at kustomize v0.21.1) — those are contained "+
+			"operationally.")
 }
 
 //nolint:gocyclo

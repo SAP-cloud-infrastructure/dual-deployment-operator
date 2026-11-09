@@ -43,20 +43,31 @@ type kustomizeSource struct {
 	spec                        *v1alpha1.KustomizeSource
 	resolver                    RootResolver
 	requireSHAPinnedRemoteBases bool
-	// renderTimeout bounds the whole render (root resolve + any git-driven base
-	// fetches krusty shells out to). Zero means no deadline. See Render.
+	// renderTimeout bounds the go-git root resolve only (the Resolve call
+	// below). Zero means no deadline. It does NOT reach krusty's remote-base
+	// fetches — see Render for why.
 	renderTimeout time.Duration
 }
 
 func (k *kustomizeSource) Render(ctx context.Context, mode Mode, namespace string) ([]manifest.Manifest, error) {
-	// Bound the render with a per-operation context deadline, matching the
-	// community norm for GitOps fetchers (Flux GitRepository.spec.timeout, Argo
-	// CD ARGOCD_EXEC_TIMEOUT): a single deadline covers the full resolve →
-	// fetch → checkout sequence, frees the reconcile worker if an endpoint
-	// stalls, and (via ctx cancellation) terminates the git subprocess krusty
-	// shells out to. It does NOT reach krusty's own internal net/http GET of a
-	// remote base (upstream has no ctx seam) — that call is unbounded. A zero
-	// renderTimeout disables the deadline (preserves uncached/test behavior).
+	// Bound the go-git root resolve with a per-operation context deadline,
+	// matching the community norm for GitOps fetchers (Flux
+	// GitRepository.spec.timeout, Argo CD ARGOCD_EXEC_TIMEOUT). The deadline
+	// covers the resolve → fetch → checkout of the configured source URL, which
+	// k.resolver.Resolve runs with context-aware go-git, and frees the reconcile
+	// worker if that root clone stalls.
+	//
+	// It does NOT reach krusty's remote-base fetches. At kustomize v0.21.1
+	// krusty exposes no context seam for the work it does inside kust.Run: it
+	// clones remote bases via exec.Command (NOT exec.CommandContext) wrapped in
+	// kustomize's own ~27s TimedCall, which abandons the call but never kills the
+	// git subprocess, and fetches remote files with a bare &http.Client{} +
+	// io.ReadAll with no timeout or context. Cancelling ctx therefore cannot
+	// stop either. A hung krusty fetch is contained operationally (egress
+	// NetworkPolicy, Gardener labels) and by kustomize's internal ~27s git
+	// budget — see docs/kustomize-remote-bases.md "Render duration and hard
+	// timeouts" for the subprocess hard-kill path considered for the future. A
+	// zero renderTimeout disables the deadline (preserves uncached/test behavior).
 	if k.renderTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, k.renderTimeout)

@@ -66,11 +66,14 @@ type Deps struct {
 	// branch, or undeterminable ref is rejected before any fetch occurs.
 	// When false (default), tags and branches are accepted.
 	RequireSHAPinnedRemoteBases bool
-	// RenderTimeout, when > 0, bounds a single kustomize render (root resolve +
-	// any git-driven remote-base fetches krusty shells out to) with a context
-	// deadline, matching Flux GitRepository.spec.timeout / Argo CD
-	// ARGOCD_EXEC_TIMEOUT. Zero disables the deadline. It does not reach
-	// krusty's own internal net/http GET of a remote base (no upstream ctx seam).
+	// RenderTimeout, when > 0, bounds the go-git root resolve of a kustomize
+	// render with a context deadline, matching Flux GitRepository.spec.timeout /
+	// Argo CD ARGOCD_EXEC_TIMEOUT. Zero disables the deadline. It does NOT reach
+	// krusty's remote-base fetches: at kustomize v0.21.1 krusty clones bases via
+	// exec.Command (not ctx-bound, abandoned after its own ~27s TimedCall but
+	// never killed) and fetches remote files with a bare &http.Client{} with no
+	// ctx seam. A hung krusty fetch is contained operationally, not by this
+	// deadline.
 	RenderTimeout time.Duration
 }
 
