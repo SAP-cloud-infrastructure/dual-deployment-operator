@@ -150,7 +150,10 @@ proxy. Remote fetch is enabled by default (as in Argo CD), and trust is split:
 **which** sources are trusted is the user's responsibility (RBAC on DDO
 resources + review of the referenced repos; SHA pinning available opt-in via
 `--kustomize-require-sha-pinned-remote-bases`), while **network egress** is the
-platform's (on Gardener, `to-public-networks` blocks private and CGNAT ranges).
+platform's. Note the effective egress is the *union* of the applicable
+NetworkPolicies: the chart's default manager-pod labels allow both
+`to-public-networks` and `to-private-networks`, so private ranges are reachable by
+default unless the platform drops `to-private-networks` behind a deny-all baseline.
 
 *Rationale.* Hostname filtering does not address the real risk — applying
 untrusted *content*. `github.com`/`ghcr.io` are multi-tenant, so a hostname

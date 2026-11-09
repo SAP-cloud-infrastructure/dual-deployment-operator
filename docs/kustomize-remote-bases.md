@@ -163,7 +163,15 @@ remote-base fetches is **operational**, not in-process:
 - In a Gardener control-plane namespace the manager pod's egress labels
   (`networking.gardener.cloud/to-*`) gate outbound traffic behind the
   namespace's deny-all baseline.
-- The reconcile and pod lifecycle bound how long any single fetch can run.
+- **Fetch duration is not bounded in-process.** `runKrusty` is invoked without a
+  context deadline, and upstream krusty fetches remote bases with a bare
+  `&http.Client{}` plus `io.ReadAll` (no timeout). An allowed-but-unresponsive
+  endpoint can therefore stall a reconcile indefinitely while the pod stays
+  healthy. This is an **accepted limitation**: bounding it reliably needs an
+  external control (a reconcile watchdog or a liveness/termination policy that
+  kills a stuck worker), not in-process transport mutation — which was removed as
+  an anti-pattern. The egress NetworkPolicy and Gardener labels gate *where* a
+  fetch may go, not *how long* it may run.
 
 ## Security and responsibility
 
@@ -175,8 +183,8 @@ full rationale.
 | Who | Owns |
 |---|---|
 | **User** | Who may create or change DDO resources (RBAC); which repos and registries are referenced, and their review; whether to pin to commit SHAs (`--kustomize-require-sha-pinned-remote-bases`). |
-| **DDO** | Rejecting malformed or unsafe reference forms (SSH, embedded credentials, fragments, unknown schemes); local tree safety (cycles, symlink escapes); bounded fetch time; sanitized errors that never expose credentials. |
-| **Platform** | Network egress policy (on Gardener: `to-public-networks`, which blocks private and CGNAT ranges); any forward proxy with a hostname allowlist, if the platform chooses to run one. |
+| **DDO** | Rejecting malformed or unsafe reference forms (SSH, embedded credentials, fragments, unknown schemes); local tree safety (cycles, symlink escapes); sanitized errors that never expose credentials. (DDO does **not** bound fetch duration in-process — see the accepted limitation above.) |
+| **Platform** | Network egress policy. Effective reachability is the **union** of the applicable NetworkPolicies — Gardener labels only *allow* the categories they name, they do not deny others. The chart's default manager-pod labels include `to-public-networks` **and** `to-private-networks`, so private ranges are reachable by default; restrict them at the platform (drop `to-private-networks`, deny-all baseline) if that is not wanted. Also: any forward proxy with a hostname allowlist, if the platform chooses to run one. |
 
 ### Hostname-level egress control is out of scope
 
@@ -211,8 +219,12 @@ allowlist or a proxy. This is deliberate:
   enabled.
 - Nested remote bases inside a referenced repo are fetched too and are **not**
   checked by the preflight policy engine (it sees only the locally reachable tree).
-- DDO can reach any public endpoint the platform policy allows; private ranges are
-  blocked on Gardener by `to-public-networks`.
+- DDO can reach any endpoint the **union** of applicable egress policies allows. The
+  chart's default manager-pod labels allow both `to-public-networks` and
+  `to-private-networks`, so private/internal ranges are reachable by default; the
+  cloud-metadata endpoint (`169.254.169.254`) and other internal services are only
+  blocked if the platform drops `to-private-networks` (and whatever label covers
+  link-local) behind a deny-all baseline.
 
 ## Runtime requirements
 

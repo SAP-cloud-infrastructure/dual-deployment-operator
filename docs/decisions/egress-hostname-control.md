@@ -107,8 +107,8 @@ pinning as an opt-in flag, and can restrict who creates DDO resources through RB
 | Who | Owns |
 | --- | --- |
 | **User** | Who may create or change DDO resources (RBAC); which repos and registries are referenced, and their review; whether to pin to commit SHAs (enable `--kustomize-require-sha-pinned-remote-bases`). |
-| **DDO** | Rejecting malformed or unsafe reference forms (SSH, embedded credentials, fragments, unknown schemes); local tree safety (cycles, symlink escapes); bounded fetch time; sanitized errors that never expose credentials. |
-| **Platform** | Network egress policy (on Gardener: `to-public-networks`, which blocks private and CGNAT ranges); any forward proxy with a hostname allowlist, if the platform chooses to run one. |
+| **DDO** | Rejecting malformed or unsafe reference forms (SSH, embedded credentials, fragments, unknown schemes); local tree safety (cycles, symlink escapes); sanitized errors that never expose credentials. DDO does **not** bound fetch duration in-process (see residual risks). |
+| **Platform** | Network egress policy. Effective reachability is the **union** of the applicable NetworkPolicies — Gardener labels only *allow* the categories they name. The chart's default manager-pod labels include `to-public-networks` **and** `to-private-networks`, so private ranges are reachable by default unless the platform drops `to-private-networks` behind a deny-all baseline; any forward proxy with a hostname allowlist, if the platform chooses to run one. |
 
 ## Consequences and follow-ups
 
@@ -120,8 +120,15 @@ pinning as an opt-in flag, and can restrict who creates DDO resources through RB
   pinning.
 - Nested remote bases inside a referenced repo are fetched too, and are not checked
   by the #61 policy engine.
-- DDO can reach any public endpoint the platform policy allows. Private ranges are
-  blocked on Gardener by `to-public-networks`.
+- DDO can reach any endpoint the **union** of applicable egress policies allows. The
+  chart's default manager-pod labels allow both `to-public-networks` and
+  `to-private-networks`, so private/internal ranges are reachable by default; the
+  metadata endpoint (`169.254.169.254`) and internal services are blocked only if the
+  platform drops `to-private-networks` (and link-local) behind a deny-all baseline.
+- Fetch duration is not bounded in-process (`runKrusty` has no context deadline;
+  upstream krusty uses a bare `&http.Client{}` + `io.ReadAll`), so an unresponsive
+  endpoint can stall a reconcile indefinitely. Bounding it reliably needs an external
+  watchdog, not in-process transport mutation.
 
 **Follow-ups:**
 
