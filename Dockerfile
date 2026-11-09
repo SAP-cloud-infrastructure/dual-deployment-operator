@@ -80,6 +80,43 @@ RUN ["rm", "-rf", "/tmp/smoke-submodule-check"]
 # against libcurl) is installed, without performing a network fetch.
 RUN ["test", "-x", "/usr/lib/git-core/git-remote-https"]
 
+# Git lockdown — bake an HTTPS-only, no-redirect policy into the image's system
+# config (/etc/gitconfig). krusty shells out to this git for every remote
+# kustomize base, so the image is the right place to make the policy a fixed,
+# auditable property rather than relying on a caller to set it.
+#
+#   protocol.allow=never + protocol.https.allow=always
+#     Only https:// transports are permitted; file://, git://, ssh://, ext::
+#     and every other scheme are denied (default policy is never, with https
+#     the single explicit override). This is the config-file form of the
+#     GIT_ALLOW_PROTOCOL=https env the operator also sets in main() — the two
+#     layers reinforce each other (and GIT_ALLOW_PROTOCOL, being the stronger
+#     env allowlist, wins if they ever disagree).
+#   http.followRedirects=false
+#     Git treats any HTTP redirect as an error, so an https:// base cannot be
+#     silently redirected to http:// or to an attacker-controlled host. This is
+#     a concern GIT_ALLOW_PROTOCOL does NOT cover (it only gates the scheme of
+#     the initial URL), so /etc/gitconfig is the only place it is enforced.
+#
+# Flux does its git fetching in source-controller (go-git), not in a shelled-out
+# git; Argo CD relies on the system /etc/gitconfig from its base image. We make
+# the policy explicit and self-contained here.
+RUN printf '%s\n' \
+    '[protocol]' \
+    'allow = never' \
+    '[protocol "https"]' \
+    'allow = always' \
+    '[http]' \
+    'followRedirects = false' \
+    > /etc/gitconfig
+
+# Fail-closed build-time smoke tests for the lockdown (offline, no network): the
+# effective config must report https allowed, redirects disabled, and must NOT
+# permit file:// — turning a mis-baked policy into a build failure.
+RUN ["sh", "-c", "git config --system --get protocol.https.allow | grep -qx always"]
+RUN ["sh", "-c", "git config --system --get http.followRedirects | grep -qx false"]
+RUN ["sh", "-c", "git config --system --get protocol.allow | grep -qx never"]
+
 # Manager binary (statically linked Go binary)
 COPY --from=builder /workspace/manager /manager
 
