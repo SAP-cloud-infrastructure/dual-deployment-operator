@@ -10,6 +10,7 @@ package source
 import (
 	"context"
 	"errors"
+	"time"
 
 	"helm.sh/helm/v3/pkg/chart"
 
@@ -65,6 +66,12 @@ type Deps struct {
 	// branch, or undeterminable ref is rejected before any fetch occurs.
 	// When false (default), tags and branches are accepted.
 	RequireSHAPinnedRemoteBases bool
+	// RenderTimeout, when > 0, bounds a single kustomize render (root resolve +
+	// any git-driven remote-base fetches krusty shells out to) with a context
+	// deadline, matching Flux GitRepository.spec.timeout / Argo CD
+	// ARGOCD_EXEC_TIMEOUT. Zero disables the deadline. It does not reach
+	// krusty's own internal net/http GET of a remote base (no upstream ctx seam).
+	RenderTimeout time.Duration
 }
 
 // NewHelmLoader returns a production OCI+HTTP ChartLoader (no cache). The
@@ -121,7 +128,7 @@ func From(spec v1alpha1.Source, deps Deps) (Source, error) {
 			return nil, errors.New("source: kustomize source requires a RootResolver (none configured)")
 		}
 		resolver := withGitCreds(deps.RootResolver, deps.CredentialResolver, spec.Kustomize.AuthSecretRef)
-		inner := &kustomizeSource{spec: spec.Kustomize, resolver: resolver, requireSHAPinnedRemoteBases: deps.RequireSHAPinnedRemoteBases}
+		inner := &kustomizeSource{spec: spec.Kustomize, resolver: resolver, requireSHAPinnedRemoteBases: deps.RequireSHAPinnedRemoteBases, renderTimeout: deps.RenderTimeout}
 		return wrapKustomize(inner, resolver, spec.Kustomize, deps.RenderCache), nil
 	default:
 		return nil, errors.New("source: exactly one of source.helm or source.kustomize must be set")

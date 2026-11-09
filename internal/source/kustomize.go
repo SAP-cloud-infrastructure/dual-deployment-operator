@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"sigs.k8s.io/kustomize/api/krusty"
 	"sigs.k8s.io/kustomize/api/resmap"
@@ -42,9 +43,26 @@ type kustomizeSource struct {
 	spec                        *v1alpha1.KustomizeSource
 	resolver                    RootResolver
 	requireSHAPinnedRemoteBases bool
+	// renderTimeout bounds the whole render (root resolve + any git-driven base
+	// fetches krusty shells out to). Zero means no deadline. See Render.
+	renderTimeout time.Duration
 }
 
 func (k *kustomizeSource) Render(ctx context.Context, mode Mode, namespace string) ([]manifest.Manifest, error) {
+	// Bound the render with a per-operation context deadline, matching the
+	// community norm for GitOps fetchers (Flux GitRepository.spec.timeout, Argo
+	// CD ARGOCD_EXEC_TIMEOUT): a single deadline covers the full resolve →
+	// fetch → checkout sequence, frees the reconcile worker if an endpoint
+	// stalls, and (via ctx cancellation) terminates the git subprocess krusty
+	// shells out to. It does NOT reach krusty's own internal net/http GET of a
+	// remote base (upstream has no ctx seam) — that call is unbounded. A zero
+	// renderTimeout disables the deadline (preserves uncached/test behavior).
+	if k.renderTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, k.renderTimeout)
+		defer cancel()
+	}
+
 	subPath := k.spec.SeedPath
 	if mode == ModeShoot {
 		subPath = k.spec.ShootPath

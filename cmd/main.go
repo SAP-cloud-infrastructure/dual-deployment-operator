@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -44,6 +45,12 @@ var (
 // Declared at package level so tests can verify default registration.
 var requireSHAPinnedRemoteBases bool
 
+// renderTimeout is populated from --source-render-timeout and threaded into
+// source.Deps.RenderTimeout. Declared at package level (like
+// requireSHAPinnedRemoteBases) so buildSourceDeps can read it without a wider
+// signature and tests can verify default registration.
+var renderTimeout time.Duration
+
 // buildSourceDeps constructs the source.Deps the controller uses.
 // Extracted from main() to allow unit tests to exercise the CLI-flag→Deps
 // assignment path without starting a manager.
@@ -53,6 +60,7 @@ func buildSourceDeps(scratchDir string, requireSHAPinned bool) source.Deps {
 		RootResolver:                source.NewGitResolver(),
 		RenderCache:                 source.NewRenderCache(),
 		RequireSHAPinnedRemoteBases: requireSHAPinned,
+		RenderTimeout:               renderTimeout,
 	}
 }
 
@@ -67,6 +75,13 @@ func init() {
 			"to a full 40-hex lowercase commit SHA; tags, branches, and undeterminable refs are rejected before any "+
 			"fetch occurs. Transitive/nested refs that krusty resolves internally, and remote refs embedded inside a "+
 			"builtin plugin config file, are NOT pre-enforced (matching Flux/Argo CD).")
+
+	flag.DurationVar(&renderTimeout, "source-render-timeout", 5*time.Minute,
+		"Per-render deadline for a kustomize source: bounds the root resolve and any git-driven remote-base fetches "+
+			"krusty shells out to (matching Flux GitRepository.spec.timeout / Argo CD ARGOCD_EXEC_TIMEOUT). A stalled "+
+			"endpoint cancels the render and frees the reconcile worker instead of blocking indefinitely. Set to 0 to "+
+			"disable the deadline. Note: it does not reach krusty's own internal HTTP GET of a remote base (no upstream "+
+			"cancellation seam).")
 }
 
 //nolint:gocyclo
