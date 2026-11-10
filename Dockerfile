@@ -49,7 +49,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o ma
 # CVE scanners can see and assess them (the previous distroless image copied the
 # binaries without any dpkg metadata, making them invisible to scanners —
 # PR #62 review finding).
-FROM debian:trixie-slim
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 WORKDIR /
 
 # Install git (+ its /bin/sh git-submodule helper) and CA certificates for HTTPS
