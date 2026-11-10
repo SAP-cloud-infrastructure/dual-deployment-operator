@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -39,11 +40,49 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
+// requireSHAPinnedRemoteBases is populated from
+// --kustomize-require-sha-pinned-remote-bases and threaded into source.Deps.
+// Declared at package level so tests can verify default registration.
+var requireSHAPinnedRemoteBases bool
+
+// renderTimeout is populated from --source-render-timeout and threaded into
+// source.Deps.RenderTimeout. Declared at package level (like
+// requireSHAPinnedRemoteBases) so buildSourceDeps can read it without a wider
+// signature and tests can verify default registration.
+var renderTimeout time.Duration
+
+// buildSourceDeps constructs the source.Deps the controller uses.
+// Extracted from main() to allow unit tests to exercise the CLI-flag→Deps
+// assignment path without starting a manager.
+func buildSourceDeps(scratchDir string, requireSHAPinned bool) source.Deps {
+	return source.Deps{
+		ChartLoader:                 source.NewHelmLoader(scratchDir),
+		RootResolver:                source.NewGitResolver(),
+		RenderCache:                 source.NewRenderCache(),
+		RequireSHAPinnedRemoteBases: requireSHAPinned,
+		RenderTimeout:               renderTimeout,
+	}
+}
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(dualdeploymentoperatorv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
+
+	flag.BoolVar(&requireSHAPinnedRemoteBases, "kustomize-require-sha-pinned-remote-bases", false,
+		"When true, every remote base reference the operator parses from the top-level kustomization must be pinned "+
+			"to a full 40-hex lowercase commit SHA; tags, branches, and undeterminable refs are rejected before any "+
+			"fetch occurs. Transitive/nested refs that krusty resolves internally, and remote refs embedded inside a "+
+			"builtin plugin config file, are NOT pre-enforced (matching Flux/Argo CD).")
+
+	flag.DurationVar(&renderTimeout, "source-render-timeout", 5*time.Minute,
+		"Per-render deadline for a kustomize source: bounds the go-git root resolve (matching Flux "+
+			"GitRepository.spec.timeout / Argo CD ARGOCD_EXEC_TIMEOUT). A stalled root clone cancels the render and "+
+			"frees the reconcile worker instead of blocking indefinitely. Set to 0 to disable the deadline. Note: it "+
+			"does NOT reach krusty's remote-base fetches (neither the git subprocess, run via exec.Command, nor "+
+			"krusty's internal HTTP GET; no cancellation seam at kustomize v0.21.1) — those are contained "+
+			"operationally.")
 }
 
 //nolint:gocyclo
@@ -86,6 +125,50 @@ func main() {
 	// KUBECONFIG, then $HOME/.kube/config, then in-cluster config.
 	clientconfig.RegisterFlags(flag.CommandLine)
 	flag.Parse()
+
+	// When a dedicated source scratch dir is configured (required under a
+	// read-only root filesystem), point the process TMPDIR at it so Go's
+	// os.MkdirTemp and git's clone temp files land on the writable mount.
+	// Done in-process (not only via the Deployment env) so a Helm values list
+	// override of the container env cannot silently drop it and strand clones
+	// on a read-only /tmp.
+	if sourceScratchDir != "" {
+		if err := os.Setenv("TMPDIR", sourceScratchDir); err != nil {
+			setupLog.Error(err, "unable to set TMPDIR from --source-scratch-dir")
+			os.Exit(1)
+		}
+	}
+
+	// Constrain git-CLI-driven fetches to HTTPS only. GIT_ALLOW_PROTOCOL behaves
+	// as git's protocol.allow=never with https=always: any protocol not listed is
+	// denied, so ssh://, git://, file:// and others are blocked at the git-CLI
+	// layer. This covers the fetches krusty runs by shelling out to the `git`
+	// binary for remote bases and the submodules it resolves internally.
+	//
+	// This is set via os.Setenv in main() (not only as a Deployment env var) so
+	// a Helm manager.env list-override cannot silently drop it.
+	//
+	// What this does NOT cover:
+	//   - The operator's OWN go-git calls (the kustomize RootResolver that clones
+	//     the root URL). go-git does not honor GIT_ALLOW_PROTOCOL — it still
+	//     accepts http:// and file://. The root URL's transport is NOT constrained
+	//     here; CEL admission only requires a ref= on the root URL. If HTTPS-only
+	//     must hold for the root it needs a separate, explicit scheme check.
+	//   - krusty's own net/http GET of a remote FILE inside a remote base (that
+	//     is Go http, not git); constrained by classifyHTTPURL on top-level refs.
+	//
+	// Containment of a hung or slow remote fetch (both the git-CLI fetches above
+	// and krusty's/Helm's own net/http GETs) is operational, matching Flux CD and
+	// Argo CD: destination control via the chart's optional egress NetworkPolicy
+	// plus the Gardener egress labels on the manager pod, and the operator's
+	// reconcile/pod lifecycle. The operator does not mutate http.DefaultTransport
+	// in-process (that global-transport hack was removed as an anti-pattern — see
+	// the kustomize-remote-bases guide).
+	if err := os.Setenv("GIT_ALLOW_PROTOCOL", "https"); err != nil {
+		// os.Setenv only fails on Windows with invalid env var names; log and
+		// continue rather than exit so the operator still starts on other issues.
+		setupLog.Error(err, "Failed to set GIT_ALLOW_PROTOCOL")
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
@@ -201,11 +284,7 @@ func main() {
 			FieldManager: controller.FieldManagerName,
 			Cluster:      "seed",
 		},
-		SourceDeps: source.Deps{
-			ChartLoader:  source.NewHelmLoader(sourceScratchDir),
-			RootResolver: source.NewGitResolver(),
-			RenderCache:  source.NewRenderCache(),
-		},
+		SourceDeps: buildSourceDeps(sourceScratchDir, requireSHAPinnedRemoteBases),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "dualdeploymentoperator")
 		os.Exit(1)
