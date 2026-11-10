@@ -35,6 +35,13 @@ manager:
       valueFrom:
         fieldRef:
           fieldPath: metadata.namespace
+    # TMPDIR redirects Go's os.MkdirTemp("", "kustomize-") (used by krusty to
+    # clone remote kustomize bases) onto the writable scratch volume. Without
+    # it the clone lands in /tmp, which is read-only under
+    # securityContext.readOnlyRootFilesystem: true, so any remote-base fetch
+    # (and the go-git root resolver, which also uses os.MkdirTemp) fails.
+    - name: TMPDIR
+      value: /var/run/ddo-source
 
   ## Env overrides (--set manager.envOverrides.VAR=value)
   ## Same name in env above: this value takes precedence.
