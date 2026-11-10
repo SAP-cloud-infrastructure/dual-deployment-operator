@@ -246,4 +246,36 @@ prometheus:
 ##
 networkPolicy:
   enabled: false
+  ## Optional egress policy for the controller manager. When the cluster applies
+  ## a default deny-all egress baseline, enabling this allows the operator to
+  ## reach git repositories and OCI registries (kustomize remote bases, Helm OCI
+  ## charts) over DNS + HTTPS only. This is the recommended destination-control
+  ## layer for remote-base fetches (the operator does not restrict egress
+  ## in-process); it mirrors how Flux CD and Argo CD contain fetch egress.
+  ## Requires networkPolicy.enabled=true as well.
+  egress:
+    enabled: false
+    ## Ports allowed for outbound fetches. DNS (53 udp/tcp) and HTTPS (443) cover
+    ## git-over-HTTPS and OCI registries. Add entries for a custom git/registry port.
+    ports:
+      - port: 53
+        protocol: UDP
+      - port: 53
+        protocol: TCP
+      - port: 443
+        protocol: TCP
+    ## CIDR blocks the operator may reach. The default allows all destinations on
+    ## the ports above; narrow this to your git/registry egress ranges to tighten
+    ## it (FQDN allowlisting is not expressible in a core NetworkPolicy — use an
+    ## egress proxy or CNI-specific policy for that).
+    to:
+      - ipBlock:
+          cidr: 0.0.0.0/0
 
+
+## Operand-specific apply-grants appended to each applier ClusterRole's base rules.
+## Owned by the DDO install (not operand charts, not the Go-generated role); supplied
+## per enabled operand and layered per region. Least-privilege, no wildcards.
+extraRbac:
+  seedApplier: []
+  shootApplier: []

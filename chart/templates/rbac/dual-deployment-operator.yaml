@@ -97,20 +97,6 @@ rules:
   - patch
   - update
 - apiGroups:
-  - monitoring.coreos.com
-  resources:
-  - podmonitors
-  - prometheusrules
-  - servicemonitors
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
   - networking.k8s.io
   resources:
   - ingresses
@@ -140,3 +126,6 @@ rules:
   - patch
   - update
   - watch
+{{- with ((.Values.extraRbac | default dict).seedApplier) }}
+{{ toYaml . }}
+{{- end }}

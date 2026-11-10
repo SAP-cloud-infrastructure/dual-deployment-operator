@@ -10,6 +10,7 @@ package source
 import (
 	"context"
 	"errors"
+	"time"
 
 	"helm.sh/helm/v3/pkg/chart"
 
@@ -59,6 +60,21 @@ type Deps struct {
 	// source is returned unwrapped (uncached behavior preserved, matching
 	// pre-Phase-7.5 semantics).
 	RenderCache *renderCache
+	// RequireSHAPinnedRemoteBases, when true, enables strict SHA-pin enforcement
+	// for kustomize remote bases: every remote base reference discovered during
+	// preflight must be pinned to a full 40-hex lowercase commit SHA. Any tag,
+	// branch, or undeterminable ref is rejected before any fetch occurs.
+	// When false (default), tags and branches are accepted.
+	RequireSHAPinnedRemoteBases bool
+	// RenderTimeout, when > 0, bounds the go-git root resolve of a kustomize
+	// render with a context deadline, matching Flux GitRepository.spec.timeout /
+	// Argo CD ARGOCD_EXEC_TIMEOUT. Zero disables the deadline. It does NOT reach
+	// krusty's remote-base fetches: at kustomize v0.21.1 krusty clones bases via
+	// exec.Command (not ctx-bound, abandoned after its own ~27s TimedCall but
+	// never killed) and fetches remote files with a bare &http.Client{} with no
+	// ctx seam. A hung krusty fetch is contained operationally, not by this
+	// deadline.
+	RenderTimeout time.Duration
 }
 
 // NewHelmLoader returns a production OCI+HTTP ChartLoader (no cache). The
@@ -115,7 +131,7 @@ func From(spec v1alpha1.Source, deps Deps) (Source, error) {
 			return nil, errors.New("source: kustomize source requires a RootResolver (none configured)")
 		}
 		resolver := withGitCreds(deps.RootResolver, deps.CredentialResolver, spec.Kustomize.AuthSecretRef)
-		inner := &kustomizeSource{spec: spec.Kustomize, resolver: resolver}
+		inner := &kustomizeSource{spec: spec.Kustomize, resolver: resolver, requireSHAPinnedRemoteBases: deps.RequireSHAPinnedRemoteBases, renderTimeout: deps.RenderTimeout}
 		return wrapKustomize(inner, resolver, spec.Kustomize, deps.RenderCache), nil
 	default:
 		return nil, errors.New("source: exactly one of source.helm or source.kustomize must be set")
