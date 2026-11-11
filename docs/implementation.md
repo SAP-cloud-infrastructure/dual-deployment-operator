@@ -1542,24 +1542,27 @@ The analogous gap does **not** exist on the kustomize path. [`internal/source/ku
 > is reachable (local dev, internal runners). The comparator's normalization/allowlist unit
 > tests always run offline.
 >
-> **`ipam-capi` equivalence is DEFERRED to a standalone future follow-up (not tied to any
-> phase).** It is not sequenced within the phase plan because closing it depends on a
-> `KustomizeSource` capability that is itself a separate CRD + source change; schedule it
-> independently once that extension exists. Two ipam-capi-specific blockers surfaced (the
-> first fixed here, the second deferred):
+> **`ipam-capi` equivalence — the shoot half HAS LANDED; only the seed half is
+> DEFERRED.** The shoot/`managedresources` overlay is exercised by
+> `TestEquivalenceIPAMCAPI` (gated on `RUN_KUSTOMIZE_EQUIVALENCE=1`, see
+> `internal/equivalence/ipam_capi_equivalence_test.go`). What remains deferred is
+> the seed/`manager` half, which depends on a `KustomizeSource` capability that is
+> itself a separate CRD + source change; schedule it independently once that
+> extension exists. Two ipam-capi-specific blockers surfaced (the
+> first fixed here, the second — seed-only — deferred):
 > 1. *Fixed in this change:* the production git `RootResolver` (`fetchSHA`) used a
 >    `Depth: 1` shallow fetch and could not check out an arbitrary historical commit
 >    SHA — see the `kustomize-root-resolver` spec delta + `TestGitResolverResolvesHistoricalSHA`.
-> 2. *Deferred:* ipam-capi's kustomize overlays reference patch files by
+> 2. *Deferred (seed overlay only):* ipam-capi's kustomize overlays reference patch files by
 >    **repo-root-relative** paths (`patches[].path: kustomize/ipam-capi-remote/manager/…`),
 >    so today's `make build-` runs kustomize from the repo root. The operator's
 >    `KustomizeSource` (`url` + `seedPath`/`shootPath`) resolves the build dir to the
 >    overlay **subdir**, so those relative patch paths double and the seed/`manager`
->    overlay fails to build (`no such file`). Closing ipam-capi equivalence requires
+>    overlay fails to build (`no such file`). Closing the seed half requires
 >    extending `KustomizeSource` so the clone root and the kustomize-build dir can differ
 >    (build from the repo root, target the overlay) — a CRD + source change (design §9.4),
 >    hence its own follow-up rather than part of the equivalence-tests change. The
->    `managedresources`/shoot overlay is self-contained and would render; only the
+>    `managedresources`/shoot overlay is self-contained and renders today; only the
 >    seed overlay is blocked.
 
 > **Subchart-wrapping equivalence fixture — FOLLOW-UP (Phase 7.6 regression guard).** Once
@@ -1802,6 +1805,74 @@ Also v2: cert-manager or self-signed cert rotation, ValidatingWebhookConfigurati
 Failure mode if v1 CR contains invalid patch content: reconcile fails, CR status shows condition `PatchApplicationFailed` with the error. Same as any other transformation failure.
 
 **Success criterion**: webhook scaffold builds; no-op ValidateCreate/ValidateUpdate methods pass tests; ValidatingWebhookConfiguration NOT deployed by v1's operator chart.
+
+---
+
+## Phase 11: Argo/Flux-aligned Kustomize remote bases
+
+Kustomize `resources`, `components`, and `bases` may refer to remote content. The
+operator deliberately delegates fetching those transitive references to krusty,
+matching the live-fetch model used by Argo CD and Flux; it does not prefetch them
+into a hermetic render pipeline.
+
+### Preflight policy and SHA pinning
+
+Before krusty renders the exact seed or shoot overlay, the operator walks the
+reachable kustomization tree and classifies remote references. Unsupported forms
+(including SSH, embedded user information, URL fragments, `http://`, and ambiguous
+repository paths) are rejected with sanitized errors. With strict pin enforcement
+enabled, the top-level remote references the operator parses must be SHA-pinned:
+a remote git directory must use the scheme-less GitHub shorthand
+`github.com/<owner>/<repo>//<path>?ref=<40-hex-sha>` (which krusty resolves via
+git, honoring the SHA), or a single remote file must be a canonical
+`https://raw.githubusercontent.com/<owner>/<repo>/<40-hex-sha>/<path>` URL. An
+`https://` git directory in a file-first field (`resources`/`bases`) is rejected
+in strict mode, because krusty attempts an HTTP GET of that URL before falling
+back to a git clone, so the `?ref=` SHA is not guaranteed to be honored;
+`components` are exempt (krusty loads them via the git route directly).
+
+The operator-level flag is:
+
+```text
+--kustomize-require-sha-pinned-remote-bases
+```
+
+It defaults to `false`, so tags and branches remain permitted unless an operator
+explicitly enables strict SHA enforcement. Enforcement applies to the top-level
+remote references the operator parses from the kustomization tree it can walk; it
+does NOT reach transitive bases nested inside remote repositories (krusty resolves
+those internally, and — matching Flux and Argo CD — no tool pre-enforces them). It
+does not change the existing source-root URL validation.
+
+### Runtime and deployment requirements
+
+- krusty fetches remote bases live when a `Render()` actually runs; seed and
+  shoot are rendered separately. The always-on render cache returns the prior
+  result and skips krusty on a cache hit, so a moved tag stays frozen until the
+  entry is evicted, the operator restarts, or the root SHA changes. There is no
+  hermetic offline render or SHA-keyed cache for this path. A fetch failure fails
+  the render closed, and the surfaced error is sanitized.
+- The operator image must include `git` on `PATH`: krusty's remote git cloner
+  invokes the Git executable.
+- Remote-base credentials are ambient/process-global Git configuration only;
+  there is no per-source `authSecretRef` wiring for Kustomize remote bases. Prefer
+  public bases or vendor content when credential isolation is needed.
+- Network egress is controlled operationally, not by an in-process host
+  allowlist. If deployments need to constrain which hosts can be fetched, their
+  NetworkPolicy must restrict operator Pod egress. The Gardener egress-label
+  prerequisite for connectivity is described in
+  [Phase 9](#phase-9-deployment-charts-2-days) under “Gardener egress labels on the
+  operator Pod”; see also the [remote-bases authoring guide](kustomize-remote-bases.md).
+
+SHA pinning is recommended for reproducibility, even when strict enforcement is
+off. Argo CD's [Best Practices](https://argo-cd.readthedocs.io/en/stable/user-guide/best_practices/)
+warn that an unpinned remote base can change meaning without a change to the
+application repository. The same caveat applies to this live-fetch model.
+
+**Success criterion**: supported remote references render through krusty after
+preflight; strict mode rejects unpinned remote refs before network access; the
+operator image supplies `git`; deployment NetworkPolicy provides any required
+egress restrictions.
 
 ---
 

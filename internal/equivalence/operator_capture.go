@@ -37,6 +37,27 @@ func CaptureOperator(ctx context.Context, cr *v1alpha1.DualDeploymentOperator, d
 	return seed, shoot, nil
 }
 
+// CaptureShootOnly drives the operator's render+transform pipeline for the shoot
+// mode only. It is used by fixtures where the seed overlay cannot be built (e.g.
+// the ipam-capi shoot-only fixture, whose seed/manager overlay uses repo-root-
+// relative patch paths that only resolve when building from the repo root).
+// No production interface is changed; this is a narrowly-scoped capture helper.
+func CaptureShootOnly(ctx context.Context, cr *v1alpha1.DualDeploymentOperator, deps source.Deps) (shootSet ObjectSet, err error) {
+	src, err := source.From(cr.Spec.Source, deps)
+	if err != nil {
+		return nil, fmt.Errorf("capture: source.From: %w", err)
+	}
+	transforms, err := transform.Build(cr.Spec.Transformations)
+	if err != nil {
+		return nil, fmt.Errorf("capture: transform.Build: %w", err)
+	}
+	shoot, err := renderMode(ctx, src, source.ModeShoot, cr.Spec.ShootNamespace, transforms)
+	if err != nil {
+		return nil, fmt.Errorf("capture: shoot: %w", err)
+	}
+	return shoot, nil
+}
+
 func renderMode(ctx context.Context, src source.Source, mode source.Mode, ns string, transforms []transform.Transformation) (ObjectSet, error) {
 	ms, err := src.Render(ctx, mode, ns)
 	if err != nil {

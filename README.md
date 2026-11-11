@@ -116,6 +116,30 @@ spec:
     server: https://api.shoot.example.com
 ```
 
+Remote **bases** referenced inside a kustomization (Argo CD/Flux-style
+`resources:`/`components:`/`bases:` entries pointing at a git URL) are fetched
+live when a reconcile renders. The always-on render cache skips krusty on a hit,
+so a moved tag stays frozen until eviction, pod restart, or root-SHA change.
+Pin bases to 40-character git SHAs for reproducibility; the operator-level
+`--kustomize-require-sha-pinned-remote-bases` flag (default `false`) enforces
+this only for top-level remote references parsed by the operator. It does not
+pre-enforce nested references, apply to Helm, or pin the kustomize root URL.
+
+Each render has a context deadline set by `--source-render-timeout` (default
+`5m`; `0` disables it); it bounds go-git root resolution only. It does not
+reach krusty's remote-base fetches — neither the `git` subprocess krusty runs
+(via `exec.Command`, not context-bound) nor its internal HTTP GET for remote
+files. Git CLI
+fetches are restricted to HTTPS, and the image's git configuration also blocks
+other protocols and redirects. Surfaced git/kustomize errors redact URL
+userinfo and query values except `ref`, `version`, `timeout`, and `submodules`.
+The chart's optional manager-pod-scoped egress NetworkPolicy and Gardener
+labels provide operational egress control, not in-process hostname-level
+control. Source trust is the user's responsibility, while network egress is
+the platform's. See the [remote-bases authoring and security
+guide](docs/kustomize-remote-bases.md) and the [egress/source-trust
+decision](docs/decisions/egress-hostname-control.md) for details.
+
 ### Transformations (optional)
 
 Applied to each render independently, in declaration order. All are silent no-ops when they

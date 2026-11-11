@@ -31,3 +31,24 @@ func TestLoadFixtureMetalOperator(t *testing.T) {
 		t.Errorf("exclusions not parsed: %+v", f.Exclusions)
 	}
 }
+
+func TestLoadFixtureIPAMCAPI(t *testing.T) {
+	f, err := LoadFixture("../../testdata/fixtures/ipam-capi")
+	if err != nil {
+		t.Fatalf("load fixture: %v", err)
+	}
+	if f.RepoURL == "" || f.SHA == "" {
+		t.Error("fixture must pin a git repo URL + SHA")
+	}
+	// ipam-capi uses kustomize golden render, not Helm; chartPath/chartFullname are empty.
+	if f.KustomizePath != "system/kustomize/ipam-capi-remote" {
+		t.Errorf("kustomizePath = %q, want system/kustomize/ipam-capi-remote", f.KustomizePath)
+	}
+	if f.CR == nil || f.CR.Spec.Source.Kustomize == nil {
+		t.Error("ipam-capi fixture CR must have a kustomize source")
+	}
+	// OverlayRaw is nil: this fixture uses RenderGoldenKustomize, not RenderGolden (Helm).
+	if len(f.OverlayRaw) != 0 {
+		t.Error("ipam-capi fixture must not load overlay values bytes (no Helm golden)")
+	}
+}

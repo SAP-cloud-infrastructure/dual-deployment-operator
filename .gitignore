@@ -55,3 +55,6 @@ testdata/rendered/
 
 # git worktrees
 .worktrees/
+
+# superpowers subagent-driven-development scratch workspace (per-plan ledger/briefs/reports)
+.superpowers/
