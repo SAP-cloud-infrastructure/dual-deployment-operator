@@ -95,7 +95,13 @@ spec:
         resources:
           limits:
             cpu: 500m
-            memory: 128Mi
+            # 512Mi (up from 128Mi): a SHA-pinned kustomize remote-base root is
+            # resolved via a full-depth git fetch (fetchSHA), which holds the
+            # entire packfile in memory. sapcc/helm-charts measures ~126Mi
+            # packed, so 128Mi OOM-kills the cold fetch. 512Mi (~4x) covers the
+            # fetch + checkout + GC headroom and leaves room for history growth.
+            # Interim mitigation until the shallow/partial-fetch fix lands — see issue #65.
+            memory: 512Mi
           requests:
             cpu: 10m
             memory: 64Mi
