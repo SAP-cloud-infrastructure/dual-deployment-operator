@@ -134,9 +134,12 @@ pinning as an opt-in flag, and can restrict who creates DDO resources through RB
   ~27s `TimedCall`, which abandons but never kills the subprocess, and fetches
   remote files with a bare `&http.Client{}` + `io.ReadAll` — neither has a
   context seam at kustomize `v0.21.1`. So the deadline effectively bounds the
-  root resolve only. A hung krusty remote-base fetch is contained operationally
-  (egress NetworkPolicy, Gardener labels) and by kustomize's internal ~27s git
-  budget, not by this deadline. A future hard-kill path (running the build as a
+  root resolve only. The ~27s `git` budget applies only to krusty's `git`
+  subprocess; the HTTP GET krusty tries first for every `https://` resource has
+  no timeout, so one reachable but silent host can block the single reconcile
+  worker while health probes pass. Egress controls (NetworkPolicy, Gardener
+  labels) only limit *which* hosts a fetch can reach, not *how long* it runs.
+  A future hard-kill path (running the build as a
   child process under `exec.CommandContext` in its own process group, the Argo CD
   `ARGOCD_EXEC_TIMEOUT` model) is documented for future consideration in the
   [remote-bases guide](../kustomize-remote-bases.md#render-duration-and-hard-timeouts).

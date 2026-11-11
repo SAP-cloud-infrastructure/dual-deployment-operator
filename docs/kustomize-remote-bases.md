@@ -176,13 +176,16 @@ remote-base fetches is **operational**, not in-process:
   `exec.CommandContext`) wrapped in kustomize's own ~27s `TimedCall`, which
   abandons the call but never kills the subprocess, and fetches remote *files*
   with a bare `&http.Client{}` + `io.ReadAll`. Neither has a context seam at
-  kustomize `v0.21.1`, so the operator's deadline cannot cancel them — a hung
-  remote-base fetch is contained operationally (egress NetworkPolicy, Gardener
-  labels) and by kustomize's internal ~27s git budget, not by this deadline. See
+  kustomize `v0.21.1`, so the operator's deadline cannot cancel them. The ~27s `git` budget applies
+  only to krusty's `git` subprocess; the HTTP GET krusty tries first for every
+  `https://` resource has no timeout at all, so a reachable host that never
+  answers blocks the single reconcile worker until the connection closes or the
+  pod restarts, while health probes keep passing. The egress NetworkPolicy and
+  Gardener labels only limit *which* hosts a fetch can reach — they gate *where*
+  a fetch may go, not *how long* it may run. See
   [Render duration and hard timeouts](#render-duration-and-hard-timeouts) for why
   a true hard-kill is not available in-process and the subprocess path considered
-  for the future. The egress NetworkPolicy and Gardener labels remain the layer
-  that gates *where* a fetch may go, as opposed to *how long* it may run.
+  for the future.
 
 ## Render duration and hard timeouts
 
@@ -231,9 +234,8 @@ sanitization must parse child `stderr` rather than a Go error value (re-validati
 the full credential-redaction allowlist against the new input), the test seams
 change from an in-process hook to a fake-binary/stdout seam, and the
 process-group kill must be sequenced after the child is reaped so it does not
-race the temp-directory cleanup. It is deferred until a hung krusty fetch that
-escapes kustomize's ~27s budget and the egress controls proves to be a real
-operational problem. Tracked as [cc/unified-kubernetes#1569](https://github.wdf.sap.corp/cc/unified-kubernetes/issues/1569).
+race the temp-directory cleanup. It is deferred and the uncontained-hung-fetch gap is tracked directly as
+[cc/unified-kubernetes#1569](https://github.wdf.sap.corp/cc/unified-kubernetes/issues/1569).
 
 ## Security and responsibility
 
