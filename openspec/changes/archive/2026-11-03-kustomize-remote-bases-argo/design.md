@@ -213,9 +213,9 @@ platform (NetworkPolicy, egress proxy, repo allowlists).
 
 Containment of hung, slow, or misdirected remote-base fetches is split by
 concern. **Duration** is bounded by a per-render `context.WithTimeout` from the
-`--source-render-timeout` flag (default `5m`), matching Flux
-`GitRepository.spec.timeout` and Argo CD `ARGOCD_EXEC_TIMEOUT` — it cancels a
-stalled go-git root resolve or `git` remote-base fetch and frees the reconcile
+`--source-render-timeout` flag (default `5m`), matching Flux's
+`GitRepository.spec.timeout` (a source-acquisition timeout) — it cancels a
+stalled go-git root resolve and frees the reconcile
 worker (it does not reach krusty's own internal `net/http` GET, which has no
 context seam). **Destination** is gated **operationally**: the chart's optional
 egress `NetworkPolicy` (D5), the Gardener egress labels on the manager pod, and

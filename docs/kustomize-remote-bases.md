@@ -166,8 +166,8 @@ remote-base fetches is **operational**, not in-process:
 - **Render duration is bounded by a context deadline — on the root resolve
   only.** A single render is wrapped with `context.WithTimeout` from the
   `--source-render-timeout` flag (default `5m`; set `0` to disable). This is the
-  community-norm bound for GitOps remote fetches — Flux uses
-  `GitRepository.spec.timeout`, Argo CD uses `ARGOCD_EXEC_TIMEOUT`. A context
+  community-norm bound for source acquisition — Flux's
+  `GitRepository.spec.timeout` bounds the clone the same way. A context
   deadline (not transport mutation) cancels a stalled **go-git root resolve**
   (`resolve → fetch → checkout` of the configured source URL, which DDO runs with
   context-aware go-git) and frees the reconcile worker instead of blocking it
@@ -207,12 +207,7 @@ client. It does **not** bound krusty's remote-base fetches, and at kustomize
   exported constructor that `Run` consumes. So a caller cannot make krusty's
   fetches respect a deadline in-process.
 
-**What contains a hung remote-base fetch today:** kustomize's internal ~27s git
-`TimedCall` (abandons the call), plus operational egress controls (the chart's
-optional manager-pod egress `NetworkPolicy` and the Gardener egress labels) that
-gate *where* a fetch may go. This matches Flux's posture: Flux's
-kustomize-controller also runs krusty in-process, and its `spec.timeout` is a
-reconcile timeout that does not hard-kill a blocked krusty operation.
+**What contains a hung remote-base fetch today — and what does not.** Kustomize gives up on a `git` command after its internal ~27s `TimedCall` but leaves the process running, and the HTTP GET it tries first for every `https://` resource has no timeout at all. A reachable host that completes the TLS handshake then never answers therefore blocks the single reconcile worker (`MaxConcurrentReconciles=1`) until the connection closes or the pod restarts, and the liveness/readiness probes keep passing throughout. The chart's optional manager-pod egress `NetworkPolicy` and the Gardener egress labels only limit *which* hosts can do that — they gate *where* a fetch may go, not *how long* it may run. This matches Flux's posture: Flux's kustomize-controller also runs krusty in-process, and its `spec.timeout` is a reconcile timeout that does not hard-kill a blocked krusty operation.
 
 ### Hard-kill via a child process — considered, not implemented
 
@@ -238,7 +233,7 @@ change from an in-process hook to a fake-binary/stdout seam, and the
 process-group kill must be sequenced after the child is reaped so it does not
 race the temp-directory cleanup. It is deferred until a hung krusty fetch that
 escapes kustomize's ~27s budget and the egress controls proves to be a real
-operational problem.
+operational problem. Tracked as [cc/unified-kubernetes#1569](https://github.wdf.sap.corp/cc/unified-kubernetes/issues/1569).
 
 ## Security and responsibility
 

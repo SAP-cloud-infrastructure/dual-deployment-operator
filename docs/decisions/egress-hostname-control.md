@@ -126,8 +126,8 @@ pinning as an opt-in flag, and can restrict who creates DDO resources through RB
   metadata endpoint (`169.254.169.254`) and internal services are blocked only if the
   platform drops `to-private-networks` (and link-local) behind a deny-all baseline.
 - Render duration is bounded by a `context.WithTimeout` from the
-  `--source-render-timeout` flag (default `5m`; `0` disables), matching Flux
-  `GitRepository.spec.timeout` and Argo CD `ARGOCD_EXEC_TIMEOUT`. The deadline
+  `--source-render-timeout` flag (default `5m`; `0` disables), matching Flux's
+  `GitRepository.spec.timeout` (a source-acquisition timeout). The deadline
   cancels a stalled go-git root resolve and frees the reconcile worker, but it
   does **not** reach krusty's remote-base fetches. Krusty runs its `git` clone
   through `exec.Command` (not `exec.CommandContext`) wrapped in kustomize's own
