@@ -907,6 +907,133 @@ var _ = Describe("DualDeploymentOperator controller", func() {
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(cond.Reason).To(Equal(ReasonDeleting))
 		})
+
+		It("keeps the CR in Deleting until a terminating seed resource is actually gone", func() {
+			cr := newDeleteCR("test-del-wait-seed")
+			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
+			ownedBy := manifest.OwnedByValue(cr.Namespace, cr.Name)
+
+			// A seed object with its own finalizer: Delete only marks it Terminating.
+			cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+				Name:       "seed-cm-terminating",
+				Namespace:  deleteNS,
+				Labels:     map[string]string{manifest.OwnedByLabel: ownedBy},
+				Finalizers: []string{"test.example.com/hold"},
+			}}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+
+			got := &ddov1alpha1.DualDeploymentOperator{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), got)).To(Succeed())
+			got.Status.SeedResources = []ddov1alpha1.ResourceStatus{
+				{Kind: "ConfigMap", APIVersion: "v1", Namespace: deleteNS, Name: cm.Name, Health: ddov1alpha1.HealthHealthy},
+			}
+			Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+
+			r := &DualDeploymentOperatorReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(10),
+				SeedApplier: &deliver.SSAApplier{
+					Client: k8sClient, FieldManager: FieldManagerName, Cluster: "seed",
+				},
+			}
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: cr.Name, Namespace: cr.Namespace}}
+
+			Expect(k8sClient.Delete(ctx, cr)).To(Succeed())
+			result, err := r.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(deletionPollInterval))
+
+			after := &ddov1alpha1.DualDeploymentOperator{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), after)).To(Succeed())
+			Expect(after.Finalizers).To(ContainElement(FinalizerName),
+				"finalizer must be retained while managed resources are still terminating")
+			cond := meta.FindStatusCondition(after.Status.Conditions, "Ready")
+			Expect(cond).ToNot(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal(ReasonDeleting))
+			Expect(cond.Message).To(ContainSubstring("Waiting for 1 resource(s) to be deleted"))
+			Expect(cond.Message).To(ContainSubstring("seed ConfigMap " + deleteNS + "/" + cm.Name))
+
+			// Release the seed object; the next reconcile completes the deletion.
+			live := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cm), live)).To(Succeed())
+			Expect(live.DeletionTimestamp.IsZero()).To(BeFalse())
+			live.Finalizers = nil
+			Expect(k8sClient.Update(ctx, live)).To(Succeed())
+
+			_, err = r.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			err = k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), &ddov1alpha1.DualDeploymentOperator{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "CR should be gone once its resources are gone")
+		})
+
+		It("keeps the CR in Deleting while shoot resources terminate, and force-delete skips the wait", func() {
+			for _, force := range []bool{false, true} {
+				name := "test-del-wait-shoot"
+				if force {
+					name += "-force"
+				}
+				cr := newDeleteCR(name)
+				if force {
+					cr.Annotations = map[string]string{ForceDeleteAnnotation: "true"}
+				}
+				Expect(k8sClient.Create(ctx, cr)).To(Succeed())
+				got := &ddov1alpha1.DualDeploymentOperator{}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), got)).To(Succeed())
+				got.Status.ShootResources = []ddov1alpha1.ResourceStatus{
+					{Kind: "ConfigMap", APIVersion: "v1", Namespace: "kube-system", Name: "shoot-cm", Health: ddov1alpha1.HealthHealthy},
+				}
+				Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+
+				shoot := &terminatingApplier{ownedBy: manifest.OwnedByValue(cr.Namespace, cr.Name)}
+				r := &DualDeploymentOperatorReconciler{
+					Client:   k8sClient,
+					Scheme:   k8sClient.Scheme(),
+					Recorder: events.NewFakeRecorder(10),
+					SeedApplier: &deliver.SSAApplier{
+						Client: k8sClient, FieldManager: FieldManagerName, Cluster: "seed",
+					},
+					shootApplierFor: func(_ context.Context, _ *ddov1alpha1.DualDeploymentOperator) (deliver.Applier, error) {
+						return shoot, nil
+					},
+				}
+				req := reconcile.Request{NamespacedName: types.NamespacedName{Name: cr.Name, Namespace: cr.Namespace}}
+
+				Expect(k8sClient.Delete(ctx, cr)).To(Succeed())
+				result, err := r.Reconcile(ctx, req)
+				Expect(err).NotTo(HaveOccurred())
+
+				if force {
+					err = k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), &ddov1alpha1.DualDeploymentOperator{})
+					Expect(apierrors.IsNotFound(err)).To(BeTrue(), "force-delete must not wait on shoot termination")
+					continue
+				}
+
+				Expect(result.RequeueAfter).To(Equal(deletionPollInterval))
+				after := &ddov1alpha1.DualDeploymentOperator{}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), after)).To(Succeed())
+				Expect(after.Finalizers).To(ContainElement(FinalizerName))
+				cond := meta.FindStatusCondition(after.Status.Conditions, "Ready")
+				Expect(cond).ToNot(BeNil())
+				Expect(cond.Reason).To(Equal(ReasonDeleting))
+				Expect(cond.Message).To(ContainSubstring("shoot ConfigMap kube-system/shoot-cm"))
+				Expect(meta.FindStatusCondition(after.Status.Conditions, "ShootCleanup")).To(BeNil(),
+					"normal termination is progress, not a blocked cleanup")
+
+				shoot.gone = true
+				_, err = r.Reconcile(ctx, req)
+				Expect(err).NotTo(HaveOccurred())
+				err = k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), &ddov1alpha1.DualDeploymentOperator{})
+				Expect(apierrors.IsNotFound(err)).To(BeTrue())
+			}
+		})
+	})
+
+	It("terminatingMessage caps the number of listed resources", func() {
+		waiting := []string{"a", "b", "c", "d", "e", "f", "g"}
+		Expect(terminatingMessage(waiting)).To(Equal(
+			"Waiting for 7 resource(s) to be deleted: a, b, c, d, e, and 2 more"))
 	})
 
 	It("preserves LastTransitionTime across reconciles when resource health is unchanged", func() {
@@ -1003,6 +1130,30 @@ func (a *degradingApplier) Delete(ctx context.Context, m manifest.Manifest, owne
 
 func (a *degradingApplier) Get(ctx context.Context, m manifest.Manifest) (*unstructured.Unstructured, error) {
 	return a.inner.Get(ctx, m)
+}
+
+// terminatingApplier accepts every Delete but reports the object as still present
+// (owned by ownedBy) until gone is set — simulating an object held by its own finalizer.
+type terminatingApplier struct {
+	ownedBy string
+	gone    bool
+}
+
+func (a *terminatingApplier) Apply(_ context.Context, m manifest.Manifest, _ string) (ddov1alpha1.ResourceStatus, error) {
+	return ddov1alpha1.ResourceStatus{Kind: m.Unstructured.GetKind(), Name: m.Unstructured.GetName()}, nil
+}
+
+func (a *terminatingApplier) Delete(_ context.Context, _ manifest.Manifest, _ string) error {
+	return nil
+}
+
+func (a *terminatingApplier) Get(_ context.Context, m manifest.Manifest) (*unstructured.Unstructured, error) {
+	if a.gone {
+		return nil, apierrors.NewNotFound(schema.GroupResource{}, m.Unstructured.GetName())
+	}
+	live := m.Unstructured.DeepCopy()
+	live.SetLabels(map[string]string{manifest.OwnedByLabel: a.ownedBy})
+	return live, nil
 }
 
 type alwaysFailDeleteApplier struct{}

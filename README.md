@@ -192,7 +192,7 @@ The `Ready` condition always reflects the situation right now:
 | `False` | `ResourcesDegraded` | One or more resources failed to apply / are unhealthy |
 | `False` | `WaitingForShootCredentials` | Shoot token/CA not yet populated by Gardener (benign bootstrap wait) |
 | `False` | `ShootApplyFailed` / `ShootUnreachable` | The shoot render could not be applied / the shoot is unreachable |
-| `False` | `Deleting` | The CR is being deleted; teardown is in progress |
+| `False` | `Deleting` | The CR is being deleted; teardown is in progress (the message lists resources still terminating) |
 
 Full status (`kubectl get ddo my-operator -o yaml`) also lists per-resource health under
 `status.seedResources` / `status.shootResources`, and each condition carries an
@@ -200,8 +200,17 @@ Full status (`kubectl get ddo my-operator -o yaml`) also lists per-resource heal
 
 ## Deleting
 
-`kubectl delete ddo my-operator` triggers a finalizer that tears down both renders. If the
-shoot is unreachable, deletion **blocks** (the CR shows a `ShootCleanup=Blocked` condition)
+`kubectl delete ddo my-operator` triggers a finalizer that tears down both renders. The CR
+stays in `Ready=False/Deleting` until every managed resource has actually disappeared (not
+just until the delete was issued), so objects held by their own finalizers or graceful
+termination keep the CR visible, with the condition message naming what is still pending:
+
+```
+NAME          READY   REASON
+my-operator   False   Deleting   # Waiting for 2 resource(s) to be deleted: seed Deployment ns/foo, ...
+```
+
+If the shoot is unreachable, deletion **blocks** (the CR shows a `ShootCleanup=Blocked` condition)
 and retries rather than orphaning shoot resources. To force removal and accept orphaned
 shoot resources:
 
@@ -210,7 +219,8 @@ kubectl annotate ddo my-operator dual-deployment-operator.cc.sap/force-delete=tr
 ```
 
 By default CRDs in the render are retained on delete; set `spec.retentionPolicy.crds: Delete`
-to remove them too.
+to remove them too. The force-delete annotation also stops waiting on still-terminating
+shoot resources; seed resources are always waited on.
 
 ## Local development
 
