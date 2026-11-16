@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -41,6 +42,14 @@ const (
 	FieldManagerName = "dual-deployment-operator"
 
 	requeueInterval = 10 * time.Minute
+
+	// deletionPollInterval is how often a deleting CR re-checks whether its managed
+	// resources have actually disappeared (managed objects are not watched).
+	deletionPollInterval = 5 * time.Second
+
+	// maxTerminatingListed caps how many still-terminating resources are named in the
+	// Ready condition message during deletion.
+	maxTerminatingListed = 5
 
 	// ForceDeleteAnnotation, when set to "true" on a CR being deleted, tells the
 	// reconciler to remove the finalizer even though shoot cleanup is incomplete —
@@ -301,7 +310,10 @@ func (r *DualDeploymentOperatorReconciler) Reconcile(ctx context.Context, req ct
 // the finalizer until all deletes succeed. If the shoot is unreachable (any error
 // building the shoot client), the finalizer is kept, a ShootUnreachable condition and
 // Event are set, and the CR is requeued. Seed and shoot resources are both deleted
-// explicitly (the applier sets no owner references).
+// explicitly (the applier sets no owner references). Because a Delete only initiates
+// deletion, the finalizer is also kept — with Ready=False/Deleting naming the resources
+// still present — until every deleted object has actually disappeared, polling every
+// deletionPollInterval. The force-delete annotation skips waiting on shoot resources only.
 func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, cr *ddov1alpha1.DualDeploymentOperator) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	ownedBy := manifest.OwnedByValue(cr.Namespace, cr.Name)
@@ -371,12 +383,32 @@ func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, 
 		return ctrl.Result{}, agg
 	}
 
-	// shootDone: nothing was pending, or the build succeeded and every delete succeeded.
-	shootDone := shootPending == 0 || (buildErr == nil && len(shootErrs) == 0)
+	// A Delete call only initiates deletion: objects with their own finalizers or
+	// graceful termination remain until they are actually gone. Keep the finalizer (and
+	// Ready=False/Deleting) until every owned object has disappeared, so the CR reflects
+	// the true teardown state instead of vanishing while its resources still terminate.
+	seedTerminating, seedGetErrs := r.terminatingResources(ctx, r.SeedApplier, "seed", cr.Status.SeedResources, cr, ownedBy)
+	if agg := kerrors.NewAggregate(seedGetErrs); agg != nil {
+		return ctrl.Result{}, agg
+	}
+	var shootTerminating []string
+	if shootApplier != nil && len(shootErrs) == 0 {
+		var shootGetErrs []error
+		shootTerminating, shootGetErrs = r.terminatingResources(ctx, shootApplier, "shoot", cr.Status.ShootResources, cr, ownedBy)
+		shootErrs = append(shootErrs, shootGetErrs...)
+	}
+
+	// shootDone: nothing was pending, or the build succeeded, every delete succeeded and
+	// every deleted shoot object is gone.
+	shootDone := shootPending == 0 || (buildErr == nil && len(shootErrs) == 0 && len(shootTerminating) == 0)
+	// shootWaiting: shoot cleanup is progressing normally (no errors), objects still terminating.
+	shootWaiting := !shootDone && buildErr == nil && len(shootErrs) == 0
 	forceDelete := cr.Annotations[ForceDeleteAnnotation] == "true"
 
 	outcome := "blocked"
 	switch {
+	case len(seedTerminating) > 0 || (shootWaiting && !forceDelete):
+		outcome = "waitingForTermination"
 	case shootDone:
 		outcome = "completed"
 	case forceDelete:
@@ -385,10 +417,25 @@ func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, 
 	logger.Info("Processed CR deletion",
 		"outcome", outcome,
 		"seedPending", deletable(cr.Status.SeedResources), "seedDeleteErrors", len(seedErrs),
+		"seedTerminating", len(seedTerminating),
 		"shootPending", shootPending, "shootDeleteErrors", len(shootErrs),
+		"shootTerminating", len(shootTerminating),
 		"shootDone", shootDone, "forceDelete", forceDelete)
 
 	switch {
+	case outcome == "waitingForTermination":
+		waiting := append(append([]string(nil), seedTerminating...), shootTerminating...)
+		meta.SetStatusCondition(&cr.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             ReasonDeleting,
+			Message:            terminatingMessage(waiting),
+			ObservedGeneration: cr.Generation,
+		})
+		if uErr := r.Status().Update(ctx, cr); uErr != nil && !apierrors.IsNotFound(uErr) {
+			return ctrl.Result{}, uErr
+		}
+		return ctrl.Result{RequeueAfter: deletionPollInterval}, nil
 	case shootDone:
 		controllerutil.RemoveFinalizer(cr, FinalizerName)
 		return ctrl.Result{}, r.Update(ctx, cr)
@@ -406,6 +453,62 @@ func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, 
 		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
+}
+
+// terminatingResources returns a human-readable identifier for every deletable resource in
+// statuses that still exists on the cluster and is owned by ownedBy (i.e. a Delete was
+// issued but the object has not disappeared yet). NotFound and NoMatch mean the object is
+// gone; objects no longer carrying our owned-by label are not ours to wait on. Any other
+// Get error is returned so the caller retries rather than assuming completion.
+func (r *DualDeploymentOperatorReconciler) terminatingResources(
+	ctx context.Context,
+	applier deliver.Applier,
+	cluster string,
+	statuses []ddov1alpha1.ResourceStatus,
+	cr *ddov1alpha1.DualDeploymentOperator,
+	ownedBy string,
+) ([]string, []error) {
+
+	if applier == nil {
+		return nil, nil
+	}
+	var remaining []string
+	var errs []error
+	for _, rs := range statuses {
+		if rs.Kind == "CustomResourceDefinition" && cr.Spec.RetentionPolicy.CRDs != "Delete" {
+			continue
+		}
+		live, err := applier.Get(ctx, deliver.ManifestFromStatus(rs))
+		if err != nil {
+			if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
+				continue
+			}
+			errs = append(errs, err)
+			continue
+		}
+		if live == nil || live.GetLabels()[manifest.OwnedByLabel] != ownedBy {
+			continue
+		}
+		id := rs.Kind + " " + rs.Name
+		if rs.Namespace != "" {
+			id = rs.Kind + " " + rs.Namespace + "/" + rs.Name
+		}
+		remaining = append(remaining, cluster+" "+id)
+	}
+	return remaining, errs
+}
+
+// terminatingMessage renders the Ready=False/Deleting message for resources that are
+// still being deleted, listing at most maxTerminatingListed of them.
+func terminatingMessage(waiting []string) string {
+	listed := waiting
+	suffix := ""
+	if len(listed) > maxTerminatingListed {
+		listed = listed[:maxTerminatingListed]
+		suffix = fmt.Sprintf(", and %d more", len(waiting)-maxTerminatingListed)
+	}
+	return fmt.Sprintf("Waiting for %d resource(s) to be deleted: %s%s",
+		len(waiting), strings.Join(listed, ", "), suffix)
 }
 
 // buildShootApplier constructs a shoot SSAApplier from the Gardener token-requestor
