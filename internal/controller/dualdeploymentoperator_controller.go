@@ -51,6 +51,10 @@ const (
 	// Ready condition message during deletion.
 	maxTerminatingListed = 5
 
+	// waitingMessagePrefix starts the Ready=False/Deleting message while managed
+	// resources are still terminating; used to detect the first poll of that state.
+	waitingMessagePrefix = "Waiting for"
+
 	// ForceDeleteAnnotation, when set to "true" on a CR being deleted, tells the
 	// reconciler to remove the finalizer even though shoot cleanup is incomplete —
 	// an explicit, auditable operator consent to orphaning remaining shoot resources.
@@ -318,17 +322,22 @@ func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, 
 	logger := log.FromContext(ctx)
 	ownedBy := manifest.OwnedByValue(cr.Namespace, cr.Name)
 
-	meta.SetStatusCondition(&cr.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionFalse,
-		Reason:             ReasonDeleting,
-		Message:            "CR deletion in progress",
-		ObservedGeneration: cr.Generation,
-	})
-	if uErr := r.Status().Update(ctx, cr); uErr != nil && !apierrors.IsNotFound(uErr) {
-		// A Conflict means our resourceVersion is stale; return so controller-runtime
-		// requeues with a fresh object and the Deleting condition is written on retry.
-		return ctrl.Result{}, uErr
+	// Write the initial Deleting condition once, on the first deletion pass. Later passes
+	// keep the more specific message (e.g. which resources are still terminating) instead
+	// of flapping it back to the generic one on every poll.
+	if prev := meta.FindStatusCondition(cr.Status.Conditions, "Ready"); prev == nil || prev.Reason != ReasonDeleting {
+		meta.SetStatusCondition(&cr.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             ReasonDeleting,
+			Message:            "CR deletion in progress",
+			ObservedGeneration: cr.Generation,
+		})
+		if uErr := r.Status().Update(ctx, cr); uErr != nil && !apierrors.IsNotFound(uErr) {
+			// A Conflict means our resourceVersion is stale; return so controller-runtime
+			// requeues with a fresh object and the Deleting condition is written on retry.
+			return ctrl.Result{}, uErr
+		}
 	}
 
 	deletable := func(statuses []ddov1alpha1.ResourceStatus) int {
@@ -392,17 +401,19 @@ func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, 
 		return ctrl.Result{}, agg
 	}
 	var shootTerminating []string
+	var shootGetErrs []error
 	if shootApplier != nil && len(shootErrs) == 0 {
-		var shootGetErrs []error
 		shootTerminating, shootGetErrs = r.terminatingResources(ctx, shootApplier, "shoot", cr.Status.ShootResources, cr, ownedBy)
-		shootErrs = append(shootErrs, shootGetErrs...)
 	}
+	// shootCleanupErrs: every shoot failure (Delete or termination check) that keeps shoot
+	// cleanup from completing; surfaced in the ShootCleanup condition message.
+	shootCleanupErrs := append(append([]error(nil), shootErrs...), shootGetErrs...)
 
 	// shootDone: nothing was pending, or the build succeeded, every delete succeeded and
 	// every deleted shoot object is gone.
-	shootDone := shootPending == 0 || (buildErr == nil && len(shootErrs) == 0 && len(shootTerminating) == 0)
+	shootDone := shootPending == 0 || (buildErr == nil && len(shootCleanupErrs) == 0 && len(shootTerminating) == 0)
 	// shootWaiting: shoot cleanup is progressing normally (no errors), objects still terminating.
-	shootWaiting := !shootDone && buildErr == nil && len(shootErrs) == 0
+	shootWaiting := !shootDone && buildErr == nil && len(shootCleanupErrs) == 0
 	forceDelete := cr.Annotations[ForceDeleteAnnotation] == "true"
 
 	outcome := "blocked"
@@ -419,12 +430,29 @@ func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, 
 		"seedPending", deletable(cr.Status.SeedResources), "seedDeleteErrors", len(seedErrs),
 		"seedTerminating", len(seedTerminating),
 		"shootPending", shootPending, "shootDeleteErrors", len(shootErrs),
-		"shootTerminating", len(shootTerminating),
+		"shootGetErrors", len(shootGetErrs), "shootTerminating", len(shootTerminating),
 		"shootDone", shootDone, "forceDelete", forceDelete)
 
 	switch {
 	case outcome == "waitingForTermination":
 		waiting := append(append([]string(nil), seedTerminating...), shootTerminating...)
+		// Shoot cleanup can be failing while seed objects are still terminating; surface it
+		// now rather than only after the seed side finishes. Warn once per transition into
+		// Blocked, since this branch polls every deletionPollInterval.
+		if !shootDone && !shootWaiting && !forceDelete {
+			cause := kerrors.NewAggregate(shootCleanupErrs)
+			if prev := meta.FindStatusCondition(cr.Status.Conditions, "ShootCleanup"); prev != nil && prev.Reason == "Blocked" {
+				meta.SetStatusCondition(&cr.Status.Conditions, shootCleanupBlockedCondition(cause))
+			} else {
+				r.recordShootCleanupBlocked(cr, cause)
+			}
+		}
+		// Record one Event when the CR starts waiting, not on every poll.
+		if prev := meta.FindStatusCondition(cr.Status.Conditions, "Ready"); r.Recorder != nil &&
+			(prev == nil || prev.Reason != ReasonDeleting || !strings.HasPrefix(prev.Message, waitingMessagePrefix)) {
+			r.Recorder.Eventf(cr, nil, corev1.EventTypeNormal, "WaitingForResourceDeletion",
+				"RetainFinalizer", "Waiting for %d managed resource(s) to be deleted before removing finalizer", len(waiting))
+		}
 		meta.SetStatusCondition(&cr.Status.Conditions, metav1.Condition{
 			Type:               "Ready",
 			Status:             metav1.ConditionFalse,
@@ -440,14 +468,14 @@ func (r *DualDeploymentOperatorReconciler) reconcileDelete(ctx context.Context, 
 		controllerutil.RemoveFinalizer(cr, FinalizerName)
 		return ctrl.Result{}, r.Update(ctx, cr)
 	case forceDelete:
-		r.recordShootCleanupForceDeleted(cr, kerrors.NewAggregate(shootErrs))
+		r.recordShootCleanupForceDeleted(cr, kerrors.NewAggregate(shootCleanupErrs))
 		if uErr := r.Status().Update(ctx, cr); uErr != nil {
 			logger.Error(uErr, "Failed to update status before force-delete finalizer removal")
 		}
 		controllerutil.RemoveFinalizer(cr, FinalizerName)
 		return ctrl.Result{}, r.Update(ctx, cr)
 	default:
-		r.recordShootCleanupBlocked(cr, kerrors.NewAggregate(shootErrs))
+		r.recordShootCleanupBlocked(cr, kerrors.NewAggregate(shootCleanupErrs))
 		if uErr := r.Status().Update(ctx, cr); uErr != nil {
 			return ctrl.Result{}, uErr
 		}
@@ -507,8 +535,8 @@ func terminatingMessage(waiting []string) string {
 		listed = listed[:maxTerminatingListed]
 		suffix = fmt.Sprintf(", and %d more", len(waiting)-maxTerminatingListed)
 	}
-	return fmt.Sprintf("Waiting for %d resource(s) to be deleted: %s%s",
-		len(waiting), strings.Join(listed, ", "), suffix)
+	return fmt.Sprintf("%s %d resource(s) to be deleted: %s%s",
+		waitingMessagePrefix, len(waiting), strings.Join(listed, ", "), suffix)
 }
 
 // buildShootApplier constructs a shoot SSAApplier from the Gardener token-requestor
@@ -608,12 +636,18 @@ func (r *DualDeploymentOperatorReconciler) recordShootCleanupBlocked(cr *ddov1al
 		r.Recorder.Eventf(cr, nil, corev1.EventTypeWarning, "ShootCleanupBlocked",
 			"RetainFinalizer", "Shoot cleanup incomplete; retaining finalizer. Set annotation %s=true to force deletion (orphans remaining shoot resources)", ForceDeleteAnnotation)
 	}
-	meta.SetStatusCondition(&cr.Status.Conditions, metav1.Condition{
+	meta.SetStatusCondition(&cr.Status.Conditions, shootCleanupBlockedCondition(cause))
+}
+
+// shootCleanupBlockedCondition builds the ShootCleanup=False/Blocked condition naming the
+// force-delete override annotation.
+func shootCleanupBlockedCondition(cause error) metav1.Condition {
+	return metav1.Condition{
 		Type:    "ShootCleanup",
 		Status:  metav1.ConditionFalse,
 		Reason:  "Blocked",
 		Message: fmt.Sprintf("waiting on shoot cleanup; set %s=true to force: %v", ForceDeleteAnnotation, cause),
-	})
+	}
 }
 
 // recordShootCleanupForceDeleted records that the operator explicitly consented to abandoning
